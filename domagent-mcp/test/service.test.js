@@ -288,6 +288,38 @@ test('connection replacement invalidates grants; an old close cannot remove the 
   assert.equal(ctx.app.bridge.targets(client.id)[0].state, 'approval_required');
 });
 
+test('selector failures remain specific; failed inspection clears active status even without a local end message', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const client = ctx.store.createClient(ctx.ownerId, 'Agent');
+  const grant = await activate(ctx, device, connection, client);
+  const other = ctx.store.createClient(ctx.ownerId, 'Unaffected client');
+  const otherGrant = await activate(ctx, device, connection, other);
+  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'CAPABILITY_UNAVAILABLE', 'PAGE_UNAVAILABLE']) {
+    const work = ctx.app.bridge.operate(client.id, grant.target_id, 'click', { selector: 'button' });
+    const rejected = assert.rejects(work, error => error.code === code);
+    const command = await connection.next('command');
+    connection.ws.send(JSON.stringify({
+      type: 'result', request_id: command.request_id, target_id: command.target_id, error: { code },
+    }));
+    await rejected;
+    const target = ctx.app.bridge.targets(client.id)[0];
+    assert.equal(target.state, code === 'PAGE_UNAVAILABLE' ? 'approval_required' : 'active');
+    assert.equal(target.target_id, code === 'PAGE_UNAVAILABLE' ? null : grant.target_id);
+  }
+  const ended = await connection.next('grant.end');
+  assert.equal(ended.reason, 'CAPABILITY_UNAVAILABLE');
+  connection.ws.send(JSON.stringify({
+    type: 'grant.end', target_id: grant.target_id, reason: 'CAPABILITY_UNAVAILABLE',
+  }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(ctx.app.bridge.connections.size, 1);
+  assert.equal(ctx.app.bridge.targets(other.id)[0].target_id, otherGrant.target_id);
+  await assert.rejects(ctx.app.bridge.operate(client.id, grant.target_id, 'navigate',
+    { url: 'https://ordinary.example/' }), /NOT_AUTHORIZED/);
+});
+
 test('pause discards pending work, protected navigation pauses, and revocation affects live grants', async t => {
   const ctx = await setup(t);
   const d = await enroll(ctx);

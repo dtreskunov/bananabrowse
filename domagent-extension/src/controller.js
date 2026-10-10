@@ -492,7 +492,8 @@ export class Controller {
           if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
           validateCommand(message, grant, this.connection, this.protectedOrigins(), this.now());
           if (this.now() >= queued.deadline) fail('OUTCOME_UNKNOWN');
-          if ((!after || message.operation !== 'navigate') &&
+          // These results acknowledge completed actions, not data from a new document.
+          if ((!after || !['navigate', 'click', 'type_text'].includes(message.operation)) &&
               grant.documentGeneration !== queued.documentGeneration) fail('TARGET_STALE');
         };
         try {
@@ -509,6 +510,9 @@ export class Controller {
           this.result(message, { code });
           if (['HANDOFF_REQUIRED', 'OUTCOME_UNKNOWN'].includes(code)) {
             await this.end(grant.target_id, 'HANDOFF');
+          } else if (code === 'PAGE_UNAVAILABLE') {
+            this.report(error);
+            await this.end(grant.target_id, 'CAPABILITY_UNAVAILABLE');
           }
         } finally {
           clearTimeout(timer);

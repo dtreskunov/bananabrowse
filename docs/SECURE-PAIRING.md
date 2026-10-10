@@ -119,6 +119,29 @@ or cross-origin frame execution interface is exposed.
 Unsupported safe evaluation or capture must return an explicit capability error.
 The screenshots must refer to the authorized tab, not the currently visible tab.
 
+Capabilities are also local grant selections. Page evaluation is unchecked by
+default in the approval UI; capture is offered only when the adapter exposes a
+target-specific capture API. Missing capabilities do not imply a server config
+error and must not be added remotely.
+
+CSS selectors use `document.querySelector`. Missing elements return
+`ELEMENT_NOT_FOUND`, and malformed CSS returns `INVALID_SELECTOR`; neither ends
+the grant. Implicit HTML defaults are not DOM attributes: a bare `<button>`
+submits its form but does not match `[type="submit"]`.
+
+Successful click/type acknowledgements can survive an ordinary navigation they
+triggered; page-derived results and commands queued for the old document still
+fail as `TARGET_STALE`. Never automatically retry a mutation after a stale or
+uncertain reply.
+
+Every operation requires inspection of the current document. If browser policy
+refuses that inspection, `PAGE_UNAVAILABLE` ends the local and server grant,
+discards queued work, and clears the active target. The connection and tab stay
+open; the owner must inspect or navigate it and locally approve a fresh target.
+Navigation is not a bypass for an uninspectable document. Optional script/CSP
+or capture failures alone remain `CAPABILITY_UNAVAILABLE` without ending an
+otherwise inspectable grant.
+
 Known auth signals, conservative heuristics, and explicit `request_handoff`
 pause control. Browser prompts and file selection need human intervention.
 Automatic login/CAPTCHA detection is best effort, not a secret-isolation guarantee.
@@ -196,10 +219,20 @@ Real Chrome tests have exercised packaged-extension control and the actual
 service's signed enrollment through real dashboard forms, cross-owner MCP
 routing, target-specific PNG capture, and pause.
 
-A native Firefox 146.0.1 RDP smoke test also passes signed pairing, local
-confirmation, trusted-UI grants, navigation/text, and pause. It uses pre-granted
-host permissions. Firefox permission prompts, screenshots, restrictive CSP,
-protected redirects/subresources, and restart behavior remain unqualified.
+A native Firefox 146.0.1 RDP test passes signed pairing, local confirmation,
+trusted-UI grants, navigation/text, form POST, and pause. It additionally verifies
+explicitly approved MAIN-world evaluation without extension APIs, CSP-denied
+evaluation without ending otherwise usable grants, protected fetch/image/frame
+requests and top-level redirects, refused document inspection, disconnect,
+fresh approval, and a full Firefox process restart. After reinstalling the
+temporary add-on in the same profile, identity/key persist, tab provenance is
+empty, and old grants remain invalid.
+
+The tested Firefox build does not expose `tabs.captureTab`; screenshots are
+therefore omitted from approval capabilities and return an explicit unsupported
+error. No visible-tab fallback is used. These tests pre-grant host permissions:
+physical optional-host prompts, notification UX, independently restarted
+background scripts, and other candidate browser versions still need qualification.
 The broader Firefox / Playwright 1.58.2 test is blocked by a crash inside
 Playwright's Juggler frame instrumentation after loading the options document;
 the native smoke avoids that instrumentation rather than weakening the extension.
@@ -215,9 +248,9 @@ compatible harness; this opt-in does not change production extension behavior.
 
 Before production:
 
-- Validate browser behaviors on the advertised Chrome/Firefox versions, especially
-  worker restart, protected redirects/subresources, page-world execution under
-  CSP, and target-specific capture.
+- Qualify physical optional-host permission/notification UX and repeat the browser
+  matrix on every advertised version. Validate independently restarted workers
+  and target-specific capture wherever that capability is advertised.
 - Validate a real configured OIDC provider, TLS termination, owner invitations,
   and browser cookie/Origin behavior.
 - Complete the live OneCLI verification for every advertised BananaClaw provider.

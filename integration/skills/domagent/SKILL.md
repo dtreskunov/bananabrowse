@@ -51,6 +51,19 @@ disabling TLS verification, or weakening extension permissions.
 - Chrome and Firefox may advertise different capabilities. Use only advertised
   operations. An unsupported operation is not permission to use raw CDP,
   privileged Firefox evaluation, or a screenshot of another tab.
+- Capabilities are chosen in local approval. `evaluate_script` is unchecked by
+  default; changing it requires a fresh local grant. A missing screenshot
+  capability may be deselected or unavailable in that browser. Do not infer a
+  configuration fault or automatically broaden the grant.
+- Selectors use ordinary CSS rules: `[type="submit"]` does not match a button
+  whose submit behavior comes from HTML defaults without an explicit attribute.
+  `ELEMENT_NOT_FOUND` means no match; `INVALID_SELECTOR` means invalid CSS.
+  `TARGET_STALE` means a document/target race, not a selector miss. Do not
+  automatically retry a mutating action on that error.
+- `PAGE_UNAVAILABLE` means the browser refused required document inspection.
+  The target loses authority and becomes `approval_required`, not falsely active.
+  Ask the owner to inspect or navigate the retained tab, then request fresh local
+  approval. Repeating operations with the old target cannot recover it.
 - Use `request_handoff` when authentication, CAPTCHA, file picking, browser
   permissions, or other human interaction is needed. The owner must approve
   resuming control locally afterward.

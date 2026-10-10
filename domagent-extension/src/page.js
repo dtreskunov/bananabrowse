@@ -10,9 +10,15 @@ export function pageHelper(operation, args = {}) {
   if (handoff) return { error: 'HANDOFF_REQUIRED' };
   if (operation === 'inspect') return { url: location.href };
   const selector = args.selector;
-  const element = selector ? document.querySelector(selector) : document.body;
+  let element;
+  try {
+    element = selector ? document.querySelector(selector) : document.body;
+  } catch (error) {
+    if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+    throw error;
+  }
   if (['click', 'type_text', 'get_text'].includes(operation) && !element) {
-    return { error: 'TARGET_STALE' };
+    return { error: 'ELEMENT_NOT_FOUND' };
   }
   if (operation === 'click') {
     const labelControl = element.closest('label')?.control;

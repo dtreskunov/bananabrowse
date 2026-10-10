@@ -39,6 +39,12 @@ Extension packages are generated under `dist/chrome` and `dist/firefox`.
 See the browser-specific guides for private-beta installation. Do not load the
 unbuilt source directories or rely on Firefox temporary installs for durable use.
 
+Prebuilt Chrome and Firefox ZIPs, checksums, and installation instructions are
+attached to the fork's [GitHub prereleases](https://github.com/dtreskunov/domagent/releases).
+Extract the browser-specific ZIP; it contains `manifest.json` at its root.
+Beta.2 uses extension manifest version `2.0.1` and service version `2.0.0-beta.2`.
+Update both components for the new page-inspection error handling.
+
 The server has no insecure development login or unsigned-device shortcut.
 Tests inject an internal mock identity provider and disposable state; these are
 not exposed by the production entrypoint.
@@ -46,8 +52,10 @@ not exposed by the production entrypoint.
 Real-browser validation is documented in
 [the browser test guide](domagent-extension/test/README.md). The default suite
 passes three Chrome/native-Firefox tests and explicitly skips one extended
-Firefox case blocked by Playwright's Juggler instrumentation. Core Firefox
-pairing/control is smoke-tested, not fully qualified for production.
+Firefox case blocked by Playwright's Juggler instrumentation. Native Firefox
+tests also cover page evaluation/CSP, protected requests, and full browser
+restart; physical permission prompts and other browser versions remain release
+gates. Target-specific screenshots are unavailable in the tested Firefox build.
 
 ## Deploy and enroll
 

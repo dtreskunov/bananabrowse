@@ -185,3 +185,17 @@ test('Firefox screenshots capture the target tab or advertise unavailable; never
   f.api.tabs.captureTab = async () => { throw new Error('Capture permission unavailable'); };
   await assert.rejects(f.adapter.execute(grant, 'get_screenshot', {}, () => {}), /CAPABILITY_UNAVAILABLE/);
 });
+
+test('failed document inspection is not an optional-operation capability failure', async () => {
+  const f = fixture('firefox');
+  f.adapter.onWarning = () => {};
+  f.api.scripting.executeScript = async () => { throw new Error('Browser refuses document injection'); };
+  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  for (const operation of ['navigate', 'get_text', 'get_interactive_elements']) {
+    await assert.rejects(f.adapter.execute(grant, operation,
+      operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {}), /PAGE_UNAVAILABLE/);
+  }
+  assert.equal(f.calls.some(call => call[0] === 'update'), false);
+  f.api.scripting.executeScript = async () => [{ error: new Error('Document execution failed') }];
+  await assert.rejects(f.adapter.inspect(100, grant.protected_origins), /PAGE_UNAVAILABLE/);
+});

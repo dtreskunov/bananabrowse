@@ -99,11 +99,21 @@ so configuration and grant decisions use the same trusted options-page runtime
 sender boundary; enrollment/status/final confirmation and pause use actual
 packaged controls. Owner approval is supplied through the real Store fixture.
 This does not qualify browser permission prompts or physical approval clicks.
-The native RDP smoke passes on Firefox 146.0.1 (11.3s), proving actual signed
-enrollment, final local confirmation, authentication, a fresh local grant,
-dedicated-tab navigation/text extraction through the actual MCP service, and
-local pause. Firefox screenshots, CSP behavior, protected redirect/subresource
-blocking, and browser restart still require separate real-browser qualification.
+The native RDP test passes on Firefox 146.0.1, proving actual signed enrollment,
+final local confirmation, authentication, dedicated-tab page control, and local
+pause. It additionally checks explicitly granted MAIN-world evaluation returns
+ordinary page values without extension APIs, while a restrictive page CSP returns
+`CAPABILITY_UNAVAILABLE` without ending the otherwise usable target.
+
+The tested build does not expose `browser.tabs.captureTab`, so capture is absent
+from advertised/granted capabilities and the MCP call explicitly fails. The test
+does not mistake this for a grant configuration problem or use visible-tab capture.
+
+Protected fetch, image, frame, and top-level redirect requests must never reach
+the fixture's protected endpoint. Disconnect and reconnection retain identity but
+require fresh local approval. A full Firefox process stop/relaunch, followed by
+temporary add-on reinstallation in the same profile, verifies device key/identity
+survival, empty session tab provenance, invalid old targets, and fresh approval.
 
 ```sh
 npm run test:browser -- --grep 'native Firefox RDP smoke' --reporter=line
@@ -116,12 +126,23 @@ Chrome approval override or changes to service files:
 npm run test:browser -- --grep 'real [cC]hrome|native Firefox RDP smoke' --reporter=line
 ```
 
-The 45 extension unit tests, source syntax checks, and both bundled builds pass.
+The extension unit tests, source syntax checks, and both bundled builds pass.
 
 Commands require an absolute `expires_at` timestamp from the original server
 enqueue. The extension takes the earlier of that deadline and its own local
 budget, and checks it again after asynchronous document inspection before issuing
 page work. It never retries an expired command.
+
+The native Firefox regression also covers an explicit attribute selector,
+no-match and malformed selectors, an implicit-submit button, a real form POST
+returning JSON with Firefox's JSON viewer enabled, and navigation back to HTML.
+It additionally configures a test-only loopback hostname as a Firefox-restricted
+domain. Refused document inspection must produce `PAGE_UNAVAILABLE`, end both
+local and server authority, preserve the connection/tab, and require fresh local
+approval. This tests a real browser policy refusal without claiming that every
+website-specific POST failure has been reproduced.
+Fresh-grant assertions read the actual state and require a new active target;
+the UI text `inactive` must never satisfy an `active` assertion.
 
 Browser-test host permissions are pre-granted in the fixture manifest, not in
 the production packages. Qualify the real optional-host permission prompts and
@@ -139,6 +160,28 @@ release, additionally load `dist/firefox/manifest.json` in Firefox
 128+ with a trusted-TLS service, verify local pairing/host prompts, CSP-denied
 evaluation, `captureTab` permission/availability, protected redirects/frames/
 subresources, background restart, and fresh approval after disconnect.
+
+### Physical Firefox beta.2 acceptance checks
+
+These require the operator's browser and are not covered by headless pre-granted
+fixtures. Load the released Firefox ZIP (manifest version `2.0.1`) and:
+
+1. Save the known service origin; decline and then accept the service-host prompt.
+   A decline must not enroll or connect the device.
+2. Start a local control approval; decline page-host permission and verify no
+   target activates. Retry locally, accept permission, and choose the intended
+   capabilities. Evaluation is unchecked by default; select it explicitly.
+3. Verify `1 + 1` through MCP on an ordinary page, then verify a CSP-denied page
+   fails evaluation without blocking text/navigation. Do not bypass CSP.
+4. Confirm screenshots are absent if `captureTab` is unavailable. If another
+   Firefox build exposes capture, verify its PNG comes from the authorized tab
+   while a different tab is visible.
+5. Repeat the reported form interaction. A CSS miss must be `ELEMENT_NOT_FOUND`.
+   A browser-refused document must end control with `PAGE_UNAVAILABLE`; inspect
+   or navigate the retained tab yourself before a fresh local approval.
+6. Verify the toolbar/notification makes pause, refusal, and disconnect visible.
+   Restarting Firefox removes a temporary install: reload it, verify identity,
+   and confirm no control returns until a new approval.
 
 Candidate minimum browser versions require release qualification. Password/
 CAPTCHA heuristics deliberately fail closed when detected, but are not complete

@@ -169,10 +169,13 @@ export class BrowserAdapter {
       });
     } catch (error) {
       this.onWarning(error);
-      fail('CAPABILITY_UNAVAILABLE');
+      fail(operation === 'inspect' ? 'PAGE_UNAVAILABLE' : 'CAPABILITY_UNAVAILABLE');
     }
     const response = responses?.[0];
-    if (!response || response.error || !response.result) fail('TARGET_STALE');
+    if (response?.error) {
+      fail(operation === 'inspect' ? 'PAGE_UNAVAILABLE' : 'CAPABILITY_UNAVAILABLE');
+    }
+    if (!response?.result) fail('TARGET_STALE');
     if (response.result.error) fail(response.result.error);
     return response.result;
   }

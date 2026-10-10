@@ -29,3 +29,26 @@ test('page eval returns structured data or an explicit unavailable result withou
   assert.deepEqual(await pageEvaluate('({ data: "<script>not markup</script>" })'),
     { value: { data: '<script>not markup</script>' } });
 });
+
+test('missing elements and invalid CSS selectors are distinct from a stale target', () => {
+  const originalDocument = globalThis.document;
+  const selectors = [];
+  globalThis.document = {
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      selectors.push(selector);
+      if (selector === 'button[') throw Object.assign(new Error('Invalid selector'), { name: 'SyntaxError' });
+      return null;
+    },
+  };
+  try {
+    for (const operation of ['click', 'type_text', 'get_text']) {
+      assert.deepEqual(pageHelper(operation, { selector: 'button[type="submit"]' }),
+        { error: 'ELEMENT_NOT_FOUND' });
+      assert.deepEqual(pageHelper(operation, { selector: 'button[' }), { error: 'INVALID_SELECTOR' });
+    }
+    assert(selectors.includes('button[type="submit"]'));
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});

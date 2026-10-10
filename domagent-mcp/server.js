@@ -178,10 +178,15 @@ export class BridgeServer {
       return;
     }
     if (m.type === 'grant.end') {
-      const grant = this.grants.get(m.target_id);
-      requireValue(grant && grant.device_id === session.device.id &&
-        grant.connection_id === session.connection_id, 'NOT_AUTHORIZED', 403);
+      requireValue(typeof m.target_id === 'string' && ID.test(m.target_id), 'INVALID_GRANT');
       requireValue(END_REASONS.has(m.reason), 'INVALID_REASON');
+      const grant = this.grants.get(m.target_id);
+      if (!grant) {
+        audit('grant_end_discarded', { device_id: session.device.id, code: 'TARGET_STALE' });
+        return;
+      }
+      requireValue(grant.device_id === session.device.id &&
+        grant.connection_id === session.connection_id, 'NOT_AUTHORIZED', 403);
       this.endGrant(m.target_id, m.reason);
       return;
     }
@@ -206,10 +211,11 @@ export class BridgeServer {
       if (m.error) {
         const code = ['HANDOFF_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'TARGET_STALE',
           'NOT_AUTHORIZED', 'INVALID_ARGUMENTS', 'OPERATION_FAILED', 'OUTCOME_UNKNOWN',
-          'COMMAND_EXPIRED'].includes(m.error.code)
+          'COMMAND_EXPIRED', 'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
         call.reject(new Fault(code));
         if (code === 'HANDOFF_REQUIRED' || code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
+        else if (code === 'PAGE_UNAVAILABLE') this.endGrant(m.target_id, 'CAPABILITY_UNAVAILABLE');
       } else {
         requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= 4 * 1024 * 1024,
           'INVALID_RESULT');

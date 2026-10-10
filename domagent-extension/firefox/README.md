@@ -18,6 +18,10 @@ injected only in the **MAIN page world**: never eval'd in the extension/content
 realm. Page CSP can make evaluation unavailable, which returns a typed failure.
 Screenshots use `tabs.captureTab(tabId)` only; if absent, screenshot capability
 is not advertised. No visible-tab substitution or placeholder exists.
+The tested Firefox 146.0.1 build does not expose that API to this extension;
+screenshots are unavailable there. `evaluate_script` is offered but unchecked
+by default: select it during fresh local approval to enable ordinary page
+evaluation, subject to the page's CSP.
 
 Control ends on pause, handoff, revoke, disconnect, missed heartbeat and restart.
 The tab remains open, and a fresh local approval is required. Tabs share website

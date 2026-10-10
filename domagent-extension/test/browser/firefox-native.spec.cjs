@@ -14,7 +14,8 @@ const { test, expect, firefox } = localRequire('@playwright/test');
 const { Client } = localRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
-test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page operations and pause', async () => {
+test('native Firefox RDP smoke: pairing, capabilities, protected requests, restart and regressions', async () => {
+  test.setTimeout(150_000);
   const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/store.js')).href);
   const { createApp } = await import(pathToFileURL(path.join(root, 'domagent-mcp/app.js')).href);
   const artifacts = path.join(root, 'domagent-extension/.browser-artifacts/firefox-native');
@@ -46,9 +47,16 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
   const cert = await fs.readFile(path.join(artifacts, 'cert.pem'), 'utf8');
   const ca = await fs.readFile(path.join(artifacts, 'ca.pem'), 'utf8');
   let app;
+  let protectedHits = 0;
   const tls = https.createServer({
     key: await fs.readFile(path.join(artifacts, 'key.pem')), cert,
   }, (req, res) => {
+    if (req.url === '/protected-hit') {
+      protectedHits++;
+      res.writeHead(200, { 'Access-Control-Allow-Origin': '*' });
+      res.end('protected endpoint must not be requested by an automation tab');
+      return;
+    }
     console.log('[native Firefox service request]', req.method, req.url);
     app.server.listeners('request')[0](req, res);
   });
@@ -69,8 +77,34 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
   });
   const backend = await app.listen();
   const pageServer = http.createServer((req, res) => {
+    if (req.url === '/redirect') {
+      res.writeHead(302, { Location: `${origin}/protected-hit` });
+      res.end();
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/submitted') {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ submitted: true }));
+      return;
+    }
     res.setHeader('Content-Type', 'text/html');
-    res.end('<!doctype html><title>Native Firefox page</title><h1>Native owned page</h1>');
+    if (req.url === '/csp') {
+      res.setHeader('Content-Security-Policy', "script-src 'self'");
+    }
+    if (req.url === '/resources') {
+      const protectedUrl = `${origin}/protected-hit`;
+      res.end('<!doctype html><title>Protected requests</title>' +
+        '<p id="fetch">pending</p><p id="frame">pending</p><p id="image">pending</p>' +
+        `<script>fetch(${JSON.stringify(protectedUrl)}).then(() => {
+          document.querySelector("#fetch").textContent = "fetch-escaped";
+        }, () => { document.querySelector("#fetch").textContent = "fetch-blocked"; });</script>` +
+        `<iframe src="${protectedUrl}"></iframe>` +
+        `<img src="${protectedUrl}" onerror="document.querySelector('#image').textContent='image-blocked'">`);
+      return;
+    }
+    res.end('<!doctype html><title>Native Firefox page</title><h1>Native owned page</h1>' +
+      '<form method="post" action="/submitted"><input name="customer">' +
+      '<button id="explicit" type="button">Non-submit</button><button id="submit">Submit</button></form>');
   });
   pageServer.listen(0, '127.0.0.1');
   await once(pageServer, 'listening');
@@ -78,26 +112,45 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
   const prefs = {
     'devtools.debugger.remote-enabled': true, 'devtools.debugger.prompt-connection': false,
     'devtools.debugger.force-local': true, 'devtools.chrome.enabled': true,
+    'devtools.jsonview.enabled': true,
+    'network.dns.localDomains': 'domagent-restricted.test',
+    'extensions.webextensions.restrictedDomains': 'domagent-restricted.test',
     'xpinstall.signatures.required': false, 'browser.shell.checkDefaultBrowser': false,
   };
   await fs.writeFile(path.join(profile, 'user.js'), Object.entries(prefs)
     .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`).join('\n'));
   // Standalone Firefox: the test drives RDP only, not Playwright's Juggler pipe.
-  const browser = spawn(firefox.executablePath(), [
-    '--no-remote', '--headless', '--profile', profile,
-    '--start-debugger-server', String(port), 'about:blank',
-  ], { env: { ...process.env, TMPDIR: artifacts }, stdio: ['ignore', 'pipe', 'pipe'] });
-  const browserExit = new Promise(resolve => browser.once('close', resolve));
+  let browser;
+  let browserExit;
   let browserError;
-  browser.on('error', error => { browserError = error; });
   let logs = '';
   const collect = data => { logs = (logs + data.toString()).slice(-16_000); };
-  browser.stdout.on('data', collect);
-  browser.stderr.on('data', collect);
+  function launch() {
+    browserError = undefined;
+    browser = spawn(firefox.executablePath(), [
+      '--no-remote', '--headless', '--profile', profile,
+      '--start-debugger-server', String(port), 'about:blank',
+    ], { env: { ...process.env, TMPDIR: artifacts }, stdio: ['ignore', 'pipe', 'pipe'] });
+    browserExit = new Promise(resolve => browser.once('close', resolve));
+    browser.on('error', error => { browserError = error; });
+    browser.stdout.on('data', collect);
+    browser.stderr.on('data', collect);
+  }
+  async function stopBrowser() {
+    if (rdp) rdp.close();
+    const running = () => browser.exitCode === null && browser.signalCode === null && !browserError;
+    if (running()) browser.kill('SIGTERM');
+    let timer;
+    await Promise.race([browserExit, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);
+    clearTimeout(timer);
+    if (running()) browser.kill('SIGKILL');
+    await browserExit;
+  }
   let rdp;
   let client;
   let optionsConsole;
-  try {
+  let parent;
+  async function connectOptions() {
     rdp = await openNativeRdp(port);
     if (browserError) throw browserError;
     const rootActor = await rdp.request('root', 'getRoot');
@@ -107,7 +160,7 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
     const descriptor = addons.find(addon => addon.id === installed.addon.id);
     expect(descriptor.warnings).toEqual([]);
     const { processDescriptor } = await rdp.request('root', 'getProcess', { id: 0 });
-    const { process: parent } = await rdp.request(processDescriptor.actor, 'getTarget');
+    ({ process: parent } = await rdp.request(processDescriptor.actor, 'getTarget'));
     const base64Cert = ca.replace(/-----[^-]+-----|\s/g, '');
     const optionsUrl = await rdp.evaluate(parent.consoleActor, `(() => {
       const db = Cc["@mozilla.org/security/x509certdb;1"].getService(Ci.nsIX509CertDB);
@@ -127,7 +180,11 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
     const { target } = await rdp.event(packet => packet.type === 'target-available-form' &&
       packet.target.url === optionsUrl);
     optionsConsole = target.consoleActor;
-    const evaluate = expression => rdp.evaluate(target.consoleActor, expression);
+  }
+  launch();
+  try {
+    await connectOptions();
+    const evaluate = expression => rdp.evaluate(optionsConsole, expression);
     const state = () => evaluate('browser.runtime.sendMessage({type:"ui.state"}).then(response => response.value)');
     const request = message => evaluate(`browser.runtime.sendMessage(${JSON.stringify(message)}).then(response => {
       if (!response.ok) throw new Error(response.error.code);
@@ -166,8 +223,12 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
     const access = await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
     expect(access.isError).not.toBe(true);
     await expect.poll(async () => (await state()).pending[0]?.client_id).toBe(credentials.id);
+    const advertised = (await state()).capabilities;
+    expect(advertised).toContain('evaluate_script');
+    expect(advertised.includes('get_screenshot'))
+      .toBe(await evaluate('typeof browser.tabs.captureTab === "function"'));
     await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
-      capabilities: ['navigate', 'get_text'] });
+      capabilities: ['navigate', 'get_text', 'click'] });
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
     const grant = (await state()).targets[0];
     const navigate = await client.callTool({ name: 'navigate', arguments: {
@@ -178,6 +239,167 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
     const text = await client.callTool({ name: 'get_text', arguments: { target_id: grant.target_id, selector: 'body' } });
     expect(text.isError).not.toBe(true);
     expect(JSON.stringify(text)).toContain('Native owned page');
+    for (const [name, args] of [['evaluate_script', { script: '1 + 1' }], ['get_screenshot', {}]]) {
+      const unapproved = await client.callTool({ name, arguments: { target_id: grant.target_id, ...args } });
+      expect(unapproved.isError).toBe(true);
+      expect(JSON.parse(unapproved.content[0].text)).toEqual({ error: 'CAPABILITY_UNAVAILABLE' });
+    }
+    const attributeClick = await client.callTool({ name: 'click', arguments: {
+      target_id: grant.target_id, selector: 'button[type="button"]',
+    } });
+    expect(attributeClick.isError).not.toBe(true);
+    const missing = await client.callTool({ name: 'click', arguments: {
+      target_id: grant.target_id, selector: 'button[type="submit"]',
+    } });
+    expect(missing.isError).toBe(true);
+    expect(JSON.parse(missing.content[0].text)).toEqual({ error: 'ELEMENT_NOT_FOUND' });
+    const invalid = await client.callTool({ name: 'click', arguments: {
+      target_id: grant.target_id, selector: 'button[',
+    } });
+    expect(invalid.isError).toBe(true);
+    expect(JSON.parse(invalid.content[0].text)).toEqual({ error: 'INVALID_SELECTOR' });
+    const submit = await client.callTool({ name: 'click', arguments: {
+      target_id: grant.target_id, selector: '#submit',
+    } });
+    expect(submit.isError).not.toBe(true);
+    expect(JSON.parse(submit.content[0].text)).toEqual({ clicked: true });
+    await expect.poll(() => evaluate(`browser.tabs.get(${grant.tabId}).then(tab => ({
+      status: tab.status, url: tab.url,
+    }))`)).toMatchObject({ status: 'complete', url: `http://127.0.0.1:${pageServer.address().port}/submitted` });
+    const afterPost = await client.callTool({ name: 'get_text', arguments: {
+      target_id: grant.target_id, selector: 'body',
+    } });
+    expect(afterPost.isError).not.toBe(true);
+    expect(JSON.stringify(afterPost)).toContain('submitted');
+    const recover = await client.callTool({ name: 'navigate', arguments: {
+      target_id: grant.target_id, url: `http://127.0.0.1:${pageServer.address().port}`,
+    } });
+    expect(recover.isError).not.toBe(true);
+    await expect.poll(() => evaluate(`browser.tabs.get(${grant.tabId}).then(tab => ({
+      status: tab.status, url: tab.url,
+    }))`)).toMatchObject({ status: 'complete', url: `http://127.0.0.1:${pageServer.address().port}/` });
+    const recovered = await client.callTool({ name: 'get_text', arguments: {
+      target_id: grant.target_id, selector: 'body',
+    } });
+    expect(recovered.isError).not.toBe(true);
+    expect(JSON.stringify(recovered)).toContain('Native owned page');
+    const refusedNavigation = await client.callTool({ name: 'navigate', arguments: {
+      target_id: grant.target_id, url: `http://domagent-restricted.test:${pageServer.address().port}/`,
+    } });
+    expect(refusedNavigation.isError).not.toBe(true);
+    await expect.poll(() => evaluate(`browser.tabs.get(${grant.tabId}).then(tab => tab.status)`)).toBe('complete');
+    const refused = await client.callTool({ name: 'get_text', arguments: {
+      target_id: grant.target_id, selector: 'body',
+    } });
+    expect(refused.isError).toBe(true);
+    expect(JSON.parse(refused.content[0].text)).toEqual({ error: 'PAGE_UNAVAILABLE' });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('inactive');
+    const status = await client.callTool({ name: 'list_browser_targets', arguments: {} });
+    expect(JSON.parse(status.content[0].text)[0]).toMatchObject({
+      state: 'approval_required', target_id: null, capabilities: [],
+    });
+    const staleNavigate = await client.callTool({ name: 'navigate', arguments: {
+      target_id: grant.target_id, url: `http://127.0.0.1:${pageServer.address().port}/`,
+    } });
+    expect(staleNavigate.isError).toBe(true);
+    expect(JSON.parse(staleNavigate.content[0].text)).toEqual({ error: 'NOT_AUTHORIZED' });
+    await evaluate(`browser.tabs.update(${grant.tabId}, {
+      url: ${JSON.stringify(`http://127.0.0.1:${pageServer.address().port}/`)},
+    })`);
+    await expect.poll(() => evaluate(`browser.tabs.get(${grant.tabId}).then(tab => tab.status)`)).toBe('complete');
+    const again = await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    expect(again.isError).not.toBe(true);
+    await expect.poll(async () => (await state()).pending[0]?.client_id).toBe(credentials.id);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: ['navigate', 'get_text', 'click'] });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    const fresh = (await state()).targets[0];
+    expect(fresh.target_id).not.toBe(grant.target_id);
+    await request({ type: 'ui.end', target_id: fresh.target_id, reason: 'OWNER_PAUSED' });
+    await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    await expect.poll(async () => (await state()).pending[0]?.client_id).toBe(credentials.id);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: advertised });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    const full = (await state()).targets[0];
+    const call = (name, args = {}) => client.callTool({
+      name, arguments: { target_id: full.target_id, ...args },
+    });
+    const read = async result => {
+      expect(result.isError).not.toBe(true);
+      return JSON.parse(result.content[0].text);
+    };
+    expect(await read(await call('evaluate_script', { script: '1 + 1' }))).toEqual({ value: 2 });
+    expect(await read(await call('evaluate_script', {
+      script: '[typeof globalThis.browser?.runtime, typeof globalThis.chrome?.runtime]',
+    }))).toEqual({ value: ['undefined', 'undefined'] });
+    console.log('[native Firefox qualification]', JSON.stringify({
+      version: await rdp.evaluate(parent.consoleActor, 'Services.appinfo.version'),
+      capabilities: advertised,
+    }));
+    const capture = await call('get_screenshot');
+    if (advertised.includes('get_screenshot')) {
+      expect(capture.isError).not.toBe(true);
+      expect(capture.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
+      expect(Buffer.from(capture.content[0].data, 'base64').subarray(0, 8).toString('hex'))
+        .toBe('89504e470d0a1a0a');
+    } else {
+      expect(capture.isError).toBe(true);
+      expect(JSON.parse(capture.content[0].text)).toEqual({ error: 'CAPABILITY_UNAVAILABLE' });
+    }
+    expect(await read(await call('navigate', {
+      url: `http://127.0.0.1:${pageServer.address().port}/csp`,
+    }))).toMatchObject({ navigation_started: true });
+    await expect.poll(() => evaluate(`browser.tabs.get(${full.tabId}).then(tab => tab.status)`)).toBe('complete');
+    const deniedEval = await call('evaluate_script', { script: '41 + 1' });
+    expect(deniedEval.isError).toBe(true);
+    expect(JSON.parse(deniedEval.content[0].text)).toEqual({ error: 'CAPABILITY_UNAVAILABLE' });
+    expect(await read(await call('get_text', { selector: 'body' }))).toMatchObject({
+      text: expect.stringContaining('Native owned page'),
+    });
+    await read(await call('navigate', { url: `http://127.0.0.1:${pageServer.address().port}/resources` }));
+    await expect.poll(() => evaluate(`browser.tabs.get(${full.tabId}).then(tab => tab.status)`)).toBe('complete');
+    await expect.poll(async () => (await read(await call('get_text', { selector: 'body' }))).text)
+      .toContain('fetch-blocked');
+    expect(await read(await call('get_text', { selector: 'body' }))).toMatchObject({
+      text: expect.stringContaining('image-blocked'),
+    });
+    expect(protectedHits).toBe(0);
+    const frames = await evaluate(`browser.webNavigation.getAllFrames({tabId:${full.tabId}})`);
+    expect(frames.filter(frame => frame.frameId !== 0).every(frame =>
+      frame.errorOccurred || frame.url === 'about:blank')).toBe(true);
+    await read(await call('navigate', { url: `http://127.0.0.1:${pageServer.address().port}/redirect` }));
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('inactive');
+    expect(protectedHits).toBe(0);
+    expect(app.bridge.grants.size).toBe(0);
+    await evaluate(`browser.tabs.update(${full.tabId}, {
+      url: ${JSON.stringify(`http://127.0.0.1:${pageServer.address().port}/`)},
+    })`);
+    await expect.poll(() => evaluate(`browser.tabs.get(${full.tabId}).then(tab => tab.status)`)).toBe('complete');
+    await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    await expect.poll(async () => (await state()).pending.length).toBe(1);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: ['navigate', 'get_text'] });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    const beforeReconnect = (await state()).targets[0].target_id;
+    await click('#disconnect');
+    await expect.poll(async () => (await state()).phase).toBe('disconnected');
+    expect((await state()).targets[0].state).toBe('inactive');
+    await click('#connect');
+    await expect.poll(async () => (await state()).phase).toBe('authenticated');
+    expect((await state()).identity.device_id).toBe(deviceId);
+    expect((await state()).targets[0].state).toBe('inactive');
+    const afterReconnect = await client.callTool({ name: 'get_text', arguments: {
+      target_id: beforeReconnect, selector: 'body',
+    } });
+    expect(afterReconnect.isError).toBe(true);
+    expect(JSON.parse(afterReconnect.content[0].text)).toEqual({ error: 'NOT_AUTHORIZED' });
+    await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    await expect.poll(async () => (await state()).pending.length).toBe(1);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: ['navigate', 'get_text'] });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    const pausedTarget = (await state()).targets[0].target_id;
     await expect.poll(() => evaluate(`Array.from(document.querySelectorAll("#targets button"))
       .some(element => element.textContent === "Pause")`)).toBe(true);
     await evaluate(`(() => {
@@ -187,8 +409,38 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
       button.click(); return true;
     })()`);
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('inactive');
-    const paused = await client.callTool({ name: 'get_text', arguments: { target_id: grant.target_id, selector: 'body' } });
+    const paused = await client.callTool({ name: 'get_text', arguments: { target_id: pausedTarget, selector: 'body' } });
     expect(paused.isError).toBe(true);
+    await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    await expect.poll(async () => (await state()).pending.length).toBe(1);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: ['navigate', 'get_text'] });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    const beforeRestart = (await state()).targets[0].target_id;
+    const keyBeforeRestart = (await state()).key_id;
+    await stopBrowser();
+    await expect.poll(() => app.bridge.grants.size).toBe(0);
+    launch();
+    await connectOptions();
+    await expect.poll(async () => (await state()).phase).toBe('authenticated');
+    expect((await state()).key_id).toBe(keyBeforeRestart);
+    expect((await state()).identity.device_id).toBe(deviceId);
+    expect((await state()).targets).toEqual([]);
+    const restarted = await client.callTool({ name: 'list_browser_targets', arguments: {} });
+    expect(JSON.parse(restarted.content[0].text)[0]).toMatchObject({
+      state: 'approval_required', target_id: null, capabilities: [],
+    });
+    const old = await client.callTool({ name: 'get_text', arguments: {
+      target_id: beforeRestart, selector: 'body',
+    } });
+    expect(old.isError).toBe(true);
+    expect(JSON.parse(old.content[0].text)).toEqual({ error: 'NOT_AUTHORIZED' });
+    await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
+    await expect.poll(async () => (await state()).pending.length).toBe(1);
+    await request({ type: 'ui.approve', request_id: (await state()).pending[0].request_id,
+      capabilities: ['navigate', 'get_text'] });
+    await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
+    expect((await state()).targets[0].target_id).not.toBe(beforeRestart);
   } catch (error) {
     if (rdp && optionsConsole) {
       try {
@@ -204,14 +456,7 @@ test('native Firefox RDP smoke: actual extension pairing, local grant, MCP page 
     throw error;
   } finally {
     if (client) await client.close();
-    if (rdp) rdp.close();
-    const running = () => browser.exitCode === null && browser.signalCode === null && !browserError;
-    if (running()) browser.kill('SIGTERM');
-    let timer;
-    await Promise.race([browserExit, new Promise(resolve => { timer = setTimeout(resolve, 5000); })]);
-    clearTimeout(timer);
-    if (running()) browser.kill('SIGKILL');
-    await browserExit;
+    await stopBrowser();
     await app.close();
     tls.closeAllConnections();
     pageServer.closeAllConnections();

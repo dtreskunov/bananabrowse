@@ -226,6 +226,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     }).toBe('complete');
   }
   async function approve(options, requestId) {
+    const previousTarget = target;
     socket.approval = { type: 'approval.request', ...socket.binding, request_id: requestId,
       client_id: 'client-test', client_label: '<script>untrusted label</script>',
       policy_id: 'page-control-v1', nonce: `nonce-${requestId}`, protected_origins: [origin],
@@ -235,7 +236,11 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await expect(options.locator('#requests script')).toHaveCount(0);
     await options.getByLabel('evaluate_script', { exact: false }).check();
     await options.getByRole('button', { name: 'Approve new dedicated-tab control' }).click();
-    await expect(options.locator('#targets')).toContainText('active');
+    await expect.poll(() => options.evaluate(async previous => {
+      const api = globalThis.browser || globalThis.chrome;
+      const state = (await api.runtime.sendMessage({ type: 'ui.state' })).value;
+      return state.targets.some(tab => tab.state === 'active' && tab.target_id !== previous);
+    }, previousTarget)).toBe(true);
     return options.evaluate(async () => {
       const api = globalThis.browser || globalThis.chrome;
       return (await api.runtime.sendMessage({ type: 'ui.state' })).value;

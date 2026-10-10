@@ -32,7 +32,7 @@ async function fixture() {
   const record = await keys.get(origin);
   record.identity = { device_id: 'device-1', owner_id: 'owner-1', owner_label: 'Owner' };
   const adapter = {
-    capabilities: () => ['navigate', 'get_text', 'evaluate_script'],
+    capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
     async initialize() {},
     async createTab(previous) { calls.push(['create', previous]); return { id: previous || tab++ }; },
     async protect(tabId, origins) { calls.push(['protect', tabId, origins]); },
@@ -444,5 +444,66 @@ test('closing a dedicated tab uses the agreed TARGET_CLOSED reason and removes i
   await flush();
   assert.equal(f.controller.inventory.length, 0);
   assert.equal(f.socket.sent.find(message => message.type === 'grant.end').reason, 'TARGET_CLOSED');
+  f.controller.dispose();
+});
+
+test('uninspectable documents end authority and queued work instead of leaving an active wedged target', async () => {
+  const f = await fixture();
+  const { grant } = await approve(f);
+  const first = command(grant);
+  const queued = command(grant);
+  f.adapter.execute = async () => { throw new Error('PAGE_UNAVAILABLE'); };
+  f.controller.enqueue(first);
+  f.controller.enqueue(queued);
+  await flush();
+  assert.equal(f.socket.sent.find(message => message.request_id === first.request_id).error.code, 'PAGE_UNAVAILABLE');
+  assert.equal(f.socket.sent.find(message => message.request_id === queued.request_id).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(f.socket.sent.find(message => message.type === 'grant.end').reason, 'CAPABILITY_UNAVAILABLE');
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(f.controller.snapshot().targets[0].state, 'inactive');
+  assert.equal(f.controller.inventory[0].tabId, grant.tabId);
+  assert.deepEqual(f.calls.at(-1), ['release', grant.tabId]);
+  assert.equal(f.controller.connection.connection_id, binding.connection_id);
+  f.controller.dispose();
+});
+
+test('optional-operation capability failures do not end otherwise inspectable grants', async () => {
+  const f = await fixture();
+  const { grant } = await approve(f);
+  f.adapter.execute = async () => { throw new Error('CAPABILITY_UNAVAILABLE'); };
+  f.controller.enqueue(command(grant));
+  await flush();
+  assert.equal(f.socket.sent.at(-1).error.code, 'CAPABILITY_UNAVAILABLE');
+  assert.equal(f.controller.grants.size, 1);
+  assert.equal(f.controller.snapshot().targets[0].state, 'active');
+  f.controller.dispose();
+});
+
+test('completed submit clicks acknowledge the action without authorizing queued work for the new document', async () => {
+  const f = await fixture();
+  await pending(f);
+  await f.controller.approve('approval-1', ['navigate', 'get_text', 'click']);
+  const grant = [...f.controller.grants.values()][0];
+  await f.controller.receive(JSON.stringify({
+    type: 'grant.active', target_id: grant.target_id, client_id: grant.client_id,
+  }), f.socket, f.controller.generation);
+  let completeClick;
+  f.adapter.execute = async (local, operation, args, check) => {
+    check();
+    f.calls.push(['execute', operation]);
+    await new Promise(resolve => { completeClick = resolve; });
+    f.controller.tabEvent(local.tabId, 'navigation', 'https://ordinary.example/submitted');
+    return { clicked: true };
+  };
+  const click = command(grant, { operation: 'click', args: { selector: 'button' } });
+  const queued = command(grant);
+  f.controller.enqueue(click);
+  f.controller.enqueue(queued);
+  completeClick();
+  await flush();
+  assert.deepEqual(f.socket.sent.find(message => message.request_id === click.request_id).result, { clicked: true });
+  assert.equal(f.socket.sent.find(message => message.request_id === queued.request_id).error.code, 'TARGET_STALE');
+  assert.deepEqual(f.calls.filter(call => call[0] === 'execute'), [['execute', 'click']]);
+  assert.equal(f.controller.grants.size, 1);
   f.controller.dispose();
 });

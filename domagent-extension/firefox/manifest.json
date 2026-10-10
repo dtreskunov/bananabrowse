@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Owner-approved dedicated-tab page control over authenticated HTTPS/WSS. No automatic tab adoption.",
   "browser_specific_settings": { "gecko": { "id": "domagent-secure@domagent", "strict_min_version": "128.0" } },
   "permissions": ["tabs", "storage", "scripting", "webNavigation", "notifications", "webRequest", "webRequestBlocking"],

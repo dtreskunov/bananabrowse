@@ -1,0 +1,10 @@
+.git
+**/node_modules
+dist
+data
+.env
+**/*.pem
+**/*.key
+deployment/oidc-client-secret
+**/test-results
+**/playwright-report

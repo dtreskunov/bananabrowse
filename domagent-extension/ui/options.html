@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DomAgent — secure browser control</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="ui.js" defer></script>
+</head>
+<body>
+  <h1>DomAgent</h1>
+  <p id="status" role="status">Loading extension state…</p>
+  <p id="error" role="alert"></p>
+  <section>
+    <h2>Service and local protection</h2>
+    <form id="config">
+      <label>Canonical HTTPS service origin <input id="origin" type="url" required placeholder="https://domagent.example.net"></label>
+      <label>Additional protected origins, one per line (IdP and optional BananaClaw management origin)
+        <textarea id="protected" rows="4" placeholder="https://login.example.net"></textarea>
+      </label>
+      <button type="submit">Save service (disconnects control)</button>
+    </form>
+    <p>The service origin and enrolled IdP/control-plane origins are always protected. Remote requests can add protection, never remove it.</p>
+    <ul id="protections"></ul>
+  </section>
+  <section>
+    <h2>Enroll this browser</h2>
+    <p id="identity">Not enrolled.</p>
+    <label>Device label <input id="label" maxlength="100" value="My browser"></label>
+    <button id="enroll" type="button">Start enrollment</button>
+    <div id="enrollment"></div>
+    <button id="check-enrollment" type="button">Check dashboard approval</button>
+    <button id="confirm-enrollment" type="button" disabled>Locally confirm displayed owner</button>
+  </section>
+  <section>
+    <h2>Connection</h2>
+    <button id="connect" type="button">Connect identity only</button>
+    <button id="disconnect" type="button">Disconnect and end all control</button>
+    <p>Connecting never restores grants. Browser/worker restart, lost heartbeat, and disconnect end all control.</p>
+  </section>
+  <section>
+    <h2>Pending local approvals</h2>
+    <p>A client may have been registered by another owner. Verify its stable client ID; its label is an unverified description, not a verified agent-group identity. Approval controls only this browser’s dedicated tab.</p>
+    <div id="requests"></div>
+  </section>
+  <section><h2>Dedicated automation tabs</h2><div id="targets"></div></section>
+  <section class="warning">
+    <h2>Before granting page control</h2>
+    <p>Each approved client gets an extension-created dedicated tab, never your existing active tab. HTTP(S) page access, including intranet sites, requires broad optional host permissions, requested when you approve. The service permission is requested when you save its origin.</p>
+    <p>This is not a separate browser profile or network sandbox. Tabs share your website logins. Page JavaScript can read page-visible secrets, non-HttpOnly cookies, local/session storage, and use ordinary page APIs to make network/account changes. Screenshots and text may contain secrets.</p>
+    <p>Pause stops new commands only. It cannot undo prior requests, side effects, or already scheduled JavaScript. Tabs stay open for inspection. Password/CAPTCHA detection is conservative, not a guarantee. Finish sensitive flows yourself, then request and confirm a fresh approval.</p>
+    <p>No raw CDP, browser profile/files, cookie export, download UI, permission UI, or current-tab adoption is exposed. Firefox page evaluation can be unavailable under a page CSP; screenshots use only the explicitly approved tab.</p>
+  </section>
+</body>
+</html>

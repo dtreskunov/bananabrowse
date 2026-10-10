@@ -1,0 +1,32 @@
+services:
+  domagent:
+    build: ..
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18792:18792"
+    environment:
+      DOMAGENT_ORIGIN: "${DOMAGENT_ORIGIN:?Set the canonical HTTPS origin}"
+      DOMAGENT_OIDC_ISSUER: "${DOMAGENT_OIDC_ISSUER:?Set the exact OIDC issuer}"
+      DOMAGENT_OIDC_CLIENT_ID: "${DOMAGENT_OIDC_CLIENT_ID:?Set the OIDC client ID}"
+      DOMAGENT_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      DOMAGENT_PROTECTED_ORIGINS: "${DOMAGENT_PROTECTED_ORIGINS:-}"
+    secrets:
+      - oidc_client_secret
+    volumes:
+      - domagent-data:/var/lib/domagent
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: journald
+      options:
+        tag: domagent
+secrets:
+  oidc_client_secret:
+    file: ./oidc-client-secret
+volumes:
+  domagent-data:

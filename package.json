@@ -1,0 +1,10 @@
+{
+  "name": "domagent-private",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm --prefix domagent-mcp run build",
+    "check": "npm --prefix domagent-mcp run check",
+    "test": "npm --prefix domagent-mcp test"
+  }
+}

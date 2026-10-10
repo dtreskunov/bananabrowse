@@ -20,14 +20,21 @@ Thank you for taking the time to contribute. This document covers how to report 
 ## Project Structure
 
 ```
-chrome-extension/
+domagent/
 ├── domagent-extension/
-│   ├── chrome/          <- Chrome extension (MV3, chrome.debugger API)
-│   └── firefox/         <- Firefox extension (MV3, content script relay)
-└── domagent-mcp/        <- Node.js MCP server (WebSocket bridge)
+│   ├── src/            <- Shared secure extension runtime
+│   ├── ui/             <- Packaged trusted approval UI
+│   ├── chrome/         <- Chrome manifest and installation guide
+│   ├── firefox/        <- Firefox manifest and installation guide
+│   └── test/           <- Unit and real-browser tests
+├── domagent-mcp/        <- OIDC dashboard, HTTP MCP, authenticated WSS
+├── shared/             <- Signing protocol and semantic operations
+├── deployment/         <- Independent service deployment examples
+└── dist/               <- Generated browser packages (not committed)
 ```
 
-Each component is independent. Changes to `domagent-mcp/` affect both browsers. Changes to `chrome/` or `firefox/` only affect that browser.
+Service, protocol, and shared runtime changes can affect both browsers. Browser
+differences belong in the adapter and must be advertised as capabilities.
 
 ---
 
@@ -35,8 +42,8 @@ Each component is independent. Changes to `domagent-mcp/` affect both browsers. 
 
 ### Prerequisites
 
-- Node.js 18 or newer
-- Chrome 88+ or Firefox 109+ (for testing)
+- Node.js 22.13 or newer
+- Chrome/Chromium or Firefox (candidate minimum versions need qualification)
 - A git client
 
 ### Local setup
@@ -47,14 +54,21 @@ cd domagent
 
 # Install MCP server dependencies
 cd domagent-mcp
-npm install
-npm start
+npm ci --ignore-scripts
+npm test
+npm run build
+npm run check
 ```
 
 Then load the extension for the browser you want to work on:
 
-- **Chrome:** `chrome://extensions` → Developer mode → Load unpacked → select `domagent-extension/chrome/`
-- **Firefox:** `about:debugging` → Load Temporary Add-on → select `domagent-extension/firefox/manifest.json`
+- **Chrome:** `chrome://extensions` → Developer mode → Load unpacked → select `dist/chrome/`
+- **Firefox:** `about:debugging` → Load Temporary Add-on → select `dist/firefox/manifest.json`
+
+Do not load unbuilt source directories. Follow [the deployment guide](docs/SECURE-PAIRING.md)
+to configure the required HTTPS origin, independent OIDC registration, and invited
+owner before starting the production service. There is no insecure development
+login or unauthenticated localhost bridge.
 
 See the browser-specific READMEs for full setup instructions:
 - [Chrome README](domagent-extension/chrome/README.md)
@@ -198,70 +212,44 @@ There is no automated linter configured yet. Follow the patterns already present
 
 - **Indentation:** 2 spaces (no tabs)
 - **Quotes:** Single quotes for strings in JavaScript
-- **Semicolons:** None (the existing codebase omits them)
+- **Semicolons:** Use semicolons, consistent with the secure-pairing runtime
 - **Comments:** Use plain English; comment the *why*, not the *what*
-- **Error handling:** Swallow errors silently only when explicitly safe to do so; always leave a comment explaining why
+- **Error handling:** Return explicit typed failures and metadata-only diagnostics;
+  never log page contents, credentials, signatures, or OIDC tokens
 
 ### Extension-specific
 
-- **Chrome `background.js`** — this is a MV3 service worker; avoid state that does not survive service-worker suspension without being saved to `chrome.storage.session`
-- **Firefox `background.js`** — persistent background script; no service-worker restrictions, but use the `api` shim (`const api = typeof browser !== 'undefined' ? browser : chrome`) for all API calls
-- **`content.js`** — runs in page context; do not assume access to extension APIs; use `window.postMessage` or the background script message channel for anything that needs extension privileges
+- Chrome uses an MV3 worker; Firefox uses a background script. Worker/browser
+  restart ends control and requires fresh approval, not grant restoration.
+- Dedicated-tab provenance is session-only. Device keys live in extension-private
+  IndexedDB. Do not adopt an arbitrary existing tab.
+- Supplied scripts execute only with ordinary page authority. Page messages cannot
+  approve grants or access extension credentials. Keep browser API calls in the
+  adapter and enforce trusted UI senders.
 
 ### MCP server (`domagent-mcp/`)
 
-- Keep `server.js` focused on the WebSocket bridge and CDP relay
-- Keep `index.js` focused on MCP tool registration and schema
-- New MCP tools go in `index.js`; the underlying browser command implementation goes in `server.js`
+- `index.js` configures and starts the service; `app.js` owns HTTP/OIDC/dashboard
+  routing; `server.js` owns authenticated WSS, grants, and command lifecycle.
+- MCP tool registration and schemas live in `mcp.js`; shared signing payloads and
+  operation names live in `shared/protocol.js`.
+- Do not reintroduce stdio authorization bypasses, raw CDP forwarding, direct
+  credential fallback, or remote approval.
 
 ---
 
 ## Testing Your Changes
 
-There is no automated test suite currently. Test manually using the following steps:
+From the repository root, run `npm test`, `npm run build`, and `npm run check`.
+For real-browser tests and known qualification limitations, follow
+[the browser test guide](domagent-extension/test/README.md). Its default suite
+exercises Chrome and a native Firefox core-flow smoke; the extended Firefox
+Juggler case is explicitly gated because of a confirmed harness crash.
 
-### MCP server
-
-```bash
-cd domagent-mcp && npm start
-```
-
-Confirm it prints:
-```
-DOMAgent Bridge running on ws://127.0.0.1:18792/extension
-```
-
-### Chrome extension
-
-1. Load unpacked from `domagent-extension/chrome/`
-2. Open `chrome://extensions` → confirm no errors on the extension card
-3. Open the Service Worker console: click "Service worker" link on the extension card
-4. Open any `https://` page — badge should show `ON`
-5. Confirm the MCP server logs: `Extension connected`
-
-### Firefox extension
-
-1. Load from `about:debugging` → select `domagent-extension/firefox/manifest.json`
-2. Click **Inspect** on the extension to open its console
-3. Open any `https://` page — badge should show `ON`
-4. Confirm the MCP server logs: `Extension connected`
-
-### End-to-end
-
-Configure an MCP client (Claude Desktop, etc.) to use:
-
-```json
-{
-  "mcpServers": {
-    "domagent": {
-      "command": "node",
-      "args": ["/absolute/path/to/domagent-mcp/index.js"]
-    }
-  }
-}
-```
-
-Then test each MCP tool (`navigate`, `click`, `type_text`, `get_screenshot`, etc.) to confirm your changes do not break existing behaviour.
+Before deployment, also verify real OIDC/TLS, optional-host permission prompts,
+protected navigation/subresources, restart behavior, and each provider's actual
+vault injection. MCP clients use authenticated Streamable HTTP at the HTTPS
+`/mcp` endpoint. Every page operation requires an explicit approved target.
 
 ---
 

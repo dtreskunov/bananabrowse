@@ -1,0 +1,14 @@
+:root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
+body { max-width: 850px; margin: 24px auto; padding: 0 16px; }
+body.popup { min-width: 390px; max-width: 480px; margin: 12px; padding: 0; }
+h1 { margin: 0; }
+h2 { font-size: 1.1rem; }
+section, article { border: 1px solid #888; border-radius: 6px; margin: 14px 0; padding: 12px; }
+label { display: block; margin: 10px 0; }
+input:not([type=checkbox]), textarea { display: block; box-sizing: border-box; width: 100%; padding: 7px; }
+button { margin: 4px; padding: 7px 10px; cursor: pointer; }
+button:disabled { cursor: default; }
+.warning { border-left: 4px solid #be6824; padding-left: 12px; }
+#error { color: #cc323a; overflow-wrap: anywhere; }
+p, li { overflow-wrap: anywhere; }
+.capability { display: inline-block; margin-right: 14px; }

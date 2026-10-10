@@ -2,3 +2,11 @@ node_modules/
 .DS_Store
 *.log
 npm-debug.log*
+dist/
+data/
+.env
+*.pem
+*.key
+test-results/
+playwright-report/
+deployment/oidc-client-secret

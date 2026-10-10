@@ -1,177 +1,115 @@
-# DOMAgent
+# DomAgent secure-pairing beta
 
-> **A browser extension + MCP server that lets AI agents control your real browser — no headless browsers, no puppets. Works with Chrome and Firefox.**
+A local development branch of [DomAgent](https://github.com/vaishnavucv/domagent)
+with independent browser-owner authorization, an HTTP MCP service, and Chrome
+and Firefox extensions. No GitHub fork or published package is required.
 
-The agent connects to the MCP server running on your machine, and the MCP server relays commands to the browser via the extension. Every action (click, type, screenshot, navigate…) happens in your real, already-open browser window.
-
-[![npm version](https://img.shields.io/npm/v/domagent)](https://www.npmjs.com/package/domagent)
-[![npm downloads](https://img.shields.io/npm/dm/domagent)](https://www.npmjs.com/package/domagent)
-
-```bash
-npx domagent
-```
-
----
-
-## Why DOMAgent?
-
-| Without DOMAgent | With DOMAgent |
-|---|---|
-| Headless browser — invisible, no session | Your real browser — logged in, cookies intact |
-| Slow Puppeteer/Playwright spin-up | Instant — extension already loaded |
-| Can't interact with your open tabs | Can adopt any tab you already have open |
-| Complex DevTools setup | One-click install + `npm start` |
-
----
+**This is a private beta, not a production security certification.** Review
+[validation gates](docs/SECURE-PAIRING.md#validation-and-release-gates) before
+using real authenticated browser sessions.
 
 ## Architecture
 
-```
-┌──────────────────┐  WebSocket   ┌──────────────────┐   stdio    ┌──────────────┐
-│  Browser         │◄────────────►│   MCP Server      │◄──────────►│  AI Agent    │
-│  Extension       │  CDP relay   │  (server.js)      │   MCP      │ (Claude,     │
-│  background.js   │              │  + index.js       │            │  Ollama, …)  │
-└──────────────────┘              └──────────────────┘            └──────────────┘
-```
-
-```
-chrome-extension/
-├── domagent-extension/
-│   ├── chrome/                  ← Chrome extension
-│   │   ├── background.js        ← Service worker (CDP via debugger API)
-│   │   ├── manifest.json
-│   │   ├── options.html / options.js
-│   │   └── icons/
-│   └── firefox/                 ← Firefox extension
-│       ├── background.js        ← Background script (content-script relay)
-│       ├── content.js           ← Content script injected into pages
-│       ├── manifest.json
-│       ├── options.html / options.js
-│       └── icons/
-└── domagent-mcp/                ← Node.js MCP server (runs locally)
-    ├── index.js
-    ├── server.js
-    └── package.json
+```text
+Browser extension -- outbound authenticated WSS --> Independent DomAgent service
+  private device signing key                        OIDC owner dashboard
+  local approval and semantic operations            /extension device bridge
+  dedicated per-client automation tabs              /mcp HTTP MCP
+                                                       ^
+Agent group -- per-group OneCLI credential injection --+
 ```
 
----
+DomAgent must be administered independently from BananaClaw, preferably on its
+own host or VM. A BananaClaw login does not authorize device enrollment or control.
+Device enrollment and every new control grant require trusted extension UI.
 
-## Available MCP Tools
+## Build and test locally
 
-| Tool | Description |
-|------|-------------|
-| `navigate` | Open a URL — reuses the automation tab (no duplicate tabs) |
-| `use_current_tab` | Adopt the user's active tab — no new tab created |
-| `click` | Click an element by CSS selector (shows orange visual indicator) |
-| `type_text` | Type into an input field by CSS selector (shows blue visual indicator) |
-| `get_text` | Get the text content of an element |
-| `evaluate_script` | Execute arbitrary JavaScript in the page |
-| `get_screenshot` | Capture a PNG screenshot of the current page |
-| `get_interactive_elements` | List all visible interactive elements with selectors and bounding boxes |
-| `clear_overlays` | Remove all visual overlay boxes from the page |
-
----
-
-## Tab Management
-
-The extension uses a **single automation tab** design so your other tabs are never hijacked:
-
-1. **First `navigate` call** → creates one new tab, pins it as the automation tab
-2. **Subsequent `navigate` calls** → reuses that same tab (navigates to the new URL)
-3. **`use_current_tab`** → adopts whatever tab is currently focused (no new tab)
-4. **All commands** (click, type, screenshot…) → always target the automation tab via session ID
-5. **Your other tabs** → never touched
-
----
-
-## Quick Start
-
-### 1. Start the MCP Server
+Node 22.13+ is required. Dependencies are pinned in the existing MCP package:
 
 ```bash
 cd domagent-mcp
-npm install
-npm start
+npm ci --ignore-scripts
+npm test
+npm run build
+npm run check
 ```
 
-The server starts a WebSocket on `ws://127.0.0.1:18792/extension` and waits for the browser extension to connect.
+Extension packages are generated under `dist/chrome` and `dist/firefox`.
+See the browser-specific guides for private-beta installation. Do not load the
+unbuilt source directories or rely on Firefox temporary installs for durable use.
 
-### 2. Load the Extension
+The server has no insecure development login or unsigned-device shortcut.
+Tests inject an internal mock identity provider and disposable state; these are
+not exposed by the production entrypoint.
 
-- **Chrome** → See [`domagent-extension/chrome/README.md`](domagent-extension/chrome/README.md)
-- **Firefox** → See [`domagent-extension/firefox/README.md`](domagent-extension/firefox/README.md)
+Real-browser validation is documented in
+[the browser test guide](domagent-extension/test/README.md). The default suite
+passes three Chrome/native-Firefox tests and explicitly skips one extended
+Firefox case blocked by Playwright's Juggler instrumentation. Core Firefox
+pairing/control is smoke-tested, not fully qualified for production.
 
-### 3. Connect your AI Agent
+## Deploy and enroll
 
-Configure your AI agent to use the MCP server via **stdio** transport.
+1. Register DomAgent directly with an HTTPS OIDC issuer. Its callback is
+   `https://your-domagent-host/oidc/callback`.
+2. Configure the canonical HTTPS origin, exact issuer, and client ID. Keep the
+   client secret in a restricted file, not agent configuration.
+3. Invite the browser owner by the issuer's immutable subject:
+   ```bash
+   DOMAGENT_DB=/var/lib/domagent/domagent.db \
+     node domagent-mcp/admin.js invite \
+     https://your-issuer.example owner-subject 'Browser owner'
+   ```
+   Use the **exact** issuer string, including any path/trailing slash.
+   Invitations expire after seven days and are consumed by first sign-in.
+4. Start the service behind a TLS reverse proxy, using
+   [systemd](deployment/domagent.service) or the
+   [container example](deployment/compose.yaml).
+5. In the extension, configure the HTTPS service origin and enroll. Check the
+   dashboard's reference/key and finish confirmation locally in the extension.
+6. Register an MCP client in the dashboard, securely import its once-shown
+   credential into your vault, and link it to the enrolled device. Other invited
+   browser owners may independently review and link that same public client ID
+   to their own devices.
+7. Request browser access through MCP and approve the dedicated tab locally.
 
-**Recommended — use the npm package (no path needed):**
+Never expose the plaintext backend port to the Internet. The deployment examples
+collect metadata through journald and disable raw reverse-proxy access logs.
 
-```json
-{
-  "mcpServers": {
-    "domagent": {
-      "command": "npx",
-      "args": ["domagent"]
-    }
-  }
-}
-```
+## BananaClaw integration
 
-**Alternative — run from source:**
+Reuse existing per-agent-group HTTP MCP configuration and OneCLI grants. Register
+one DomAgent identity per group. Do not share that credential globally or put the
+real token in materialized container configuration.
 
-```json
-{
-  "mcpServers": {
-    "domagent": {
-      "command": "node",
-      "args": ["/absolute/path/to/domagent-mcp/index.js"]
-    }
-  }
-}
-```
+[Agent-readable instructions](integration/skills/domagent/SKILL.md) can be
+installed as a container skill. They explain how to guide the user through
+independent enrollment and approval without handling raw secrets.
 
----
+**OneCLI integration is gated:** actual header injection and proxy traversal
+must be verified for each provider in the operator's deployment. This repository
+does not invent a working placeholder, claim that environment variables prove
+proxy use, or enable direct credential fallback.
 
-## Extension Options
+## Browser operations
 
-Right-click the extension icon → **Options** to configure the WebSocket connection:
+`list_browser_targets` and `request_browser_access` discover/request only your
+eligible devices. Requests return immediately while the owner reviews them.
+Every page operation requires an explicit active `target_id`.
 
-| Setting | Default |
-|---------|---------|
-| Host | `127.0.0.1` |
-| Port | `18792` |
-| WS Path | `/extension` |
+Available semantic operations: `navigate`, `click`, `type_text`, `get_text`,
+`evaluate_script`, `get_screenshot`, `get_interactive_elements`, `clear_overlays`,
+and `request_handoff`, subject to the browser's advertised capabilities.
 
----
+There is no raw CDP endpoint, `use_current_tab`, automatic user-tab attachment,
+cookie/profile export, or remote grant approval. The upstream unauthenticated
+stdio/local bridge is intentionally not retained as an authorization bypass.
 
-## Visual Indicators
+Control ends on pause, disconnect, restart, or revocation. Reconnect restores
+device identity only. Tabs stay open for human handoff; stopping new commands
+does not undo completed actions or previously scheduled page JavaScript.
 
-When the automation clicks or types, a brief visual indicator appears:
-
-- 🟠 **Orange dot** → click action
-- 🔵 **Blue dot** → type action
-- 🟡 **Yellow dashed box** → highlighted interactive element
-- 🟢 **Green dashed box** → highlighted typeable element
-
-Indicators pulse and fade automatically without interfering with the page.
-
----
-
-## How Chrome vs Firefox Differ
-
-| Feature | Chrome | Firefox |
-|---------|--------|---------|
-| DOM access method | `chrome.debugger` API (CDP) | Content script relay |
-| Background context | Service Worker | Persistent background script |
-| Debug banner | Yes (suppressible with flag) | No banner |
-| Min version | Any modern Chrome | Firefox 109+ |
-
----
-
-## Browser-Specific Guides
-
-| Browser | README |
-|---------|--------|
-| � Chrome | [`domagent-extension/chrome/README.md`](domagent-extension/chrome/README.md) |
-| 🦊 Firefox | [`domagent-extension/firefox/README.md`](domagent-extension/firefox/README.md) |
+Page JavaScript can access page-visible secrets and perform authenticated account
+actions. A dedicated tab is not an isolated browser profile or network sandbox.
+See [security details, protocol, and deployment](docs/SECURE-PAIRING.md).

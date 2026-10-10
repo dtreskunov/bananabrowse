@@ -1,6 +1,7 @@
 {
     "name": "domagent",
-    "version": "1.0.11",
+    "private": true,
+    "version": "2.0.0-beta.1",
     "description": "MCP server for DOMAgent — let AI agents control your real browser via Chrome or Firefox extension",
     "main": "index.js",
     "type": "module",
@@ -8,11 +9,14 @@
         "domagent": "./index.js"
     },
     "scripts": {
-        "start": "node index.js"
+        "start": "node index.js",
+        "test": "node --test test/*.test.js ../domagent-extension/test/*.test.js",
+        "build": "node ../scripts/build-extensions.mjs",
+        "test:browser": "playwright test --config ../domagent-extension/playwright.config.cjs",
+        "check": "node ../scripts/check.mjs"
     },
     "files": [
-        "index.js",
-        "server.js",
+        "*.js",
         "README.md"
     ],
     "keywords": [
@@ -37,11 +41,16 @@
         "url": "https://github.com/vaishnavucv/domagent/issues"
     },
     "engines": {
-        "node": ">=18.0.0"
+        "node": ">=22.13.0"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.27.1",
-        "ws": "^8.18.0"
+        "@modelcontextprotocol/sdk": "1.32.1",
+        "openid-client": "6.8.1",
+        "ws": "8.22.0"
+    },
+    "devDependencies": {
+        "@playwright/test": "1.58.2",
+        "esbuild": "0.25.12"
     },
     "publishConfig": {
         "registry": "https://registry.npmjs.org/"

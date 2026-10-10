@@ -5,7 +5,8 @@ import { Controller } from '../src/controller.js';
 import { DeviceKeys } from '../src/keys.js';
 
 const origin = 'https://control.example';
-const binding = { epoch: 'epoch-1', connection_id: 'connection-1' };
+const tenant_id = 't_abcdefghijklmnopqrstuv';
+const binding = { tenant_id, epoch: 'epoch-1', connection_id: 'connection-1' };
 const extensionUrl = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/';
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
 
@@ -29,8 +30,8 @@ async function fixture() {
   const keys = new DeviceKeys({
     async get() { return undefined; }, async put(record) { return record; },
   });
-  const record = await keys.get(origin);
-  record.identity = { device_id: 'device-1', owner_id: 'owner-1', owner_label: 'Owner' };
+  const record = await keys.get(origin, tenant_id);
+  record.identity = { tenant_id, tenant_label: 'Atlas', device_id: 'device-1', owner_id: 'owner-1', owner_label: 'Owner' };
   const adapter = {
     capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
     async initialize() {},
@@ -47,7 +48,7 @@ async function fixture() {
     inventoryStorage: { async get() { return saved; }, async set(value) { Object.assign(saved, value); } },
   });
   controller.report = error => controller.failures.push(error.message);
-  controller.config = { service_origin: origin, local_protected_origins: ['https://idp.example'], enabled: true };
+  controller.config = { service_origin: origin, tenant_id, local_protected_origins: ['https://idp.example'], enabled: true };
   controller.record = record;
   controller.connect();
   const socket = controller.socket;
@@ -77,14 +78,14 @@ async function approve(f, clientId = 'client-1', requestId = 'approval-1', ack =
   const request = await pending(f, clientId, requestId);
   await f.controller.approve(requestId, ['navigate', 'get_text']);
   const grant = [...f.controller.grants.values()].find(grant => grant.client_id === clientId);
-  if (ack) await f.controller.receive(JSON.stringify({ type: 'grant.active',
+  if (ack) await f.controller.receive(JSON.stringify({ type: 'grant.active', tenant_id,
     target_id: grant.target_id, client_id: clientId }), f.socket, f.controller.generation);
   return { grant, request };
 }
 
 test('handshake sends key-only hello and challenge-bound proof; no preauth commands', async () => {
   const f = await fixture();
-  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 1, key_id: f.record.key_id });
+  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 2, tenant_id, key_id: f.record.key_id });
   assert.equal(await verify(f.record.public_key, authPayload(f.challenge), f.socket.sent[1].signature), true);
   assert.match(f.socket.url, /^wss:/);
   const generation = f.controller.generation;
@@ -105,6 +106,7 @@ test('native browser fetch is invoked with its required global receiver', async 
       adapter: {}, extensionUrl, keys: {}, storage: {}, inventoryStorage: {},
     });
     controller.config.service_origin = origin;
+    controller.config.tenant_id = tenant_id;
     assert.deepEqual(await controller.api('challenge'), { nonce: 'test' });
   } finally {
     globalThis.fetch = originalFetch;
@@ -361,7 +363,7 @@ test('a command expiring behind an earlier serialized operation never starts', a
 test('server COMMAND_EXPIRED is reported and invalidates all local command authority', async () => {
   const f = await fixture();
   await approve(f);
-  f.socket.onmessage({ data: JSON.stringify({ type: 'error', code: 'COMMAND_EXPIRED' }) });
+  f.socket.onmessage({ data: JSON.stringify({ type: 'error', tenant_id, code: 'COMMAND_EXPIRED' }) });
   await flush();
   assert.ok(f.controller.failures.includes('COMMAND_EXPIRED'));
   assert.equal(f.controller.grants.size, 0);
@@ -374,7 +376,7 @@ test('a late ping after background suspension cannot resurrect a stale grant', a
   const f = await fixture();
   await approve(f);
   f.advance(LIVENESS_MS + 1);
-  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'ping' }),
+  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'ping', tenant_id }),
     f.socket, f.controller.generation), /BROWSER_OFFLINE/);
   assert.equal(f.controller.grants.size, 0);
   assert.equal(f.controller.connection, null);
@@ -385,7 +387,7 @@ test('an expired ACK cannot activate a grant before the timer sweep', async () =
   const f = await fixture();
   const { grant } = await approve(f, 'client-1', 'approval-1', false);
   f.advance(10_001);
-  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'grant.active',
+  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'grant.active', tenant_id,
     target_id: grant.target_id, client_id: grant.client_id }),
   f.socket, f.controller.generation), /APPROVAL_REQUIRED/);
   assert.equal(f.controller.grants.size, 0);
@@ -418,7 +420,7 @@ test('server-requested human handoff ends authority and explicitly notifies the 
   const notifications = [];
   f.controller.notify = (...args) => notifications.push(args);
   const { grant } = await approve(f);
-  await f.controller.receive(JSON.stringify({ type: 'grant.end', target_id: grant.target_id, reason: 'HANDOFF' }),
+  await f.controller.receive(JSON.stringify({ type: 'grant.end', tenant_id, target_id: grant.target_id, reason: 'HANDOFF' }),
     f.socket, f.controller.generation);
   assert.equal(f.controller.grants.size, 0);
   assert.match(notifications.at(-1)[1], /Prior\/scheduled JavaScript is not undone/);
@@ -429,7 +431,7 @@ test('service timeout/offline/replacement reasons tear down grants without emitt
   for (const reason of ['OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'REPLACED']) {
     const f = await fixture();
     const { grant } = await approve(f);
-    await f.controller.receive(JSON.stringify({ type: 'grant.end', target_id: grant.target_id, reason }),
+    await f.controller.receive(JSON.stringify({ type: 'grant.end', tenant_id, target_id: grant.target_id, reason }),
       f.socket, f.controller.generation);
     assert.equal(f.controller.grants.size, 0);
     assert.equal(f.socket.sent.some(message => message.type === 'grant.end'), false);
@@ -485,7 +487,7 @@ test('completed submit clicks acknowledge the action without authorizing queued 
   await f.controller.approve('approval-1', ['navigate', 'get_text', 'click']);
   const grant = [...f.controller.grants.values()][0];
   await f.controller.receive(JSON.stringify({
-    type: 'grant.active', target_id: grant.target_id, client_id: grant.client_id,
+    type: 'grant.active', tenant_id, target_id: grant.target_id, client_id: grant.client_id,
   }), f.socket, f.controller.generation);
   let completeClick;
   f.adapter.execute = async (local, operation, args, check) => {
@@ -505,5 +507,110 @@ test('completed submit clicks acknowledge the action without authorizing queued 
   assert.equal(f.socket.sent.find(message => message.request_id === queued.request_id).error.code, 'TARGET_STALE');
   assert.deepEqual(f.calls.filter(call => call[0] === 'execute'), [['execute', 'click']]);
   assert.equal(f.controller.grants.size, 1);
+  f.controller.dispose();
+});
+
+test('missing or different tenant on every inbound message cannot authorize, stop or execute work', async () => {
+  const f = await fixture();
+  const { grant } = await approve(f);
+  for (const type of ['ping', 'grant.active', 'grant.end', 'approval.request', 'command', 'authenticated', 'challenge']) {
+    for (const tenant of [undefined, 't_ABCDEFGHIJKLMNOPQRSTUV']) {
+      await assert.rejects(f.controller.receive(JSON.stringify({
+        ...command(grant), type, tenant_id: tenant, reason: 'REVOKED',
+      }), f.socket, f.controller.generation), /NOT_AUTHORIZED/);
+    }
+  }
+  assert.equal(grant.state, 'active');
+  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
+  assert.equal(f.socket.sent.every(message => message.tenant_id === tenant_id), true);
+  f.controller.dispose();
+});
+
+test('switching saved pairs immediately invalidates running/queued work and never restores old grants', async () => {
+  const f = await fixture();
+  const { grant } = await approve(f);
+  let finish;
+  f.adapter.execute = async () => new Promise(resolve => { finish = resolve; });
+  f.controller.enqueue(command(grant));
+  f.controller.enqueue(command(grant));
+  await flush();
+  const secondTenant = 't_ABCDEFGHIJKLMNOPQRSTUV';
+  const second = await f.controller.keys.get(origin, secondTenant);
+  second.identity = { tenant_id: secondTenant, tenant_label: 'Harbor', owner_id: 'owner-1',
+    owner_label: 'Owner', device_id: 'device-2' };
+  f.controller.keys.get = async (url, tenant) => tenant === tenant_id ? f.record : second;
+  await f.controller.saveConnection(f.record);
+  await f.controller.saveConnection(second);
+  const switching = f.controller.switchConnection(second.connection_url);
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(grant.queue.length, 0);
+  assert.equal(f.socket.readyState, 3);
+  await switching;
+  assert.equal(f.controller.record.key_id, second.key_id);
+  assert.notEqual(second.key_id, f.record.key_id);
+  assert.deepEqual(f.controller.snapshot().targets, []);
+  finish({ text: 'old result' });
+  await flush();
+  assert.equal(f.controller.socket.sent.some(message => message.type === 'result'), false);
+  await f.controller.switchConnection(f.record.connection_url);
+  assert.equal(f.controller.record.key_id, f.record.key_id);
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(f.controller.snapshot().targets[0].state, 'inactive');
+  assert.deepEqual(f.controller.config.local_protected_origins, ['https://idp.example']);
+  f.controller.dispose();
+});
+
+test('origin-only legacy config never loads keys or authenticates and requires fresh pairing', async () => {
+  let loads = 0;
+  const controller = new Controller({
+    adapter: { async initialize() {}, capabilities: () => [] },
+    keys: { async get() { loads++; } }, extensionUrl, Socket,
+    storage: { async get() { return { config: { service_origin: origin, enabled: true } }; } },
+    inventoryStorage: { async get() { return {}; } },
+  });
+  await controller.initialize();
+  assert.equal(loads, 0);
+  assert.equal(controller.socket, null);
+  assert.equal(controller.record, null);
+  assert.equal(controller.config.service_origin, '');
+  controller.dispose();
+});
+
+test('banner stop is scoped to the active tab, frame and document, and cannot approve or resume', async () => {
+  const f = await fixture();
+  f.adapter.indicator = async () => ({ url: 'https://page.example/', documentId: 'document-1' });
+  const { grant } = await approve(f);
+  await flush();
+  const sender = { id: 'extension-id', frameId: 0, tab: { id: grant.tabId },
+    url: 'https://page.example/', documentId: 'document-1' };
+  const stop = { type: 'page.stop', target_id: grant.target_id, token: grant.indicatorToken };
+  for (const wrong of [
+    { ...sender, id: 'other' }, { ...sender, frameId: 2 }, { ...sender, tab: { id: grant.tabId + 1 } },
+    { ...sender, documentId: 'old-document' }, { ...sender, url: 'https://other.example/' },
+  ]) assert.throws(() => f.controller.stopFromPage(stop, wrong, 'extension-id'), /NOT_AUTHORIZED/);
+  for (const type of ['ui.approve', 'ui.resume', 'ui.configure']) {
+    assert.throws(() => f.controller.stopFromPage({ ...stop, type }, sender, 'extension-id'), /NOT_AUTHORIZED/);
+  }
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://page.example/');
+  assert.throws(() => f.controller.stopFromPage(stop, sender, 'extension-id'), /NOT_AUTHORIZED/);
+  f.controller.tabEvent(grant.tabId, 'complete');
+  await flush();
+  assert.notEqual(grant.indicatorToken, stop.token);
+  const stopping = f.controller.stopFromPage({ ...stop, token: grant.indicatorToken }, sender, 'extension-id');
+  assert.equal(f.controller.grants.size, 0);
+  await stopping;
+  f.controller.dispose();
+});
+
+test('cosmetic marker failures warn, but independent authority and toolbar state stay active', async () => {
+  const f = await fixture();
+  f.adapter.indicator = async () => { throw new Error('cosmetic failure'); };
+  const { grant } = await approve(f);
+  await flush();
+  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), true);
+  assert.equal(f.controller.snapshot().targets[0].state, 'active');
+  f.controller.enqueue(command(grant));
+  await flush();
+  assert.equal(f.socket.sent.at(-1).result.text, 'page');
   f.controller.dispose();
 });

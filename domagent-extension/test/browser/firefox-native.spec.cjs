@@ -21,6 +21,7 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
   const artifacts = path.join(root, 'domagent-extension/.browser-artifacts/firefox-native');
   const profile = path.join(artifacts, 'profile');
   const extension = path.join(artifacts, 'extension');
+  await fs.rm(artifacts, { recursive: true, force: true });
   await fs.mkdir(profile, { recursive: true });
   await fs.cp(path.join(root, 'dist/firefox'), extension, { recursive: true });
   const manifestPath = path.join(extension, 'manifest.json');
@@ -69,7 +70,8 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
   const store = new Store(':memory:');
   const ownerId = store.invite(issuer, 'firefox-owner', 'Native Firefox owner');
   store.admit(issuer, 'firefox-owner');
-  const credentials = store.createClient(ownerId, 'Native smoke client');
+  const tenant = store.createTenant(ownerId, 'Atlas');
+  const credentials = store.createClient(ownerId, 'Native smoke client', tenant.id);
   app = createApp(store, { origin, issuer, protectedOrigins: [origin, issuer],
     bind: '127.0.0.1', port: 0 }, {
     start: async flow => `${issuer}/authorize?state=${flow.state}`,
@@ -199,25 +201,20 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
         document.querySelector(${JSON.stringify(selector)}).click(); return true;
       })()`);
     };
-    await expect.poll(() => evaluate('document.querySelector("#status")?.textContent')).toContain('not configured');
+    await expect.poll(() => evaluate('document.querySelector("#status")?.textContent')).toContain('Connect your browser');
     // RDP programmatic clicks do not grant browser user activation. Hosts are
     // pre-granted, so exercise the same trusted options-page runtime boundary
     // without pretending to validate permission prompts or physical clicks.
-    await request({ type: 'ui.configure', config: { service_origin: origin, local_protected_origins: [] } });
+    await request({ type: 'ui.configure', config: { connection_url: `${origin}/join/${tenant.id}`, local_protected_origins: [] } });
     await expect.poll(async () => (await state()).config.service_origin).toBe(origin);
-    await click('#enroll');
+    await request({ type: 'ui.enroll', label: 'My Firefox' });
     await expect.poll(async () => (await state()).enrollment?.state).toBe('pending');
-    store.approveEnrollment((await state()).enrollment.enrollment_id, ownerId);
-    await click('#check-enrollment');
-    await expect.poll(async () => (await state()).enrollment?.state).toBe('approved');
-    await click('#confirm-enrollment');
+    store.approveEnrollment((await state()).enrollment.enrollment_id, ownerId, tenant.id);
     await expect.poll(async () => (await state()).identity?.owner_id).toBe(ownerId);
     const deviceId = (await state()).identity.device_id;
-    store.link(ownerId, credentials.id, deviceId);
-    await click('#connect');
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
     client = new Client({ name: 'native-firefox-smoke', version: '1.0.0' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${backend.port}/mcp`), {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${backend.port}/mcp/${tenant.id}`), {
       requestInit: { headers: { Authorization: `Bearer ${credentials.credential}` } },
     }));
     const access = await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
@@ -239,6 +236,13 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
     const text = await client.callTool({ name: 'get_text', arguments: { target_id: grant.target_id, selector: 'body' } });
     expect(text.isError).not.toBe(true);
     expect(JSON.stringify(text)).toContain('Native owned page');
+    expect(JSON.stringify(text)).not.toContain('Stop sharing');
+    const marker = () => evaluate(`browser.scripting.executeScript({
+      target:{tabId:${grant.tabId},frameIds:[0]},world:"ISOLATED",
+      func:() => document.querySelector("[data-domagent-sharing]")?.shadowRoot?.textContent || ""
+    }).then(results => results[0].result)`);
+    await expect.poll(marker).toContain('Native smoke client can use this tab.');
+    expect(await evaluate('browser.action.getBadgeText({})')).toBe('ON');
     for (const [name, args] of [['evaluate_script', { script: '1 + 1' }], ['get_screenshot', {}]]) {
       const unapproved = await client.callTool({ name, arguments: { target_id: grant.target_id, ...args } });
       expect(unapproved.isError).toBe(true);
@@ -400,15 +404,17 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
       capabilities: ['navigate', 'get_text'] });
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
     const pausedTarget = (await state()).targets[0].target_id;
-    await expect.poll(() => evaluate(`Array.from(document.querySelectorAll("#targets button"))
-      .some(element => element.textContent === "Pause")`)).toBe(true);
-    await evaluate(`(() => {
-      const button = Array.from(document.querySelectorAll("#targets button"))
-        .find(element => element.textContent === "Pause");
-      if (!button) throw new Error("Local pause control missing");
-      button.click(); return true;
-    })()`);
+    const pausedTab = (await state()).targets[0].tabId;
+    await expect.poll(() => evaluate(`browser.scripting.executeScript({
+      target:{tabId:${pausedTab},frameIds:[0]},world:"ISOLATED",
+      func:() => Boolean(document.querySelector("[data-domagent-sharing]")?.shadowRoot?.querySelector("button"))
+    }).then(results => results[0].result)`)).toBe(true);
+    await evaluate(`browser.scripting.executeScript({
+      target:{tabId:${pausedTab},frameIds:[0]},world:"ISOLATED",
+      func:() => { document.querySelector("[data-domagent-sharing]").shadowRoot.querySelector("button").click(); }
+    })`);
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('inactive');
+    await expect.poll(() => evaluate('browser.action.getBadgeText({})')).toBe('IDLE');
     const paused = await client.callTool({ name: 'get_text', arguments: { target_id: pausedTarget, selector: 'body' } });
     expect(paused.isError).toBe(true);
     await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });

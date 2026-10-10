@@ -1,123 +1,101 @@
-# DomAgent secure-pairing beta
+# DomAgent connections beta
 
-A local development branch of [DomAgent](https://github.com/vaishnavucv/domagent)
-with independent browser-owner authorization, an HTTP MCP service, and Chrome
-and Firefox extensions. No GitHub fork or published package is required.
+Connect an independently approved browser to an MCP application. DomAgent is a
+standalone service with tenant-specific HTTP MCP endpoints, its own OIDC login,
+and Chrome/Firefox extensions. It has no dependency on a particular agent
+application or credential manager.
 
-**This is a private beta, not a production security certification.** Review
-[validation gates](docs/SECURE-PAIRING.md#validation-and-release-gates) before
-using real authenticated browser sessions.
+**3.0.0-beta.1 is a breaking upgrade from beta.2.** Existing databases require
+explicit tenant assignment and browsers require fresh pairing. Do not restart
+an upgraded service against an unmigrated database.
 
-## Architecture
+## Browser installation
 
-```text
-Browser extension -- outbound authenticated WSS --> Independent DomAgent service
-  private device signing key                        OIDC owner dashboard
-  local approval and semantic operations            /extension device bridge
-  dedicated per-client automation tabs              /mcp HTTP MCP
-                                                       ^
-Agent group -- per-group OneCLI credential injection --+
-```
+Download the browser-specific ZIP from
+[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.1)
+and extract all files together.
 
-DomAgent must be administered independently from BananaClaw, preferably on its
-own host or VM. A BananaClaw login does not authorize device enrollment or control.
-Device enrollment and every new control grant require trusted extension UI.
+- Firefox: open `about:debugging#/runtime/this-firefox`, choose **Load Temporary
+  Add-on**, and select the extracted `manifest.json`. Temporary installs disappear
+  on restart; do not disable signature verification.
+- Chrome/Chromium: open `chrome://extensions`, enable Developer mode, choose
+  **Load unpacked**, and select the extracted directory.
 
-## Build and test locally
+Setup opens after installation. Paste the public **Connection link** provided
+by your assistant or administrator, for example `https://your-server/join/<tenant>`.
+Continue, sign in on the page opened by the extension, and approve. Connection
+finishes automatically. **No tabs are shared until you approve a separate sharing
+request in the extension.**
 
-Node 22.13+ is required. Dependencies are pinned in the existing MCP package:
+Saved connections can be switched without reinstalling. Only one is active;
+switching never restores sharing. The shared webpage has a named border/banner
+and **Stop sharing**, with independent toolbar status.
 
-```bash
+## Application setup
+
+If no connection exists, the application's agent may request one:
+
+1. Validate the operator-provided HTTPS domain and fetch `/.well-known/domagent`.
+2. `POST /api/setup-requests` with `agent_name` and `request_description`.
+3. Give the user the returned short-lived `verification_url` for invited-account
+   sign-in and explicit approval.
+4. Poll `POST /api/setup-requests/<id>/status` with the separate `status_receipt`.
+   Approval returns public connection/MCP URLs, never the client credential.
+5. The signed-in operator sees the credential once and configures the application
+   through its own secure credential-management workflow.
+
+The service generates tenant IDs; knowing an ID is not authorization.
+MCP clients use authenticated Streamable HTTP at `/mcp/<tenant>`. Browsers use
+authenticated WSS at `/extension/<tenant>`. Each credential/device is tenant-bound.
+
+## Service installation
+
+Node 22.13+ is required:
+
+```sh
 cd domagent-mcp
 npm ci --ignore-scripts
+npm start
+```
+
+Configure a canonical HTTPS origin, exact OIDC issuer, the service's own OIDC
+client ID, restricted secret file if needed, and protected control-plane origins.
+Register `https://your-server/oidc/callback`. Invite owners with:
+
+```sh
+node admin.js invite https://your-exact-issuer owner-subject 'Browser owner'
+```
+
+The server must run behind TLS on an independently administered host. Do not
+expose its plaintext backend listener. See
+[deployment/security details](docs/SECURE-PAIRING.md) and
+[beta.2 migration](docs/TENANT-MIGRATION.md).
+
+## Development
+
+```sh
+npm --prefix domagent-mcp ci --ignore-scripts
 npm test
 npm run build
 npm run check
 ```
 
-Extension packages are generated under `dist/chrome` and `dist/firefox`.
-See the browser-specific guides for private-beta installation. Do not load the
-unbuilt source directories or rely on Firefox temporary installs for durable use.
+Build outputs are `dist/chrome` and `dist/firefox`, not the source manifest
+directories. See [browser validation](domagent-extension/test/README.md).
 
-Prebuilt Chrome and Firefox ZIPs, checksums, and installation instructions are
-attached to the fork's [GitHub prereleases](https://github.com/dtreskunov/domagent/releases).
-Extract the browser-specific ZIP; it contains `manifest.json` at its root.
-Beta.2 uses extension manifest version `2.0.1` and service version `2.0.0-beta.2`.
-Update both components for the new page-inspection error handling.
+The [MVP design](docs/ONBOARDING-AND-TENANCY.md) explains the tenant and onboarding
+boundaries. Application-specific skills are maintained by those applications,
+not shipped as DomAgent dependencies.
 
-The server has no insecure development login or unsigned-device shortcut.
-Tests inject an internal mock identity provider and disposable state; these are
-not exposed by the production entrypoint.
+## Limits
 
-Real-browser validation is documented in
-[the browser test guide](domagent-extension/test/README.md). The default suite
-passes three Chrome/native-Firefox tests and explicitly skips one extended
-Firefox case blocked by Playwright's Juggler instrumentation. Native Firefox
-tests also cover page evaluation/CSP, protected requests, and full browser
-restart; physical permission prompts and other browser versions remain release
-gates. Target-specific screenshots are unavailable in the tested Firefox build.
+This is an unsigned private beta, not a production security certification.
+Firefox's tested build does not expose target-specific screenshots; page scripts
+can be unavailable under page CSP. No visible-tab capture or privileged fallback
+is provided.
 
-## Deploy and enroll
-
-1. Register DomAgent directly with an HTTPS OIDC issuer. Its callback is
-   `https://your-domagent-host/oidc/callback`.
-2. Configure the canonical HTTPS origin, exact issuer, and client ID. Keep the
-   client secret in a restricted file, not agent configuration.
-3. Invite the browser owner by the issuer's immutable subject:
-   ```bash
-   DOMAGENT_DB=/var/lib/domagent/domagent.db \
-     node domagent-mcp/admin.js invite \
-     https://your-issuer.example owner-subject 'Browser owner'
-   ```
-   Use the **exact** issuer string, including any path/trailing slash.
-   Invitations expire after seven days and are consumed by first sign-in.
-4. Start the service behind a TLS reverse proxy, using
-   [systemd](deployment/domagent.service) or the
-   [container example](deployment/compose.yaml).
-5. In the extension, configure the HTTPS service origin and enroll. Check the
-   dashboard's reference/key and finish confirmation locally in the extension.
-6. Register an MCP client in the dashboard, securely import its once-shown
-   credential into your vault, and link it to the enrolled device. Other invited
-   browser owners may independently review and link that same public client ID
-   to their own devices.
-7. Request browser access through MCP and approve the dedicated tab locally.
-
-Never expose the plaintext backend port to the Internet. The deployment examples
-collect metadata through journald and disable raw reverse-proxy access logs.
-
-## BananaClaw integration
-
-Reuse existing per-agent-group HTTP MCP configuration and OneCLI grants. Register
-one DomAgent identity per group. Do not share that credential globally or put the
-real token in materialized container configuration.
-
-[Agent-readable instructions](integration/skills/domagent/SKILL.md) can be
-installed as a container skill. They explain how to guide the user through
-independent enrollment and approval without handling raw secrets.
-
-**OneCLI integration is gated:** actual header injection and proxy traversal
-must be verified for each provider in the operator's deployment. This repository
-does not invent a working placeholder, claim that environment variables prove
-proxy use, or enable direct credential fallback.
-
-## Browser operations
-
-`list_browser_targets` and `request_browser_access` discover/request only your
-eligible devices. Requests return immediately while the owner reviews them.
-Every page operation requires an explicit active `target_id`.
-
-Available semantic operations: `navigate`, `click`, `type_text`, `get_text`,
-`evaluate_script`, `get_screenshot`, `get_interactive_elements`, `clear_overlays`,
-and `request_handoff`, subject to the browser's advertised capabilities.
-
-There is no raw CDP endpoint, `use_current_tab`, automatic user-tab attachment,
-cookie/profile export, or remote grant approval. The upstream unauthenticated
-stdio/local bridge is intentionally not retained as an authorization bypass.
-
-Control ends on pause, disconnect, restart, or revocation. Reconnect restores
-device identity only. Tabs stay open for human handoff; stopping new commands
-does not undo completed actions or previously scheduled page JavaScript.
-
-Page JavaScript can access page-visible secrets and perform authenticated account
-actions. A dedicated tab is not an isolated browser profile or network sandbox.
-See [security details, protocol, and deployment](docs/SECURE-PAIRING.md).
+Shared tabs use ordinary website sign-ins and may expose private page content.
+Local approval governs new commands, not effects or JavaScript already scheduled.
+Page decorations are best-effort visual cues; toolbar/extension state is authoritative.
+Reconnect, pause, revoke, or restart ends all grants. Physical permission prompts,
+notification UX, and advertised browser-version qualification remain release gates.

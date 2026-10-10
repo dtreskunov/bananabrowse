@@ -1,7 +1,8 @@
 import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
-  extensionOrigin, keyId, startPayload, statusPayload, enrollmentPayload, verify,
+  VERSION, tenantId, connectionUrl, extensionOrigin, keyId, startPayload,
+  statusPayload, enrollmentPayload, verify,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { BridgeServer } from './server.js';
@@ -10,6 +11,8 @@ import { Fault, requireValue, failureCode, audit } from './errors.js';
 
 const COOKIE = '__Host-domagent_session';
 const FLOW_COOKIE = '__Host-domagent_flow';
+const SETUP_COOKIE = '__Host-domagent_setup';
+const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.1';
 const secureCookie = (name, value, age) =>
   `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${age}`;
 const equal = (a, b) => {
@@ -25,9 +28,12 @@ const fields = values => Object.entries(values).map(([key, value]) =>
 const form = (action, csrf, values, content) =>
   `<form method="post" action="${action}">${fields({ csrf, ...values })}${content}</form>`;
 const button = text => `<button type="submit">${text}</button>`;
-const page = body => `<!doctype html><html lang="en"><meta charset="utf-8">
+const connectionField = url => `<input id="connection-link" readonly aria-label="Connection link" value="${escape(url)}">
+  <button type="button" data-copy>Copy connection link</button><p id="copy-status" role="status"></p>
+  <script src="/copy.js" defer></script>`;
+const page = content => `<!doctype html><html lang="en"><meta charset="utf-8">
   <meta name="viewport" content="width=device-width"><title>DomAgent</title>
-  <link rel="stylesheet" href="/style.css"><main><h1>DomAgent</h1>${body}</main></html>`;
+  <link rel="stylesheet" href="/style.css"><main><h1>DomAgent</h1>${content}</main></html>`;
 
 function cookies(req) {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(part => {
@@ -48,8 +54,7 @@ async function body(req, limit = 262144) {
     return Object.fromEntries(new URLSearchParams(text));
   }
   requireValue(req.headers['content-type']?.startsWith('application/json'), 'CONTENT_TYPE_REQUIRED', 415);
-  try { return JSON.parse(text); }
-  catch { throw new Fault('INVALID_JSON'); }
+  try { return JSON.parse(text); } catch { throw new Fault('INVALID_JSON'); }
 }
 function json(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -63,11 +68,44 @@ function redirect(res, location, cookie) {
   res.writeHead(303, { Location: location, ...(cookie ? { 'Set-Cookie': cookie } : {}) });
   res.end();
 }
+const setupScript = `(() => {
+  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  history.replaceState(null, "", location.pathname);
+  if (!token) { document.querySelector("#status").textContent = "This link is incomplete. Ask for a new one."; return; }
+  const id = location.pathname.split("/").pop();
+  fetch("/api/setup-requests/" + id + "/open", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({token})
+  }).then(response => {
+    if (!response.ok) throw new Error("This link has expired or is no longer available. Ask for a new one.");
+    location.replace(location.pathname);
+  }).catch(error => { document.querySelector("#status").textContent = error.message; });
+})();`;
+const copyScript = `document.querySelector("[data-copy]").addEventListener("click", async () => {
+  const input = document.querySelector("#connection-link");
+  const status = document.querySelector("#copy-status");
+  try {
+    await navigator.clipboard.writeText(input.value);
+    status.textContent = "Copied. Paste it into the browser extension.";
+  } catch {
+    input.select();
+    status.textContent = "Copy the selected link, then paste it into the browser extension.";
+  }
+});`;
+const pageFailure = code => ({
+  TENANT_ACCESS_REQUIRED: "You don't have access to this connection. Ask its owner.",
+  OWNER_NOT_INVITED: "Your account needs an invitation. Contact the server administrator.",
+  ENROLLMENT_UNAVAILABLE: 'This connection request has expired or is no longer available. Start again in the extension.',
+  SETUP_UNAVAILABLE: 'This link has expired or has already been used. Ask for a new one.',
+  OIDC_LOGIN_FAILED: "We couldn't sign you in. Try again.",
+  OIDC_STATE_INVALID: 'Your sign-in request expired. Start again.',
+  CSRF_INVALID: 'This page is out of date. Reload it and try again.',
+})[code] || "We couldn't complete this request. Try again or contact the administrator.";
 
 export function createApp(store, config, oidc) {
   const bridge = new BridgeServer(store, config);
   const challenges = new Map();
   const flows = new Map();
+  const setupFlows = new Map();
   const rates = new Map();
   const rateLimit = req => {
     const now = Date.now();
@@ -76,30 +114,36 @@ export function createApp(store, config, oidc) {
     if (!value || now - value.since > 60_000) rates.set(key, { since: now, count: 1 });
     else requireValue(++value.count <= 600, 'RATE_LIMITED', 429);
     for (const [id, entry] of rates) if (now - entry.since > 60_000) rates.delete(id);
-    for (const [id, entry] of challenges) if (entry.expires < now) challenges.delete(id);
-    for (const [id, entry] of flows) if (entry.expires < now) flows.delete(id);
+    for (const map of [challenges, flows, setupFlows]) {
+      for (const [id, entry] of map) if (entry.expires < now) map.delete(id);
+    }
   };
   const publicEnrollment = e => ({
     state: e.owner_id ? 'approved' : 'pending', enrollment_id: e.id, key_id: e.key_id,
-    nonce: e.nonce, owner_id: e.owner_id,
-    owner_label: e.owner_id ? store.owner(e.owner_id)?.label : undefined,
+    nonce: e.nonce, owner_id: e.owner_id, owner_label: e.owner_id ? store.owner(e.owner_id)?.label : undefined,
     extension_origin: e.extension_origin, protected_origins: config.protectedOrigins,
-    expires_at: e.expires,
+    tenant_id: e.tenant_id, tenant_label: store.tenant(e.tenant_id)?.label, expires_at: e.expires,
   });
+  const setupFlow = (req, id) => {
+    const flow = setupFlows.get(cookies(req)[SETUP_COOKIE]);
+    return flow?.id === id && flow.expires > Date.now() ? flow : undefined;
+  };
   const server = createServer((req, res) => {
     route(req, res).catch(error => {
       audit('http_failure', { code: failureCode(error) });
-      if (!res.headersSent) json(res, error instanceof Fault ? error.status : 500, { error: failureCode(error) });
-      else res.destroy();
+      if (res.headersSent) { res.destroy(); return; }
+      const status = error instanceof Fault ? error.status : 500;
+      if (/^\/(connect|pair|dashboard|join|login|oidc)(?:\/|\?|$)/.test(req.url || '')) {
+        res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(page(`<h2>Unable to continue</h2><p>${escape(pageFailure(failureCode(error)))}</p>`));
+      } else json(res, status, { error: failureCode(error) });
     });
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   server.on('upgrade', (req, socket, head) => {
-    try {
-      rateLimit(req);
-      bridge.upgrade(req, socket, head);
-    } catch (error) {
+    try { rateLimit(req); bridge.upgrade(req, socket, head); }
+    catch (error) {
       audit('ws_rejected', { code: failureCode(error) });
       socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
     }
@@ -111,108 +155,149 @@ export function createApp(store, config, oidc) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
     res.setHeader('Content-Security-Policy',
-      "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+      "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const url = new URL(req.url, config.origin);
     const path = url.pathname;
     const method = req.method;
     const sourceOrigin = req.headers.origin;
-    if (path.startsWith('/api/enrollment')) {
+    if (path === '/mcp' || path === '/extension' || path.startsWith('/api/enrollment')) {
+      throw new Fault('TENANT_UPGRADE_REQUIRED', 410);
+    }
+    if (path === '/.well-known/domagent' && method === 'GET') {
+      json(res, 200, { service: 'domagent', protocol_version: VERSION, setup_requests: '/api/setup-requests' });
+      return;
+    }
+    if (path === '/api/setup-requests' && method === 'POST') {
+      requireValue(!sourceOrigin, 'NOT_AUTHORIZED', 403);
+      const data = await body(req, 4096);
+      const request = store.createSetup(data?.agent_name, data?.request_description);
+      json(res, 201, {
+        request_id: request.id, verification_url: `${config.origin}/connect/${request.id}#token=${request.token}`,
+        status_receipt: request.receipt, expires_at: request.expires,
+      });
+      return;
+    }
+    const setupApi = /^\/api\/setup-requests\/([0-9a-f-]{36})\/(open|status)$/.exec(path);
+    if (setupApi && method === 'POST') {
+      const [, id, action] = setupApi;
+      const data = await body(req, 2048);
+      if (action === 'status') {
+        requireValue(!sourceOrigin, 'NOT_AUTHORIZED', 403);
+        requireValue(typeof data?.status_receipt === 'string', 'SETUP_UNAVAILABLE', 404);
+        const request = store.setupWithReceipt(id, data.status_receipt);
+        requireValue(request, 'SETUP_UNAVAILABLE', 404);
+        json(res, 200, { state: request.state, tenant_id: request.tenant_id, expires_at: request.expires,
+          ...(request.tenant_id ? { connection_url: connectionUrl(config.origin, request.tenant_id),
+            mcp_url: `${config.origin}/mcp/${request.tenant_id}` } : {}) });
+      } else {
+        requireValue(sourceOrigin === config.origin && typeof data?.token === 'string', 'NOT_AUTHORIZED', 403);
+        const request = store.setupWithToken(id, data.token);
+        requireValue(request?.state === 'pending', 'SETUP_UNAVAILABLE', 404);
+        requireValue(setupFlows.size < 1000, 'RATE_LIMITED', 429);
+        const cookie = token();
+        setupFlows.set(cookie, { id, token: data.token, expires: request.expires });
+        res.setHeader('Set-Cookie', secureCookie(SETUP_COOKIE, cookie, Math.ceil((request.expires - Date.now()) / 1000)));
+        json(res, 200, { state: 'ready' });
+      }
+      return;
+    }
+    const enrollmentApi = /^\/api\/tenants\/(t_[A-Za-z0-9_-]{22})\/enrollment\/(challenge|start|status|confirm)$/.exec(path);
+    if (enrollmentApi) {
+      const [, tenant, action] = enrollmentApi;
+      requireValue(store.tenant(tenant), 'TENANT_UNAVAILABLE', 404);
       if (sourceOrigin) {
-        try { extensionOrigin(sourceOrigin); }
-        catch { throw new Fault('NOT_AUTHORIZED', 403); }
+        try { extensionOrigin(sourceOrigin); } catch { throw new Fault('NOT_AUTHORIZED', 403); }
         res.setHeader('Access-Control-Allow-Origin', sourceOrigin);
         res.setHeader('Vary', 'Origin');
       }
       if (method === 'OPTIONS') {
-        res.writeHead(204, {
-          'Access-Control-Allow-Methods': 'GET, POST',
-          'Access-Control-Allow-Headers': 'Content-Type',
-        });
+        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type' });
         res.end();
         return;
       }
-      if (path === '/api/enrollment/challenge' && method === 'GET') {
+      if (action === 'challenge' && method === 'GET') {
         requireValue(challenges.size < 1000, 'RATE_LIMITED', 429);
         const nonce = token();
-        challenges.set(nonce, { expires: Date.now() + 60_000, origin: sourceOrigin });
-        json(res, 200, { nonce, origin: config.origin });
+        challenges.set(nonce, { expires: Date.now() + 60_000, origin: sourceOrigin, tenant_id: tenant });
+        json(res, 200, { nonce, origin: config.origin, tenant_id: tenant });
         return;
       }
       requireValue(method === 'POST', 'METHOD_NOT_ALLOWED', 405);
       const data = await body(req, 8192);
-      requireValue(data && typeof data === 'object' && !Array.isArray(data), 'INVALID_ARGUMENTS');
-      if (path === '/api/enrollment/start') {
+      requireValue(data && typeof data === 'object' && !Array.isArray(data) && data.tenant_id === tenant, 'INVALID_ARGUMENTS');
+      if (action === 'start') {
         const challenge = challenges.get(data.nonce);
         challenges.delete(data.nonce);
-        requireValue(challenge && challenge.expires > Date.now() &&
+        requireValue(challenge && challenge.expires > Date.now() && challenge.tenant_id === tenant &&
           (!challenge.origin || challenge.origin === sourceOrigin), 'CHALLENGE_UNAVAILABLE');
-        const origin = extensionOrigin(data.extension_origin);
-        requireValue(!sourceOrigin || origin === sourceOrigin, 'NOT_AUTHORIZED', 403);
-        requireValue(typeof data.label === 'string' && data.label.trim() &&
-          data.label.length <= 80 && await keyId(data.public_key) === data.key_id, 'INVALID_PUBLIC_KEY');
-        requireValue(await verify(data.public_key, startPayload({ ...data, origin: config.origin }), data.signature),
-          'NOT_AUTHORIZED', 403);
+        const extension = extensionOrigin(data.extension_origin);
+        requireValue(!sourceOrigin || extension === sourceOrigin, 'NOT_AUTHORIZED', 403);
+        requireValue(typeof data.label === 'string' && data.label.trim() && data.label.length <= 80 &&
+          await keyId(data.public_key) === data.key_id, 'INVALID_PUBLIC_KEY');
+        requireValue(await verify(data.public_key, startPayload({ ...data, origin: config.origin }), data.signature), 'NOT_AUTHORIZED', 403);
         const { kty, crv, x, y } = data.public_key;
-        const e = {
-          ...data, public_key: { kty, crv, x, y },
-          id: randomUUID(), nonce: token(), expires: Date.now() + 300_000,
-        };
+        const e = { ...data, public_key: { kty, crv, x, y }, id: randomUUID(), nonce: token(), expires: Date.now() + 300_000 };
         store.enrollmentStart(e);
-        json(res, 201, {
-          enrollment_id: e.id, verification_url: `${config.origin}/dashboard?enrollment=${e.id}`,
-          expires_at: e.expires,
-        });
+        json(res, 201, { enrollment_id: e.id, tenant_id: tenant,
+          verification_url: `${config.origin}/pair/${tenant}?enrollment=${e.id}`, expires_at: e.expires });
         return;
       }
-      const e = store.enrollment(data.enrollment_id);
-      requireValue(e && (!sourceOrigin || e.extension_origin === sourceOrigin),
-        'ENROLLMENT_UNAVAILABLE', 404);
-      if (path === '/api/enrollment/status') {
-        requireValue(await verify(JSON.parse(e.public_key), statusPayload({
-          origin: config.origin, enrollment_id: e.id,
-        }), data.signature), 'NOT_AUTHORIZED', 403);
-        json(res, 200, publicEnrollment(e));
-        return;
+      const e = store.enrollment(data.enrollment_id, tenant);
+      requireValue(e && (!sourceOrigin || e.extension_origin === sourceOrigin), 'ENROLLMENT_UNAVAILABLE', 404);
+      requireValue(action === 'status' || e.owner_id, 'ENROLLMENT_UNAVAILABLE', 404);
+      const payload = action === 'status'
+        ? statusPayload({ origin: config.origin, tenant_id: tenant, enrollment_id: e.id })
+        : enrollmentPayload({ ...publicEnrollment(e), origin: config.origin });
+      requireValue(await verify(JSON.parse(e.public_key), payload, data.signature), 'NOT_AUTHORIZED', 403);
+      if (action === 'status') json(res, 200, publicEnrollment(e));
+      else {
+        requireValue(action === 'confirm' && e.owner_id, 'ENROLLMENT_UNAVAILABLE', 404);
+        const d = store.confirmEnrollment(e.id, tenant);
+        audit('device_enrolled', { tenant_id: tenant, device_id: d.id, owner_id: d.owner_id });
+        json(res, 201, { device_id: d.id, key_id: d.key_id, tenant_id: tenant,
+          tenant_label: store.tenant(tenant).label, owner_id: d.owner_id,
+          owner_label: store.owner(d.owner_id).label, protected_origins: config.protectedOrigins });
       }
-      requireValue(path === '/api/enrollment/confirm' && e.owner_id && store.owner(e.owner_id),
-        'ENROLLMENT_UNAVAILABLE', 404);
-      requireValue(await verify(JSON.parse(e.public_key), enrollmentPayload({
-        ...publicEnrollment(e), origin: config.origin,
-      }), data.signature), 'NOT_AUTHORIZED', 403);
-      const d = store.confirmEnrollment(e.id);
-      audit('device_enrolled', { owner_id: d.owner_id, device_id: d.id });
-      json(res, 201, {
-        device_id: d.id, key_id: d.key_id, owner_id: d.owner_id,
-        owner_label: store.owner(d.owner_id).label, protected_origins: config.protectedOrigins,
-      });
       return;
     }
-    if (path === '/mcp') {
+    const mcp = /^\/mcp\/(t_[A-Za-z0-9_-]{22})$/.exec(path);
+    if (mcp) {
       requireValue(!sourceOrigin, 'NOT_AUTHORIZED', 403);
-      const authorization = req.headers.authorization || '';
-      const credential = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(authorization)?.[1];
-      const client = credential && store.authenticateClient(credential);
+      const credential = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(req.headers.authorization || '')?.[1];
+      const client = credential && store.authenticateClient(credential, mcp[1]);
+      if (!client) res.setHeader('WWW-Authenticate', 'Bearer realm="domagent"');
       requireValue(client, 'NOT_AUTHORIZED', 401);
       requireValue(method === 'POST', 'METHOD_NOT_ALLOWED', 405);
-      const data = await body(req);
-      await handleMcp(req, res, data, client, bridge);
+      await handleMcp(req, res, await body(req), client, bridge);
       return;
     }
-    if ((path === '/' || path === '/health') && (method === 'GET' || method === 'HEAD')) {
-      json(res, 200, { service: 'domagent', status: 'ok' });
+    if ((path === '/' || path === '/health') && ['GET', 'HEAD'].includes(method)) {
+      json(res, 200, { service: 'domagent', status: 'ok', version: '3.0.0-beta.1', protocol_version: VERSION });
       return;
     }
     if (path === '/style.css' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/css' });
-      res.end('body{font:16px system-ui;line-height:1.5;background:#f6f7f9;color:#20232a}main{max-width:850px;margin:3rem auto;padding:1rem}input,button,select{font:inherit;padding:.5rem;margin:.3rem}form{margin:1rem 0}code{overflow-wrap:anywhere}section{border-top:1px solid #ccc;padding:1rem 0}');
+      res.end('body{font:16px system-ui;line-height:1.5;background:#f6f7f9;color:#20232a}main{max-width:760px;margin:3rem auto;padding:1rem}input,button,select{font:inherit;padding:.5rem;margin:.3rem}form{margin:1rem 0}code{overflow-wrap:anywhere}section{border-top:1px solid #ccc;padding:1rem 0}');
       return;
+    }
+    if (path === '/setup.js' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript' }); res.end(setupScript); return;
+    }
+    if (path === '/copy.js' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript' }); res.end(copyScript); return;
     }
     if (path === '/login' && method === 'GET') {
       requireValue(flows.size < 1000, 'RATE_LIMITED', 429);
-      const state = token();
+      let next = '/dashboard';
+      const setup = url.searchParams.get('setup');
       const enrollment = url.searchParams.get('enrollment');
-      const next = enrollment && /^[0-9a-f-]{36}$/.test(enrollment)
-        ? `/dashboard?enrollment=${enrollment}` : '/dashboard';
+      const tenant = url.searchParams.get('tenantId');
+      if (setup && setupFlow(req, setup)) next = `/connect/${setup}`;
+      else if (enrollment && /^[0-9a-f-]{36}$/.test(enrollment) && tenant) {
+        try { tenantId(tenant); } catch { throw new Fault('INVALID_TENANT'); }
+        next = `/pair/${tenant}?enrollment=${enrollment}`;
+      }
+      const state = token();
       const flow = { state, nonce: token(), verifier: token(), expires: Date.now() + 600_000, next };
       flows.set(state, flow);
       redirect(res, await oidc.start(flow), secureCookie(FLOW_COOKIE, state, 600));
@@ -222,154 +307,157 @@ export function createApp(store, config, oidc) {
       const state = url.searchParams.get('state');
       const flow = flows.get(state);
       flows.delete(state);
-      requireValue(flow && flow.expires > Date.now() && equal(cookies(req)[FLOW_COOKIE], state),
-        'OIDC_STATE_INVALID', 403);
+      requireValue(flow && flow.expires > Date.now() && equal(cookies(req)[FLOW_COOKIE], state), 'OIDC_STATE_INVALID', 403);
       let identity;
-      try { identity = await oidc.finish(url, flow); }
-      catch { throw new Fault('OIDC_LOGIN_FAILED', 403); }
+      try { identity = await oidc.finish(url, flow); } catch { throw new Fault('OIDC_LOGIN_FAILED', 403); }
       const owner = store.admit(identity.issuer, identity.subject);
       const session = store.createSession(owner.id);
-      res.setHeader('Set-Cookie', [
-        secureCookie(FLOW_COOKIE, '', 0), secureCookie(COOKIE, session.token, 28800),
-      ]);
+      res.setHeader('Set-Cookie', [secureCookie(FLOW_COOKIE, '', 0), secureCookie(COOKIE, session.token, 28800)]);
       audit('owner_login', { owner_id: owner.id });
       redirect(res, flow.next);
       return;
     }
-    const cookie = cookies(req)[COOKIE] || '';
-    const session = store.session(cookie);
-    if (path === '/dashboard' && method === 'GET') {
-      if (!session) {
-        const enrollment = url.searchParams.get('enrollment');
-        redirect(res, enrollment ? `/login?enrollment=${encodeURIComponent(enrollment)}` : '/login');
+    const session = store.session(cookies(req)[COOKIE] || '');
+    const requirePost = async () => {
+      requireValue(session && sourceOrigin === config.origin, 'NOT_AUTHORIZED', 403);
+      const data = await body(req, 16384);
+      requireValue(data && equal(data.csrf, session.csrf), 'CSRF_INVALID', 403);
+      return data;
+    };
+    const connect = /^\/connect\/([0-9a-f-]{36})(\/approve|\/deny)?$/.exec(path);
+    if (connect) {
+      const [, id, action] = connect;
+      const flow = setupFlow(req, id);
+      if (method === 'GET' && !action && !flow) {
+        html(res, '<p id="status">Opening your connection request...</p><script src="/setup.js" defer></script>');
         return;
       }
-      const devices = store.devicesForOwner(session.owner_id);
-      const clients = store.clientsForOwner(session.owner_id);
-      let content = `<p>Signed in as <strong>${escape(session.label)}</strong>.
-        Device linking only permits requests. Control always requires local extension approval.</p>`;
-      const enrollment = url.searchParams.get('enrollment');
-      if (enrollment) {
-        const e = store.enrollment(enrollment);
-        requireValue(e && (!e.owner_id || e.owner_id === session.owner_id), 'ENROLLMENT_UNAVAILABLE', 404);
-        content += `<section><h2>Enroll device</h2><p>Device: ${escape(e.label)}</p>
-          <p>Reference: <code>${escape(e.id)}</code></p>
-          <p>Key: <code>${escape(e.key_id)}</code></p>
-          <p>Confirm only if this matches the enrollment you started in your extension.
-          Final confirmation happens locally in that extension.</p>` +
-          form('/dashboard/approve-enrollment', session.csrf, { enrollment_id: e.id }, button('Approve this enrollment')) +
-          '</section>';
+      requireValue(flow, 'SETUP_UNAVAILABLE', 404);
+      const request = store.setupWithToken(id, flow.token);
+      requireValue(request?.state === 'pending', 'SETUP_UNAVAILABLE', 404);
+      if (!session && method === 'GET') { redirect(res, `/login?setup=${id}`); return; }
+      requireValue(session, 'NOT_AUTHORIZED', 401);
+      if (method === 'GET' && !action) {
+        html(res, `<h2>${escape(request.agent_name)} wants to connect to your browser</h2>
+          <p>${escape(request.request_description)}</p><p>This name and explanation were supplied by the application.</p>
+          <p>You're signed in as ${escape(session.label)} on ${escape(new URL(config.origin).host)}.</p>
+          <p>Your assistant can ask you to share a tab. You decide each time. Setting up shares no tabs.</p>` +
+          form(`/connect/${id}/approve`, session.csrf, {}, button('Set up connection')) +
+          form(`/connect/${id}/deny`, session.csrf, {}, button('Not now')));
+      } else {
+        requireValue(method === 'POST' && action, 'METHOD_NOT_ALLOWED', 405);
+        await requirePost();
+        setupFlows.delete(cookies(req)[SETUP_COOKIE]);
+        res.setHeader('Set-Cookie', secureCookie(SETUP_COOKIE, '', 0));
+        if (action === '/deny') {
+          store.denySetup(id, flow.token, session.owner_id);
+          html(res, '<p>Connection request declined.</p>');
+        } else {
+          const created = store.approveSetup(id, flow.token, session.owner_id);
+          html(res, `<h2>Connection ready</h2><p>Install the browser extension and paste this connection link:</p>
+            ${connectionField(connectionUrl(config.origin, created.tenant.id))}
+            <p><a href="${RELEASE}">Download the browser extension ZIP</a></p>
+            <details><summary>Application connection settings</summary>
+            <p>Configure your application using its own secure credential-management instructions. Do not paste credentials into chat.</p>
+            <p>MCP endpoint: <code>${escape(`${config.origin}/mcp/${created.tenant.id}`)}</code></p>
+            <p>Credential (shown once): <code>${escape(created.client.credential)}</code></p></details>
+            <p><a href="/dashboard/tenants/${created.tenant.id}">Manage this connection</a></p>`);
+        }
       }
-      content += `<section><h2>Register an MCP client</h2>` +
-        form('/dashboard/create-client', session.csrf, {},
-          '<label>Client label <input name="label" required maxlength="80"></label>' + button('Create client credential')) +
-        '</section><section><h2>Clients</h2>';
-      for (const c of clients) {
-        content += `<p>${escape(c.label)} <code>${escape(c.id)}</code></p>` +
-          form('/dashboard/revoke-client', session.csrf, { client_id: c.id }, button('Revoke client')) +
-          form('/dashboard/rotate-client', session.csrf, { client_id: c.id }, button('Rotate credential and end grants'));
-      }
-      content += '</section><section><h2>Devices</h2>';
-      for (const d of devices) {
-        content += `<p>${escape(d.label)} <code>${escape(d.id)}</code></p>` +
-          form('/dashboard/revoke-device', session.csrf, { device_id: d.id }, button('Revoke device'));
-      }
-      content += '</section><section><h2>Link a client and device</h2>';
-      if (devices.length && clients.length) {
-        const select = (name, entries) => `<select name="${name}">` + entries.map(e =>
-          `<option value="${escape(e.id)}">${escape(e.label)} (${escape(e.id)})</option>`).join('') + '</select>';
-        content += form('/dashboard/link', session.csrf, {},
-          select('client_id', clients) + select('device_id', devices) + button('Allow requests'));
-      } else content += '<p>Enroll a device and create a client first.</p>';
-      if (devices.length) {
-        content += '<h3>Approve another owner\'s known MCP client</h3>' +
-          form('/dashboard/review-link', session.csrf, {},
-            '<label>Exact client ID <input name="client_id" required maxlength="128"></label>' +
-            '<select name="device_id">' + devices.map(d =>
-              `<option value="${escape(d.id)}">${escape(d.label)}</option>`).join('') +
-            '</select>' + button('Review client identity'));
-      }
-      for (const link of store.linksForOwner(session.owner_id)) {
-        content += `<p>${escape(link.client_label)} <code>${escape(link.client_id)}</code>
-          / ${escape(link.device_label)}</p>` +
-          form('/dashboard/unlink', session.csrf,
-            { client_id: link.client_id, device_id: link.device_id }, button('Unlink and end control'));
-      }
-      content += '</section>' + form('/dashboard/logout', session.csrf, {}, button('Sign out'));
-      html(res, content);
       return;
     }
-    if (path.startsWith('/dashboard/') && method === 'POST') {
-      requireValue(session, 'NOT_AUTHORIZED', 401);
-      requireValue(sourceOrigin === config.origin, 'CSRF_INVALID', 403);
-      const data = await body(req, 16384);
-      requireValue(data && typeof data === 'object' && !Array.isArray(data), 'INVALID_ARGUMENTS');
-      requireValue(equal(data.csrf, session.csrf), 'CSRF_INVALID', 403);
-      const ownerId = session.owner_id;
-      if (path === '/dashboard/approve-enrollment') {
-        store.approveEnrollment(data.enrollment_id, ownerId);
-        audit('enrollment_approved', { owner_id: ownerId });
-        html(res, '<p>Approved. Return to the extension and confirm the owner and reference locally.</p><a href="/dashboard">Dashboard</a>');
-        return;
+    const join = /^\/join\/(t_[A-Za-z0-9_-]{22})\/?$/.exec(path);
+    if (join && method === 'GET') {
+      html(res, `<h2>Connect your browser</h2><p>Download and extract your browser's ZIP.
+        For Firefox, open about:debugging and load its manifest as a temporary add-on.
+        For Chrome, use Load unpacked in chrome://extensions. Temporary Firefox installs are removed on restart.</p>
+        <p><a href="${RELEASE}">Download extension</a></p><p>Paste this into the extension's Connection link field:</p>
+        ${connectionField(connectionUrl(config.origin, join[1]))}`);
+      return;
+    }
+    const pair = /^\/pair\/(t_[A-Za-z0-9_-]{22})(\/approve)?$/.exec(path);
+    if (pair) {
+      const [, tenant, action] = pair;
+      const enrollment = action ? (await requirePost()).enrollment_id : url.searchParams.get('enrollment');
+      if (!session && method === 'GET' && !action) {
+        requireValue(enrollment && /^[0-9a-f-]{36}$/.test(enrollment), 'ENROLLMENT_UNAVAILABLE', 404);
+        redirect(res, `/login?tenantId=${tenant}&enrollment=${enrollment}`); return;
       }
-      if (path === '/dashboard/create-client' || path === '/dashboard/rotate-client') {
-        const client = path.endsWith('create-client')
-          ? store.createClient(ownerId, data.label) : store.rotateClient(ownerId, data.client_id);
-        bridge.reconcile();
-        if (path.endsWith('rotate-client')) {
+      requireValue(session && store.member(session.owner_id, tenant), 'TENANT_ACCESS_REQUIRED', 403);
+      const e = store.enrollment(enrollment, tenant);
+      requireValue(e && (!e.owner_id || e.owner_id === session.owner_id), 'ENROLLMENT_UNAVAILABLE', 404);
+      if (method === 'GET' && !action) {
+        html(res, `<h2>Connect this browser to ${escape(store.tenant(tenant).label)}?</h2>
+          <p>You're signed in as ${escape(session.label)}.</p><p>You decide which tabs to share and when.</p>` +
+          form(`/pair/${tenant}/approve`, session.csrf, { enrollment_id: e.id }, button('Connect browser')));
+      } else {
+        requireValue(method === 'POST' && action, 'METHOD_NOT_ALLOWED', 405);
+        store.approveEnrollment(e.id, session.owner_id, tenant);
+        html(res, '<h2>Approved</h2><p>Your extension will finish connecting automatically. No tabs are being shared.</p>');
+      }
+      return;
+    }
+    if (path === '/dashboard' && method === 'GET') {
+      if (!session) { redirect(res, '/login'); return; }
+      html(res, `<p>Signed in as ${escape(session.label)}.</p><h2>Your connections</h2>` +
+        store.tenantsForOwner(session.owner_id).map(t =>
+          `<p><a href="/dashboard/tenants/${t.id}">${escape(t.label)}</a></p>`).join('') +
+        form('/dashboard/logout', session.csrf, {}, button('Sign out')));
+      return;
+    }
+    if (path === '/dashboard/logout' && method === 'POST') {
+      await requirePost(); store.logout(cookies(req)[COOKIE]); redirect(res, '/login', secureCookie(COOKIE, '', 0)); return;
+    }
+    const dashboard = /^\/dashboard\/tenants\/(t_[A-Za-z0-9_-]{22})(?:\/(rotate|revoke-client|revoke-device|add-member|remove-member|disable))?$/.exec(path);
+    if (dashboard) {
+      const [, tenant, action] = dashboard;
+      requireValue(session && store.member(session.owner_id, tenant), 'TENANT_ACCESS_REQUIRED', 403);
+      if (method === 'GET' && !action) {
+        const owned = store.owns(session.owner_id, tenant);
+        const client = owned && store.clientsForOwner(session.owner_id, tenant)[0];
+        html(res, `<h2>${escape(store.tenant(tenant).label)}</h2><p>Connection link:</p>
+          <input readonly value="${escape(connectionUrl(config.origin, tenant))}"><p>No tabs are shared without local approval.</p>` +
+          (client ? form(`/dashboard/tenants/${tenant}/rotate`, session.csrf, { client_id: client.id }, button('Replace application credential')) +
+            form(`/dashboard/tenants/${tenant}/revoke-client`, session.csrf, { client_id: client.id }, button('Revoke application access')) : '') +
+          store.devicesForOwner(session.owner_id, tenant).map(d => `<p>${escape(d.label)}</p>` +
+            form(`/dashboard/tenants/${tenant}/revoke-device`, session.csrf, { device_id: d.id }, button('Disconnect browser'))).join('') +
+          (owned ? '<details><summary>Connection administration</summary>' +
+            form(`/dashboard/tenants/${tenant}/add-member`, session.csrf, {},
+              '<label>Invited account ID <input name="owner_id" required></label>' + button('Allow account to connect')) +
+            form(`/dashboard/tenants/${tenant}/remove-member`, session.csrf, {},
+              '<label>Account ID <input name="owner_id" required></label>' + button('Remove account access')) +
+            form(`/dashboard/tenants/${tenant}/disable`, session.csrf, {}, button('Disable connection')) + '</details>' : '') +
+          '<p><a href="/dashboard">All connections</a></p>');
+      } else {
+        requireValue(method === 'POST' && action, 'METHOD_NOT_ALLOWED', 405);
+        const data = await requirePost();
+        if (action === 'rotate') {
+          const client = store.rotateClient(session.owner_id, data.client_id, tenant);
           for (const [id, grant] of bridge.grants) if (grant.client_id === client.id) bridge.endGrant(id, 'REVOKED');
+          html(res, `<h2>Credential shown once</h2><p>Use your application's secure configuration workflow.</p>
+            <code>${escape(client.credential)}</code><p><a href="/dashboard/tenants/${tenant}">Back</a></p>`);
+        } else {
+          if (action === 'add-member') store.addMember(session.owner_id, tenant, data.owner_id);
+          else if (action === 'remove-member') store.removeMember(session.owner_id, tenant, data.owner_id);
+          else if (action === 'disable') store.disableTenant(session.owner_id, tenant);
+          else store.revoke(session.owner_id, action === 'revoke-client' ? 'client' : 'device',
+            action === 'revoke-client' ? data.client_id : data.device_id, tenant);
+          bridge.reconcile();
+          redirect(res, '/dashboard');
         }
-        audit('client_credential_issued', { owner_id: ownerId, client_id: client.id });
-        html(res, `<h2>Credential shown once</h2><p>Client ID: <code>${escape(client.id)}</code></p>
-          <p>Import directly into your credential vault. Do not paste into chat or agent configuration.</p>
-          <code>${escape(client.credential)}</code><p><a href="/dashboard">Dashboard</a></p>`);
-        return;
       }
-      if (path === '/dashboard/review-link') {
-        const client = store.client(data.client_id);
-        const device = store.device(data.device_id);
-        requireValue(client && device?.owner_id === ownerId, 'NOT_AUTHORIZED', 403);
-        html(res, `<h2>Review client/device link</h2>
-          <p>Client: ${escape(client.label)} <code>${escape(client.id)}</code></p>
-          <p>Your device: ${escape(device.label)} <code>${escape(device.id)}</code></p>
-          <p>Labels are descriptive, not verified claims about an agent group.
-          Check the exact client ID with its operator. This permits requests only;
-          control still requires confirmation in your extension.</p>` +
-          form('/dashboard/link', session.csrf,
-            { client_id: client.id, device_id: device.id }, button('Allow this client to request access')) +
-          '<a href="/dashboard">Cancel</a>');
-        return;
-      }
-      if (path === '/dashboard/link') store.link(ownerId, data.client_id, data.device_id);
-      else if (path === '/dashboard/unlink') store.unlink(ownerId, data.client_id, data.device_id);
-      else if (path === '/dashboard/revoke-client') store.revoke(ownerId, 'client', data.client_id);
-      else if (path === '/dashboard/revoke-device') store.revoke(ownerId, 'device', data.device_id);
-      else if (path === '/dashboard/logout') {
-        store.logout(cookie);
-        redirect(res, '/', secureCookie(COOKIE, '', 0));
-        return;
-      } else throw new Fault('NOT_FOUND', 404);
-      bridge.reconcile();
-      audit(path.slice('/dashboard/').replaceAll('-', '_'), {
-        owner_id: ownerId, client_id: data.client_id, device_id: data.device_id,
-      });
-      redirect(res, '/dashboard');
       return;
     }
     throw new Fault('NOT_FOUND', 404);
   }
   return {
-    server, bridge, config,
-    async listen() {
-      await new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(config.port, config.bind, () => { server.removeListener('error', reject); resolve(); });
-      });
-      return server.address();
-    },
-    async close() {
-      bridge.close();
-      server.closeIdleConnections();
+    server, bridge,
+    listen: () => new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(config.port, config.bind, () => { server.off('error', reject); resolve(server.address()); });
+    }),
+    close: async () => {
+      bridge.close(); server.closeAllConnections();
       await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     },
   };

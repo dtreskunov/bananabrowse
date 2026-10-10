@@ -1,16 +1,29 @@
-# DomAgent standalone service
+# DomAgent service
 
-This private beta replaces the upstream unauthenticated stdio/local bridge with
-an independently authorized HTTP MCP and WSS service. Node 22.13+ is required.
+Node 22.13+ service for generic authenticated tenant-scoped Streamable HTTP MCP
+and signed browser WSS. No stdio or unscoped authorization fallback.
 
-See the [root guide](../README.md) for build, testing, invitation, deployment,
-browser enrollment, and per-group BananaClaw/OneCLI configuration.
+```sh
+npm ci --ignore-scripts
+npm start
+```
 
-Run `npm ci --ignore-scripts`, then `npm test` and `npm run build`.
-Run `node index.js` only with the HTTPS origin and direct OIDC configuration.
-The underlying listener is intended for a trusted TLS proxy, not public plaintext
-access. Use `node admin.js` for issuer/subject invitations and owner disablement.
+Configuration and OIDC owner invitations are described in
+[the deployment guide](../docs/SECURE-PAIRING.md).
+Upgrade existing beta.2 databases through [explicit tenant migration](../docs/TENANT-MIGRATION.md)
+before restarting. Browsers must use matching protocol-v2 extensions.
 
-No package publication or live BananaClaw configuration is performed by this
-branch. Existing upstream stdio clients require migration to authenticated HTTP
-MCP with explicit `target_id` parameters.
+Public metadata: `GET /.well-known/domagent`.
+Create a pending request: `POST /api/setup-requests` with `agent_name` and
+`request_description`. Invited-user approval creates one tenant/client.
+Poll `POST /api/setup-requests/<request>/status` using the separate status receipt;
+it returns public URLs, never a credential.
+
+The signed-in operator configures its own application using the once-shown
+credential. MCP endpoint: `/mcp/<tenant>`. Device WSS: `/extension/<tenant>`.
+Public extension input: `/join/<tenant>`. Browser pairing completes automatically
+after server approval; local approval remains required before sharing.
+
+Run `npm test`, `npm run build`, and `npm run check`. See
+[browser tests](../domagent-extension/test/README.md) for real-browser validation
+and unsupported capability/physical-prompt qualification limits.

@@ -1,261 +1,123 @@
-# Secure pairing: implementation and deployment
+# Tenant-scoped pairing and deployment
 
-## Trust model
+## Trust and authorization
 
-DomAgent, its independently administered VM, TLS proxy, and IdP are trusted.
-Agent requests and pages are untrusted. The extension enforces locally approved
-client/target ownership and a semantic operation allow-list. A compromised
-BananaClaw can abuse existing grants but cannot mint new extension approvals.
+DomAgent, its independent host/TLS proxy, configured OIDC provider, browser,
+extension package, and update channel are trusted. Agents and webpages are not.
+DomAgent is generic: calling applications handle their own configuration and
+credential managers. The service never needs their internal group IDs.
 
-Keep this VM's administration, OIDC secret, state, and extension distribution
-independent from BananaClaw. OneCLI is trusted for group-specific credentials and
-MCP traffic; it does not make an authorized malicious action safe.
+An invited OIDC account approves creation of a server-generated tenant and its
+initial client. Server admission does not confer membership in other tenants.
+Tenant owners may add/remove admitted accounts. Browser pairing makes the
+tenant's initial client eligible to request control; it creates no active grant.
 
-## Configuration
+Every HTTP MCP request authenticates and matches its credential's tenant to
+`/mcp/<tenant>`. WSS `/extension/<tenant>` authenticates the device key in that
+tenant. Protocol v2 binds origin and tenant into every signed transcript.
+Cross-tenant client/device relationships are rejected. Bare `/mcp`, `/extension`,
+legacy enrollment endpoints, and protocol-v1 proofs are no authorization fallback.
 
-| Variable | Meaning |
+## Setup and enrollment
+
+Anonymous `POST /api/setup-requests` creates an expiring pending request only.
+Requester name/explanation are escaped, unverified plain text; they do not
+authorize creation. Link tokens and separate status receipts are random 256-bit
+values, stored as hashes. Requests expire after 15 minutes.
+
+The secret approval link uses a fragment. Packaged same-origin JS removes it from
+history and establishes provisional HttpOnly setup-flow state. GET previews do
+not approve or consume the link. Existing OIDC state/nonce/PKCE and session/CSRF
+checks govern explicit invited-user approval. Approval creates at most one tenant
+and shows a client credential once. Status polling returns public URLs only.
+Never log request bodies, token-bearing URLs, credentials, page contents, or proofs.
+
+The public `/join/<tenant>` link is the single extension setup input. It provides
+no membership. Per-pair nonextractable P-256 keys live in extension-private
+IndexedDB; keys are not hardware-backed protection from OS compromise.
+
+Tenant enrollment challenges are one-time (60 seconds); transactions expire
+after five minutes. After the tenant member approves the exact device transaction
+on the server, the extension automatically submits its bound key confirmation
+and authenticates WSS. This deliberately replaces beta.2's second local pairing
+confirmation. Server/page success alone is not proof; the extension validates
+the transaction and actual handshake.
+
+Actual browser control still requires a separate local approval and capability
+selection. Broad website permissions are requested only at that action, not
+during enrollment. Multiple saved pairings have one active connection. Switching
+invalidates old queues, proofs, and grant authority before connecting the new pair.
+
+## Runtime guarantees and limits
+
+- Five-second heartbeats; silent devices lose authority at 15 seconds plus
+  scheduling delay. Identity reconnect never restores grants.
+- Dedicated extension-created tabs only; explicit target IDs on every operation.
+- Serialized target queue capped at 32; original 25-second command deadline is
+  carried to the extension. Uncertain mutations end control, never retry.
+- Local denial has a 30-second prompt cooldown.
+- Protected origins include the entire service origin, identity/authorization
+  provider origins, and configured control-plane sites. Block redirects and
+  subresources before allowing a grant.
+- Ordinary page-world scripts only. No raw CDP, browser cookie/profile extraction,
+  privileged schemes, or user-tab adoption.
+- `ELEMENT_NOT_FOUND` and `INVALID_SELECTOR` are selector failures.
+  `TARGET_STALE` is a document race; don't automatically retry mutations.
+  `PAGE_UNAVAILABLE` ends unusable authority and requests fresh local approval.
+- Successful click/type acknowledgements can survive the navigation they caused;
+  page results and work queued for the previous document stay invalid.
+- Firefox screenshot support requires `tabs.captureTab`; it is absent in the
+  tested build, so capture is not advertised. Page CSP can deny supplied scripts.
+
+The page-edge border/banner is a helpful, spoofable DOM decoration, not a
+security boundary. Its stop-only action may end only its granted tab/document.
+Toolbar/extension UI state is independent. Cosmetic failures warn rather than
+claim tamper-proof decoration or disabling otherwise usable sharing.
+
+Tabs share website sign-ins, readable cookies/storage, and internal-network
+access. Text/images/scripts may expose private information. Password/CAPTCHA
+heuristics are best effort. Pause cannot undo completed effects or scheduled
+JavaScript; tabs remain open for the user.
+
+## Deployment
+
+| Variable | Purpose |
 | --- | --- |
-| `DOMAGENT_ORIGIN` | Required canonical HTTPS origin without path/query/credentials |
-| `DOMAGENT_OIDC_ISSUER` | Required exact HTTPS issuer, including path/trailing slash |
-| `DOMAGENT_OIDC_CLIENT_ID` | DomAgent's own OIDC registration |
-| `DOMAGENT_OIDC_CLIENT_SECRET_FILE` | Restricted file containing the confidential-client secret; optional for public clients |
-| `DOMAGENT_PROTECTED_ORIGINS` | Additional comma-separated HTTPS control-plane origins, including BananaClaw |
-| `DOMAGENT_BIND` | Backend address; default `127.0.0.1` |
-| `DOMAGENT_PORT` | Backend port; default `18792` |
-| `DOMAGENT_DB` | Private database; default `./data/domagent.db` |
+| `DOMAGENT_ORIGIN` | Canonical HTTPS service origin |
+| `DOMAGENT_OIDC_ISSUER` | Exact HTTPS issuer, preserving path/trailing slash |
+| `DOMAGENT_OIDC_CLIENT_ID` | This service's own registration |
+| `DOMAGENT_OIDC_CLIENT_SECRET_FILE` | Restricted confidential-client secret file, optional for public clients |
+| `DOMAGENT_PROTECTED_ORIGINS` | Additional comma-separated control-plane origins |
+| `DOMAGENT_BIND` / `DOMAGENT_PORT` | Private backend listener, default loopback / 18792 |
+| `DOMAGENT_DB` | Private state path |
 
-The service adds its own origin and the issuer/authorization-endpoint origins to
-the protected list. Configure every relevant control-plane alias. The extension
-also enforces its local protected-origin configuration.
+Use [systemd](../deployment/domagent.service) or
+[compose](../deployment/compose.yaml) behind [a TLS proxy](../deployment/nginx.conf.example).
+The systemd example is a system service template; the running user-level install
+may use different paths. Keep secret/state files private, use an unprivileged
+service identity and restricted permissions, and do not share the container
+daemon or administration with untrusted client applications.
 
-The server discovers and validates OIDC through `openid-client`. Owners are
-matched by exact `(issuer, subject)`, never by a claimed email/group name.
-Admin invitations expire after seven days; the first admitted login consumes the
-invitation. Owner sessions expire after eight hours and remain revocable.
+SQLite has one schema version and rejects beta.2 state until explicitly migrated.
+Follow [the coordinated migration procedure](TENANT-MIGRATION.md). Do not hot-
+restart an upgraded worktree without reviewing the database/endpoint transition.
+Rollback requires matched database and code versions.
 
-Use `admin.js disable-owner <owner-id>` to disable an owner. The service checks
-persistent state on requests and reconciles live devices/grants at least every
-five seconds. MCP requests never inherit authority from a previous HTTP session.
-
-## Enrollment and device protocol
-
-Extensions generate per-service non-extractable P-256 signing keys and store them
-in extension-private IndexedDB. The service persists only public keys.
-Non-extractability is not hardware-backed protection from OS/extension compromise.
-
-1. `GET /api/enrollment/challenge` supplies a 60-second one-time nonce.
-2. `POST /api/enrollment/start` proves key possession and creates a five-minute
-   transaction.
-3. The owner opens the verification URL, signs in directly, and approves the
-   exact reference/key in DomAgent's dashboard.
-4. The extension shows the returned owner/reference and signs final confirmation
-   only after a local action. Enrollment creates no control grant.
-
-Enrollment API requests are proof-bound. Extension origins are restricted and
-checked where supplied; Origin alone is never authentication. Chrome may omit
-Origin on the challenge GET and supply it on the signed POST. A challenge with
-no Origin allows that transition; a supplied challenge Origin must still match,
-and the signed extension origin must match any POST Origin.
-
-WSS `/extension` accepts `hello`, a server challenge, and a signed `proof`.
-Signatures use the fixed domain-separated arrays in
-[the shared protocol](../shared/protocol.js), not unspecified JSON concatenation.
-The transcript binds origin, server epoch, connection ID, nonce, and key ID.
-The unauthenticated deadline is five seconds.
-
-Every device has one current connection. Replacement invalidates old grants;
-old close handlers cannot erase a new connection. Five-second application
-heartbeats bound silent-partition detection to 15 seconds plus scheduling delay.
-Reconnect never restores authority.
-
-## Client credentials and grants
-
-The owner registers an MCP identity and imports the once-shown 256-bit credential
-into their vault. DomAgent stores only its SHA-256 hash. Rotation/revocation ends
-affected grants; old credentials stop authenticating immediately.
-
-Client credentials authorize `/mcp` only, not owner management or enrollment.
-The MCP endpoint is stateless Streamable HTTP: every POST authenticates again.
-Missing/invalid credentials receive 401, and management requests still need an
-owner cookie, same-origin request, and CSRF token.
-
-An owner-created client/device link permits control requests. It does not create
-an active grant. The extension's signed approval binds request, client, device
-connection, fresh target, policy version, nonce, and capability list.
-
-Clients can be shared across invited browser owners by their exact public client
-ID. The browser owner reviews that identity in their own dashboard and may link
-only devices they own. This does not reveal any other owner's devices or grant
-the client operator permission to create links. Each owner can unlink their own
-device independently, and local extension confirmation is still required.
-
-The service routes each operation by authenticated client identity. The extension
-independently resolves that target to its own dedicated tab. Page operations
-require an explicit target even if there is only one browser. Per-target queues
-are serialized and limited to 32 entries. Commands expire after 25 seconds;
-mutations are never automatically retried after uncertain outcomes.
-Each dispatched command carries its original enqueue deadline as `expires_at`;
-the extension rejects expired work before page execution, including after local
-inspection or queueing. A timeout cannot become a fresh execution allowance.
-Pending access requests are coalesced. After local denial, the client cannot
-prompt that device again for 30 seconds; a local owner-initiated request may
-bypass that notification cooldown, but never bypasses approval.
-
-There is no current-tab adoption, automatic user-tab attachment, raw debugger
-forwarding, or remote resume operation. Local resume requires another approval.
-
-## Protected origins, scripts, and human handoff
-
-Control-plane origins must be blocked for the target tab, including redirects
-and relevant subresources. A navigation listener after the request is not a
-substitute. Grants must fail closed if the browser cannot install the required
-blocking policy.
-
-Untrusted scripts execute only with ordinary page authority. Firefox must not
-evaluate supplied strings in an extension/content-script realm. Chrome uses
-only narrowly selected internal debugger operations. No browser-cookie/profile
-or cross-origin frame execution interface is exposed.
-
-Unsupported safe evaluation or capture must return an explicit capability error.
-The screenshots must refer to the authorized tab, not the currently visible tab.
-
-Capabilities are also local grant selections. Page evaluation is unchecked by
-default in the approval UI; capture is offered only when the adapter exposes a
-target-specific capture API. Missing capabilities do not imply a server config
-error and must not be added remotely.
-
-CSS selectors use `document.querySelector`. Missing elements return
-`ELEMENT_NOT_FOUND`, and malformed CSS returns `INVALID_SELECTOR`; neither ends
-the grant. Implicit HTML defaults are not DOM attributes: a bare `<button>`
-submits its form but does not match `[type="submit"]`.
-
-Successful click/type acknowledgements can survive an ordinary navigation they
-triggered; page-derived results and commands queued for the old document still
-fail as `TARGET_STALE`. Never automatically retry a mutation after a stale or
-uncertain reply.
-
-Every operation requires inspection of the current document. If browser policy
-refuses that inspection, `PAGE_UNAVAILABLE` ends the local and server grant,
-discards queued work, and clears the active target. The connection and tab stay
-open; the owner must inspect or navigate it and locally approve a fresh target.
-Navigation is not a bypass for an uninspectable document. Optional script/CSP
-or capture failures alone remain `CAPABILITY_UNAVAILABLE` without ending an
-otherwise inspectable grant.
-
-Known auth signals, conservative heuristics, and explicit `request_handoff`
-pause control. Browser prompts and file selection need human intervention.
-Automatic login/CAPTCHA detection is best effort, not a secret-isolation guarantee.
-
-Keep tabs open when control ends. Pause stops new agent commands, not already
-scheduled JavaScript, requests, or account changes. Tabs share ordinary website
-sessions and can reach internal networks. Disclose this before approval.
-
-## systemd, containers, and logs
-
-The [systemd unit](../deployment/domagent.service) runs Node as an unprivileged
-service user with private state and credentials loaded from restricted files.
-Install the clone at `/opt/domagent`, dependencies under its MCP package, and
-configuration at `/etc/domagent/domagent.env`.
-
-Alternatively use the [compose example](../deployment/compose.yaml) on the
-independent VM. It publishes only host loopback, runs a non-root read-only
-container with no Docker socket, and sends output to journald. Ensure the mounted
-OIDC secret is readable by the container's service UID without exposing it to
-unrelated users. Do not commit the secret file.
-
-Put a TLS reverse proxy in front; adapt the [nginx example](../deployment/nginx.conf.example)
-to the real hostname/certificate. Do not expose the backend listener publicly.
-Do not enable raw access logs. Review proxy error logging for URL/token disclosure
-before production; the example limits error logging to critical events.
-
-Service audit output is structured metadata only. No DOM, screenshot, script,
-typed text, page title, full URL, cookie, credential, private key, pairing proof,
-or OIDC code/token is retained in service audit records. Journal retention/access
-follow host policy. BananaClaw may retain returned page content in conversation
-history independently.
-
-Back up identities and credential/revocation state, never active grants. A stale
-backup can resurrect an old credential: reconcile and rotate affected credentials
-before reconnecting restored state.
-
-## BananaClaw and OneCLI
-
-Use existing group-level HTTP MCP config and grant this client credential only
-to the matching OneCLI agent. Do not add it to the global new-agent secret list.
-The [container skill](../integration/skills/domagent/SKILL.md) guides setup without
-putting credentials into chat.
-
-To install the instructions for a selected group, copy
-`integration/skills/domagent/` into that BananaClaw checkout's
-`groups/<group-folder>/skills/domagent/`, then restart that group through the
-normal administration workflow. Workspace skills are discovered for that group;
-ensure `domagent` is not in its disabled-skill list. This is an operator action,
-not something the DomAgent service can perform remotely.
-
-Use BananaClaw's existing group MCP settings editor: name `domagent`, transport
-`http`, URL `https://your-domagent-host/mcp`, and the operator-verified
-gateway placeholder in the appropriate header. The current CLI
-`ncl groups config add-mcp-server` creates stdio entries only. Do not use a stdio
-wrapper to bypass credential injection. The settings API replaces the entire
-MCP map; preserve unrelated entries if using it instead of the editor.
-
-Do not substitute a real token for an unverified placeholder. For each provider,
-verify authenticated discovery/status, actual proxy traversal, destination-bound
-injection, group isolation, credential non-exposure, revocation, and explicit
-failure when the gateway/grant is absent. Test with the actual gateway and
-deployment rather than assuming `HTTPS_PROXY` suffices.
+Audit logs are allowlisted metadata only. Keep raw proxy access logs disabled
+and review proxy errors/journal access. A calling application may retain returned
+page content independently. Backups preserve revocation state, not active grants;
+restoring stale credentials requires reconciliation/rotation.
 
 ## Validation and release gates
 
-Automated service tests cover signed enrollment, owner admission, CSRF, OIDC
-state binding, per-client targets, connection replacement, protected navigation,
-revocation, and real HTTP MCP discovery/status through the SDK.
-An isolated OIDC fixture exercises the actual `openid-client` library's discovery,
-PKCE, state, nonce, issuer, audience, and expiry validation; it is not a substitute
-for testing real HTTPS discovery and the deployed identity provider.
-Extension tests/builds cover the local policy/runtime separately.
+Run the service/extension unit suite, syntax checks, both compiled builds, and
+real Chrome/native Firefox tests. The extended Firefox Juggler test remains
+explicitly skipped because of the known harness crash, not as proof of parity.
+Test tenant isolation, preview/replay/concurrent setup, one-link installation,
+automatic pairing without sharing, switching, revocation, and restart.
 
-Real Chrome tests have exercised packaged-extension control and the actual
-service's signed enrollment through real dashboard forms, cross-owner MCP
-routing, target-specific PNG capture, and pause.
-
-A native Firefox 146.0.1 RDP test passes signed pairing, local confirmation,
-trusted-UI grants, navigation/text, form POST, and pause. It additionally verifies
-explicitly approved MAIN-world evaluation without extension APIs, CSP-denied
-evaluation without ending otherwise usable grants, protected fetch/image/frame
-requests and top-level redirects, refused document inspection, disconnect,
-fresh approval, and a full Firefox process restart. After reinstalling the
-temporary add-on in the same profile, identity/key persist, tab provenance is
-empty, and old grants remain invalid.
-
-The tested Firefox build does not expose `tabs.captureTab`; screenshots are
-therefore omitted from approval capabilities and return an explicit unsupported
-error. No visible-tab fallback is used. These tests pre-grant host permissions:
-physical optional-host prompts, notification UX, independently restarted
-background scripts, and other candidate browser versions still need qualification.
-The broader Firefox / Playwright 1.58.2 test is blocked by a crash inside
-Playwright's Juggler frame instrumentation after loading the options document;
-the native smoke avoids that instrumentation rather than weakening the extension.
-Do not advertise full Firefox qualification from the smoke test alone.
-
-The reproducible real-browser tests are documented in
-[the browser test guide](../domagent-extension/test/README.md). They mock external
-OIDC identity-provider infrastructure, not the actual service's enrollment or
-MCP authorization path. The default browser suite passes three tests and
-explicitly skips the blocked extended Firefox Juggler case. Set
-`DOMAGENT_FIREFOX_JUGGLER=1` only to run that additional qualification case on a
-compatible harness; this opt-in does not change production extension behavior.
-
-Before production:
-
-- Qualify physical optional-host permission/notification UX and repeat the browser
-  matrix on every advertised version. Validate independently restarted workers
-  and target-specific capture wherever that capability is advertised.
-- Validate a real configured OIDC provider, TLS termination, owner invitations,
-  and browser cookie/Origin behavior.
-- Complete the live OneCLI verification for every advertised BananaClaw provider.
-- Review the deployed extension update channel and proxy/journal permissions.
-
-Beta builds are source/private packages. Firefox temporary installations do not
-provide production persistence. Store signing/publishing remains independent of
-BananaClaw. Never download executable extension code from the service.
+Physical optional-host permission prompts, notification UX, actual deployed
+OIDC/TLS, client-specific credential injection, and all advertised browser versions
+need operator acceptance. Headless pre-granted fixtures do not qualify physical
+prompt UX. Publish both compiled ZIPs and checksums from the tested commit;
+temporary unsigned Firefox packages are not persistent production installations.

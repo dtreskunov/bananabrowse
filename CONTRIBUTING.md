@@ -234,7 +234,10 @@ There is no automated linter configured yet. Follow the patterns already present
 - MCP tool registration and schemas live in `mcp.js`; shared signing payloads and
   operation names live in `shared/protocol.js`.
 - Do not reintroduce stdio authorization bypasses, raw CDP forwarding, direct
-  credential fallback, or remote approval.
+  credential fallback, or remote control approval.
+- All protocol-v2 state and signatures bind the service origin and tenant.
+  Applications maintain their own integration skills and credential workflows;
+  do not add application-specific configuration dependencies to DomAgent.
 
 ---
 

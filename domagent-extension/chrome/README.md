@@ -5,12 +5,23 @@ uses the pinned esbuild dependency in `domagent-mcp`. Load **`dist/chrome`** usi
 Chrome's Load unpacked flow. This source directory is not an installable package.
 Chrome 118+ is the candidate baseline, not a claim of release qualification.
 
-Open extension options, save the canonical **HTTPS** service origin and add
-local IdP/management origins. Saving requests permission for that service only.
-Start enrollment, follow its service-dashboard link, check dashboard approval,
-verify the displayed owner ID, and locally confirm. Connect restores identity
-only. Approve each client's request locally, selecting allowed capabilities.
-Approval requests broad optional HTTP(S) host access, including intranet sites.
+Installation opens **Connect your browser**. Paste the public HTTPS connection
+link (`https://server.example/join/<tenant-id>`) and choose **Continue**. Only
+that server's permission is requested. Sign in and choose **Connect browser** on
+the server; the extension verifies approval and finishes automatically. This
+shares no tabs and does not request general website permission.
+
+Saved connections have independent, nonextractable device keys. One connection
+is enabled at a time; switching stops all old sharing and queued actions.
+Updates retain identity without opening setup. Legacy origin-only identities
+cannot authorize v2 connections: pair again using a connection link.
+
+**Share a tab** is always a separate local decision, requesting optional HTTP(S)
+access, including intranet sites. **Run page scripts** is unchecked by default.
+The named border/banner and toolbar show sharing; **Stop sharing** in the page
+can stop only that tab's current document, never approve or change settings.
+Decoration is best-effort; a website can hide or imitate it. Marker failures
+warn without disabling otherwise usable control.
 
 Each grant creates a dedicated tab, or reuses this client's inactive dedicated
 tab. Never a user tab. Protected-origin session DNR rules (including redirects

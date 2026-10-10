@@ -26,13 +26,14 @@ const tools = [
 ];
 
 export async function handleMcp(req, res, body, client, bridge) {
-  const server = new Server({ name: 'domagent', version: '2.0.0-beta.2' },
+  const server = new Server({ name: 'domagent', version: '3.0.0-beta.1' },
     { capabilities: { tools: {} } });
   server.onerror = () => audit('mcp_protocol_failure', { client_id: client.id, code: 'PROTOCOL_FAILURE' });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
-      requireValue(bridge.store.client(client.id), 'NOT_AUTHORIZED', 403);
+      const current = bridge.store.client(client.id, client.tenant_id);
+      requireValue(current && current.credential_hash === client.credential_hash, 'NOT_AUTHORIZED', 403);
       const { name, arguments: args = {} } = request.params;
       const definition = tools.find(tool => tool.name === name);
       requireValue(definition && args && typeof args === 'object' && !Array.isArray(args),
@@ -41,16 +42,16 @@ export async function handleMcp(req, res, body, client, bridge) {
       requireValue(Object.keys(args).every(key => keys.includes(key)) &&
         keys.every(key => typeof args[key] === 'string'), 'INVALID_ARGUMENTS');
       let result;
-      if (name === 'list_browser_targets') result = bridge.targets(client.id);
-      else if (name === 'request_browser_access') result = bridge.requestAccess(client.id, args.device_id);
+      if (name === 'list_browser_targets') result = bridge.targets(client.id, client.tenant_id);
+      else if (name === 'request_browser_access') result = bridge.requestAccess(client.id, args.device_id, false, client.tenant_id);
       else if (name === 'request_handoff') {
         const grant = bridge.grants.get(args.target_id);
-        requireValue(grant?.client_id === client.id, 'NOT_AUTHORIZED', 403);
+        requireValue(grant?.client_id === client.id && grant.tenant_id === client.tenant_id, 'NOT_AUTHORIZED', 403);
         bridge.endGrant(args.target_id, 'HANDOFF');
         result = { state: 'paused', requires_local_approval: true };
       } else {
         const { target_id, ...operationArgs } = args;
-        result = await bridge.operate(client.id, target_id, name, operationArgs, extra.signal);
+        result = await bridge.operate(client.id, target_id, name, operationArgs, extra.signal, client.tenant_id);
       }
       if (name === 'get_screenshot') {
         requireValue(result?.mimeType === 'image/png' && typeof result.data === 'string' &&

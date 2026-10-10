@@ -1,6 +1,6 @@
 import { OPERATIONS, navigationUrl } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
-import { pageEvaluate, pageHelper } from './page.js';
+import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
 
 export class BrowserAdapter {
   constructor(api, browserName) {
@@ -57,6 +57,7 @@ export class BrowserAdapter {
     }
     this.api.tabs.onUpdated.addListener((tabId, change) => {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
+      if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
     this.api.tabs.onRemoved.addListener(tabId => this.onTabEvent(tabId, 'closed'));
     this.api.webNavigation.onBeforeNavigate.addListener(details => {
@@ -75,6 +76,9 @@ export class BrowserAdapter {
         void this.releaseAfterNavigation(details.tabId).catch(error => this.onWarning(error));
       }
     });
+    for (const tab of inventory) {
+      await this.removeIndicator(tab.tabId).catch(() => this.onWarning(new Error('INDICATOR_UNAVAILABLE')));
+    }
   }
 
   async permissions() {
@@ -126,7 +130,11 @@ export class BrowserAdapter {
     }
   }
 
-  async release(tabId, { retainProtection = false } = {}) {
+  async release(tabId, { retainProtection = false, indicatorToken } = {}) {
+    // Decoration must never delay teardown of actual browser authority.
+    if (indicatorToken) {
+      void this.removeIndicator(tabId, indicatorToken).catch(() => this.onWarning(new Error('INDICATOR_UNAVAILABLE')));
+    }
     if (this.attached.has(tabId)) {
       try {
         await this.api.debugger.detach({ tabId });
@@ -137,6 +145,23 @@ export class BrowserAdapter {
       }
     }
     if (!retainProtection) await this.dropProtection(tabId);
+  }
+
+  async indicator(tabId, details) {
+    const tab = await this.api.tabs.get(tabId);
+    if (tab.url === 'about:blank') return null;
+    const results = await this.api.scripting.executeScript({
+      target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: sharingIndicator, args: [details],
+    });
+    if (!results?.[0]?.result?.url || results[0].error) fail('INDICATOR_UNAVAILABLE');
+    return { url: results[0].result.url, documentId: results[0].documentId };
+  }
+
+  async removeIndicator(tabId, token) {
+    await this.api.scripting.executeScript({
+      target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: sharingIndicator,
+      args: [token ? { remove: true, token } : null],
+    });
   }
 
   async dropProtection(tabId) {

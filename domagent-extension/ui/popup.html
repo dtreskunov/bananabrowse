@@ -3,24 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DomAgent controls</title>
+  <title>DomAgent</title>
   <link rel="stylesheet" href="ui.css">
   <script src="ui.js" defer></script>
 </head>
 <body class="popup">
   <h1>DomAgent</h1>
-  <p id="status" role="status">Loading extension state…</p>
-  <p id="error" role="alert"></p>
+  <p id="status" role="status">Getting ready…</p>
   <p id="identity"></p>
-  <button id="options" type="button">Service, enrollment and disclosures</button>
-  <button id="connect" type="button">Connect identity only</button>
-  <button id="disconnect" type="button">Disconnect all control</button>
-  <section>
-    <h2>Pending local approvals</h2>
-    <p>Clients can be registered by another owner. Verify the stable client ID; labels do not verify agent-group identity.</p>
-    <div id="requests"></div>
-  </section>
-  <section><h2>Dedicated automation tabs</h2><div id="targets"></div></section>
-  <p class="warning">Dedicated tabs share website logins. Agents can read page-visible secrets and run ordinary page JavaScript, including network/account changes. Pause stops new commands; prior/scheduled JavaScript is not undone. Broad HTTP(S) permissions are requested at approval. No grants survive restart/disconnect.</p>
+  <p id="error" role="alert"></p>
+  <button id="options" type="button">Settings</button>
+  <button id="connect" type="button">Try again</button>
+  <button id="disconnect" type="button">Disconnect</button>
+  <section><h2>Your connections</h2><div id="connections"></div></section>
+  <section><h2>Sharing requests</h2><div id="requests"></div></section>
+  <section><h2>Your tabs</h2><div id="targets"></div></section>
+  <p class="warning">Shared tabs use your website sign-ins and may expose private information. Stop sharing stops new actions, not scripts or requests that already started.</p>
 </body>
 </html>

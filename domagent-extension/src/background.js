@@ -1,7 +1,8 @@
 import { BrowserAdapter } from './adapter.js';
 import { Controller, LOCAL_END_REASONS } from './controller.js';
 import { DeviceKeys } from './keys.js';
-import { errorCode, fail, isUiSender } from './security.js';
+import { errorCode, fail, isUiSender, needsSetup } from './security.js';
+import { parseConnectionUrl } from '../../shared/protocol.js';
 
 const api = typeof browser === 'undefined' ? chrome : browser;
 const adapter = new BrowserAdapter(api, BUILD_BROWSER);
@@ -17,10 +18,18 @@ function updateBadge() {
   if (active) badge = 'ON';
   else if (snapshot.pending.length) badge = '?';
   else if (snapshot.phase === 'authenticated') badge = 'IDLE';
+  let title = 'DomAgent: not connected. No tabs are being shared.';
+  if (active) {
+    const names = snapshot.targets.filter(target => target.state === 'active').map(target => target.client_label);
+    title = `DomAgent: ${names.join(', ')} can use the shared tab.`;
+  } else if (snapshot.pending.length) title = 'DomAgent: sharing request waiting';
+  else if (snapshot.phase === 'authenticated') {
+    title = `DomAgent: connected to ${snapshot.identity.tenant_label}. No tabs are being shared.`;
+  }
   Promise.all([
     api.action.setBadgeText({ text: badge }),
     api.action.setBadgeBackgroundColor({ color: active ? '#a4262c' : '#365375' }),
-    api.action.setTitle({ title: `DomAgent: ${active ? 'page control active' : snapshot.phase}` }),
+    api.action.setTitle({ title }),
   ]).catch(error => console.error('DomAgent badge update:', error));
 }
 
@@ -40,6 +49,12 @@ ready = controller.initialize().catch(error => {
   controller.report(error);
 });
 
+api.runtime.onInstalled.addListener(details => {
+  void ready.then(() => {
+    if (needsSetup(details.reason, controller.snapshot().identity)) return api.runtime.openOptionsPage();
+  }).catch(error => controller.report(error));
+});
+
 let localMutation = Promise.resolve();
 async function uiAction(message) {
   await ready;
@@ -47,11 +62,17 @@ async function uiAction(message) {
   if (!message || typeof message !== 'object') fail('INVALID_MESSAGE');
   if (message.type === 'ui.state') return controller.snapshot();
   if (message.type === 'ui.configure') {
-    const origin = new URL(message.config.service_origin).origin;
+    const { origin } = parseConnectionUrl(message.config.connection_url);
     if (!await api.permissions.contains({ origins: [`${origin}/*`] })) fail('PERMISSION_REQUIRED');
     return controller.configure(message.config);
   }
+  if (message.type === 'ui.switch') return controller.switchConnection(message.connection_url);
   if (message.type === 'ui.enroll') return controller.enroll(message.label);
+  if (message.type === 'ui.openSignIn') {
+    const enrollment = controller.snapshot().enrollment;
+    if (!enrollment || enrollment.expires_at <= Date.now()) fail('ENROLLMENT_EXPIRED');
+    return api.tabs.create({ url: enrollment.verification_url, active: true });
+  }
   if (message.type === 'ui.enrollmentStatus') return controller.enrollmentStatus();
   if (message.type === 'ui.confirmEnrollment') return controller.confirmEnrollment();
   if (message.type === 'ui.connect') return controller.enable();
@@ -71,6 +92,14 @@ async function uiAction(message) {
 }
 
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'page.stop') {
+    // This one content-script action cannot mutate settings or grant authority.
+    ready.then(() => controller.stopFromPage(message, sender, api.runtime.id)).then(
+      () => sendResponse({ ok: true }),
+      () => sendResponse({ ok: false, error: { code: 'NOT_AUTHORIZED' } }),
+    );
+    return true;
+  }
   if (!isUiSender(sender, api.runtime)) {
     sendResponse({ ok: false, error: { code: 'NOT_AUTHORIZED' } });
     return false;

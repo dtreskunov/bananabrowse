@@ -1,6 +1,6 @@
 import {
   VERSION, POLICY_ID, LIVENESS_MS, authPayload, enrollmentPayload, extensionOrigin,
-  grantPayload, serviceOrigin, sign, startPayload, statusPayload,
+  connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId,
 } from '../../shared/protocol.js';
 import {
   COMMAND_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
@@ -21,6 +21,9 @@ export class Controller {
     this.extension_origin = extensionOrigin(`${url.protocol}//${url.host}`);
     this.config = { service_origin: '', local_protected_origins: [], enabled: false };
     this.record = null;
+    this.savedConnections = [];
+    this.enrollmentPolling = false;
+    this.lastEnrollmentPoll = 0;
     this.socket = null;
     this.generation = 0;
     this.connection = null;
@@ -49,17 +52,23 @@ export class Controller {
 
   async initialize() {
     const [saved, session] = await Promise.all([
-      this.storage.get(['config']), this.inventoryStorage.get(['dedicatedTabs']),
+      this.storage.get(['config', 'savedConnections']), this.inventoryStorage.get(['dedicatedTabs']),
     ]);
     // Tab IDs are authoritative only within this browser session. Persisting
     // them across browser restarts could accidentally adopt an unrelated tab.
     this.inventory = Array.isArray(session.dedicatedTabs) ? session.dedicatedTabs : [];
     await this.adapter.initialize(this.inventory);
-    if (saved.config?.service_origin) {
+    this.savedConnections = (Array.isArray(saved.savedConnections) ? saved.savedConnections : [])
+      .filter(pair => {
+        try { return parseConnectionUrl(pair.connection_url).tenant_id === pair.tenant_id; } catch { return false; }
+      }).slice(0, 32);
+    if (saved.config?.service_origin && saved.config?.tenant_id) {
       this.config = { service_origin: serviceOrigin(saved.config.service_origin),
+        tenant_id: tenantId(saved.config.tenant_id),
+        connection_url: connectionUrl(saved.config.service_origin, saved.config.tenant_id),
         local_protected_origins: originList(saved.config.local_protected_origins || []),
         enabled: saved.config.enabled === true };
-      this.record = await this.keys.get(this.config.service_origin);
+      this.record = await this.keys.get(this.config.service_origin, this.config.tenant_id);
     }
     this.timer = setInterval(() => this.tick(), 1000);
     if (this.config.enabled && this.record?.identity) this.connect();
@@ -75,17 +84,20 @@ export class Controller {
     return {
       config: this.config, phase: this.phase, identity: this.record?.identity || null,
       key_id: this.record?.key_id || null,
+      saved_connections: this.savedConnections,
       enrollment: this.record?.enrollment || null,
       protected_origins: this.config.service_origin ? this.protectedOrigins() : [],
       capabilities: this.adapter.capabilities(),
       pending: [...this.pending.values()].map(request => ({
         request_id: request.request_id, client_id: request.client_id, client_label: request.client_label,
+        tenant_id: request.tenant_id,
         expires_at: request.expires_at, policy_id: request.policy_id,
       })),
       targets: this.inventory.filter(tab => tab.origin === this.config.service_origin &&
-        tab.device_id === this.record?.identity?.device_id).map(tab => {
+        tab.tenant_id === this.config.tenant_id && tab.device_id === this.record?.identity?.device_id).map(tab => {
         const grant = [...this.grants.values()].find(grant => grant.tabId === tab.tabId);
-        return { client_id: tab.client_id, tabId: tab.tabId, target_id: grant?.target_id,
+        return { client_id: tab.client_id, client_label: grant?.client_label || tab.client_label,
+          tabId: tab.tabId, target_id: grant?.target_id,
           state: grant?.state || 'inactive' };
       }),
       failures: this.failures,
@@ -93,18 +105,41 @@ export class Controller {
   }
 
   async configure(value) {
-    const origin = serviceOrigin(value.service_origin);
-    const local = originList(value.local_protected_origins || []);
+    const pair = value.connection_url ? parseConnectionUrl(value.connection_url) : {
+      origin: serviceOrigin(value.service_origin), tenant_id: tenantId(value.tenant_id),
+      connection_url: connectionUrl(value.service_origin, value.tenant_id),
+    };
+    const origin = pair.origin;
+    const saved = this.savedConnections.find(connection => connection.connection_url === pair.connection_url);
+    const local = originList(value.local_protected_origins ?? saved?.local_protected_origins ?? []);
     await this.disconnect();
-    this.config = { service_origin: origin, local_protected_origins: local, enabled: false };
-    this.record = await this.keys.get(origin);
+    this.config = { service_origin: origin, tenant_id: pair.tenant_id,
+      connection_url: pair.connection_url, local_protected_origins: local, enabled: false };
+    this.record = await this.keys.get(origin, pair.tenant_id);
     await this.storage.set({ config: this.config });
     this.changed();
     return this.snapshot();
   }
 
+  async switchConnection(connection) {
+    if (!this.savedConnections.some(pair => pair.connection_url === connection)) fail('NOT_AUTHORIZED');
+    await this.configure({ connection_url: connection });
+    await this.enable();
+    return this.snapshot();
+  }
+
+  async saveConnection(record = this.record) {
+    if (!record?.identity) return;
+    const pair = { connection_url: record.connection_url, tenant_id: record.tenant_id,
+      origin: record.origin, label: record.identity.tenant_label,
+      local_protected_origins: this.record === record ? this.config.local_protected_origins
+        : this.savedConnections.find(saved => saved.connection_url === record.connection_url)?.local_protected_origins || [] };
+    this.savedConnections = [...this.savedConnections.filter(saved => saved.connection_url !== pair.connection_url), pair].slice(-32);
+    await this.storage.set({ savedConnections: this.savedConnections });
+  }
+
   async api(path, body) {
-    const response = await this.fetcher(`${this.config.service_origin}/api/enrollment/${path}`, {
+    const response = await this.fetcher(`${this.config.service_origin}/api/tenants/${tenantId(this.config.tenant_id)}/enrollment/${path}`, {
       method: body ? 'POST' : 'GET', credentials: 'omit', redirect: 'error', cache: 'no-store',
       headers: body ? { 'Content-Type': 'application/json' } : {},
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10_000),
@@ -121,18 +156,23 @@ export class Controller {
     const origin = this.config.service_origin;
     const record = this.record;
     const challenge = await this.api('challenge');
-    if (challenge.origin !== origin) fail('NOT_AUTHORIZED');
+    const tenant = this.config.tenant_id;
+    if (challenge.origin !== origin || challenge.tenant_id !== tenant) fail('NOT_AUTHORIZED');
     text(challenge.nonce, 256);
-    const request = { origin, nonce: challenge.nonce, key_id: record.key_id,
+    const request = { origin, tenant_id: tenant, nonce: challenge.nonce, key_id: record.key_id,
       public_key: record.public_key, extension_origin: this.extension_origin, label: text(label, 100) };
     const signature = await sign(record.privateKey, startPayload(request));
     const enrollment = await this.api('start', { ...request, origin: undefined, signature });
     id(enrollment.enrollment_id);
-    if (new URL(enrollment.verification_url).origin !== origin ||
+    const verification = new URL(enrollment.verification_url);
+    if (enrollment.tenant_id !== tenant || verification.origin !== origin ||
+        verification.pathname !== `/pair/${tenant}` || verification.username || verification.password ||
+        verification.hash || verification.search !== `?enrollment=${enrollment.enrollment_id}` ||
         !enrollment.verification_url.startsWith('https://') ||
         !Number.isFinite(enrollment.expires_at) || enrollment.expires_at <= this.now()) fail('INVALID_MESSAGE');
-    if (this.record !== record || this.config.service_origin !== origin) fail('NOT_AUTHORIZED');
+    if (this.record !== record || this.config.service_origin !== origin || this.config.tenant_id !== tenant) fail('NOT_AUTHORIZED');
     record.enrollment = { enrollment_id: enrollment.enrollment_id,
+      tenant_id: tenant,
       verification_url: enrollment.verification_url, expires_at: enrollment.expires_at, state: 'pending' };
     await this.keys.save(record);
     this.changed();
@@ -144,49 +184,59 @@ export class Controller {
     const origin = this.config.service_origin;
     const enrollment = record?.enrollment;
     if (!enrollment || enrollment.expires_at <= this.now()) fail('ENROLLMENT_EXPIRED');
-    const request = { origin, enrollment_id: enrollment.enrollment_id };
+    const request = { origin, tenant_id: record.tenant_id, enrollment_id: enrollment.enrollment_id };
     const signature = await sign(record.privateKey, statusPayload(request));
-    const status = await this.api('status', { enrollment_id: request.enrollment_id, signature });
+    const status = await this.api('status', { tenant_id: record.tenant_id, enrollment_id: request.enrollment_id, signature });
     if (this.record !== record || status.enrollment_id !== enrollment.enrollment_id ||
+        status.tenant_id !== record.tenant_id ||
         !['pending', 'approved'].includes(status.state)) fail('NOT_AUTHORIZED');
     if (status.state === 'approved') {
       if (status.key_id !== record.key_id || status.extension_origin !== this.extension_origin ||
           !Number.isFinite(status.expires_at) || status.expires_at <= this.now()) fail('NOT_AUTHORIZED');
       id(status.owner_id);
       text(status.owner_label);
+      text(status.tenant_label, 80);
       text(status.nonce);
       originList(status.protected_origins);
       record.enrollment = { ...status, verification_url: enrollment.verification_url };
       await this.keys.save(record);
+      await this.confirmEnrollment(record);
     }
     this.changed();
-    return record.enrollment;
+    return record.enrollment || record.identity;
   }
 
-  async confirmEnrollment() {
+  async confirmEnrollment(expectedRecord = this.record) {
     await this.disconnect();
     const record = this.record;
+    if (record !== expectedRecord) fail('NOT_AUTHORIZED');
     const origin = this.config.service_origin;
     const status = record?.enrollment;
     if (!status || status.state !== 'approved' || status.expires_at <= this.now()) fail('ENROLLMENT_EXPIRED');
     const signature = await sign(record.privateKey, enrollmentPayload({ ...status, origin }));
-    const identity = await this.api('confirm', { enrollment_id: status.enrollment_id, signature });
+    const identity = await this.api('confirm', { tenant_id: record.tenant_id, enrollment_id: status.enrollment_id, signature });
     if (this.record !== record || identity.key_id !== record.key_id ||
+        identity.tenant_id !== record.tenant_id ||
         identity.owner_id !== status.owner_id) fail('NOT_AUTHORIZED');
     id(identity.device_id);
     text(identity.owner_label);
+    text(identity.tenant_label, 80);
     record.protected_origins = protectedUnion(origin, record.protected_origins,
       status.protected_origins, identity.protected_origins);
     record.identity = { device_id: identity.device_id, owner_id: identity.owner_id,
-      owner_label: identity.owner_label };
+      owner_label: identity.owner_label, tenant_id: identity.tenant_id, tenant_label: identity.tenant_label };
     record.enrollment = null;
     await this.keys.save(record);
+    if (this.record !== record) fail('NOT_AUTHORIZED');
+    await this.saveConnection(record);
+    if (this.record !== record) fail('NOT_AUTHORIZED');
+    await this.enable();
     this.changed();
     return record.identity;
   }
 
   async enable() {
-    if (!this.record?.identity) fail('NOT_AUTHORIZED');
+    if (!this.record?.identity || this.record.identity.tenant_id !== this.config.tenant_id) fail('NOT_AUTHORIZED');
     this.config.enabled = true;
     await this.storage.set({ config: this.config });
     this.reconnectAttempts = 0;
@@ -194,10 +244,11 @@ export class Controller {
   }
 
   connect() {
-    if (this.socket || !this.config.enabled || !this.record?.identity) return;
+    if (this.socket || !this.config.enabled || !this.record?.identity ||
+        this.record.identity.tenant_id !== this.config.tenant_id) return;
     clearTimeout(this.reconnectTimer);
     const generation = ++this.generation;
-    const socket = new this.Socket(`${this.config.service_origin.replace('https:', 'wss:')}/extension`);
+    const socket = new this.Socket(`${this.config.service_origin.replace('https:', 'wss:')}/extension/${tenantId(this.config.tenant_id)}`);
     this.socket = socket;
     this.phase = 'connecting';
     this.lastPing = this.now();
@@ -205,7 +256,7 @@ export class Controller {
     socket.onopen = () => {
       if (!this.current(socket, generation)) return;
       this.phase = 'authenticating';
-      socket.send(JSON.stringify({ type: 'hello', version: VERSION, key_id: this.record.key_id }));
+      socket.send(JSON.stringify({ type: 'hello', version: VERSION, tenant_id: this.config.tenant_id, key_id: this.record.key_id }));
       this.changed();
     };
     socket.onmessage = event => {
@@ -232,7 +283,7 @@ export class Controller {
   send(message) {
     if (!this.connection || this.socket?.readyState !== 1 ||
         this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-    this.socket.send(JSON.stringify(message));
+    this.socket.send(JSON.stringify({ ...message, tenant_id: this.config.tenant_id }));
   }
 
   async receive(raw, socket, generation) {
@@ -244,6 +295,7 @@ export class Controller {
     if (typeof raw !== 'string' || new TextEncoder().encode(raw).length > MAX_MESSAGE_BYTES) fail('INVALID_MESSAGE');
     const message = JSON.parse(raw);
     if (!message || typeof message !== 'object') fail('INVALID_MESSAGE');
+    if (message.tenant_id !== this.config.tenant_id) fail('NOT_AUTHORIZED');
     if (message.type === 'error') {
       text(message.code);
       if (message.code === 'COMMAND_EXPIRED') fail('COMMAND_EXPIRED');
@@ -258,20 +310,25 @@ export class Controller {
       this.phase = 'proving';
       this.challenge = message;
       const signature = await sign(this.record.privateKey, authPayload(message));
-      if (this.current(socket, generation)) socket.send(JSON.stringify({ type: 'proof', signature }));
+      if (this.current(socket, generation)) socket.send(JSON.stringify({ type: 'proof', tenant_id: this.config.tenant_id, signature }));
       return;
     }
     if (message.type === 'authenticated') {
-      const identity = this.record.identity;
+      const record = this.record;
+      const identity = record.identity;
       if (this.phase !== 'proving' || message.device_id !== identity.device_id ||
           message.owner_id !== identity.owner_id) fail('NOT_AUTHORIZED');
       checkBinding(message, this.challenge);
       text(message.owner_label);
-      this.record.protected_origins = protectedUnion(this.config.service_origin,
-        this.record.protected_origins, message.protected_origins);
-      await this.keys.save(this.record);
+      text(message.tenant_label, 80);
+      record.protected_origins = protectedUnion(this.config.service_origin,
+        record.protected_origins, message.protected_origins);
+      identity.tenant_label = message.tenant_label;
+      await this.keys.save(record);
       if (!this.current(socket, generation)) return;
-      this.connection = { epoch: message.epoch, connection_id: message.connection_id };
+      await this.saveConnection(record);
+      if (!this.current(socket, generation)) return;
+      this.connection = { tenant_id: message.tenant_id, epoch: message.epoch, connection_id: message.connection_id };
       this.phase = 'authenticated';
       this.lastPing = this.now();
       this.reconnectAttempts = 0;
@@ -283,6 +340,7 @@ export class Controller {
       this.lastPing = this.now();
       this.send({ type: 'pong' });
     } else if (message.type === 'approval.request') {
+      const record = this.record;
       checkBinding(message, this.connection);
       id(message.request_id);
       id(message.client_id);
@@ -292,16 +350,17 @@ export class Controller {
           message.expires_at <= this.now() || message.expires_at > this.now() + 300_000) fail('INVALID_MESSAGE');
       if (this.pending.size >= 32 || this.pending.has(message.request_id)) fail('INVALID_MESSAGE');
       const protectedOrigins = protectedUnion(this.config.service_origin,
-        this.record.protected_origins, message.protected_origins);
+        record.protected_origins, message.protected_origins);
       if (protectedOrigins.some(origin => !this.protectedOrigins().includes(origin))) {
         // Newly protected origins must never wait behind a still-active old filter.
         await Promise.all([...this.grants.values()].map(grant => this.end(grant.target_id, 'OWNER_PAUSED')));
       }
-      this.record.protected_origins = protectedOrigins;
-      await this.keys.save(this.record);
+      if (!this.current(socket, generation)) return;
+      record.protected_origins = protectedOrigins;
+      await this.keys.save(record);
       if (!this.current(socket, generation)) return;
       this.pending.set(message.request_id, message);
-      this.notify('Browser approval needed', `Client ${message.client_id} is requesting page control.`);
+      this.notify('Sharing request', `${message.client_label} would like to use a tab.`);
       this.changed();
     } else if (message.type === 'grant.active') {
       const grant = this.grants.get(message.target_id);
@@ -312,6 +371,7 @@ export class Controller {
       }
       checkBinding(grant, this.connection);
       grant.state = 'active';
+      void this.updateIndicator(grant);
       this.changed();
     } else if (message.type === 'grant.end') {
       id(message.target_id);
@@ -350,11 +410,13 @@ export class Controller {
     };
     try {
       const previous = this.inventory.find(tab => tab.origin === this.config.service_origin &&
+        tab.tenant_id === this.config.tenant_id &&
         tab.device_id === this.record.identity.device_id && tab.client_id === request.client_id);
       const tab = await this.adapter.createTab(this.busyTabs.has(previous?.tabId) ? undefined : previous?.tabId);
       createdTabId = tab.id;
       this.busyTabs.add(tab.id);
       const inventory = { origin: this.config.service_origin, device_id: this.record.identity.device_id,
+        tenant_id: this.config.tenant_id, client_label: request.client_label,
         client_id: request.client_id, tabId: tab.id };
       this.inventory = this.inventory.filter(existing => existing !== previous);
       this.inventory.push(inventory);
@@ -412,6 +474,9 @@ export class Controller {
     // Disable authority synchronously, before any browser/API cleanup awaits.
     this.grants.delete(targetId);
     grant.state = 'ended';
+    const indicatorToken = grant.indicatorCleanupToken || grant.indicatorToken;
+    grant.indicatorToken = null;
+    this.changed();
     for (const queued of grant.queue.splice(0)) this.result(queued.message, { code: 'APPROVAL_REQUIRED' });
     if (announce && this.connection) {
       try {
@@ -421,7 +486,7 @@ export class Controller {
       }
     }
     this.busyTabs.add(grant.tabId);
-    const cleanup = this.adapter.release(grant.tabId, { retainProtection });
+    const cleanup = this.adapter.release(grant.tabId, { retainProtection, indicatorToken });
     this.teardowns.add(cleanup);
     try {
       await cleanup;
@@ -444,12 +509,49 @@ export class Controller {
   resume(clientId) {
     id(clientId);
     if (!this.inventory.some(tab => tab.origin === this.config.service_origin &&
+        tab.tenant_id === this.config.tenant_id &&
         tab.device_id === this.record.identity.device_id && tab.client_id === clientId)) fail('NOT_AUTHORIZED');
     this.send({ type: 'access.request', client_id: clientId });
   }
 
+  async updateIndicator(grant) {
+    if (grant.state !== 'active' || this.grants.get(grant.target_id) !== grant || !this.adapter.indicator) return;
+    const token = crypto.randomUUID();
+    const documentGeneration = grant.documentGeneration;
+    grant.indicatorToken = token;
+    grant.indicatorCleanupToken = token;
+    try {
+      const document = await this.adapter.indicator(grant.tabId, {
+        target_id: grant.target_id, token, label: grant.client_label,
+      });
+      if (!document) {
+        if (grant.indicatorToken === token) grant.indicatorToken = null;
+        return;
+      }
+      if (this.grants.get(grant.target_id) !== grant || grant.documentGeneration !== documentGeneration ||
+          grant.indicatorToken !== token) {
+        await this.adapter.removeIndicator?.(grant.tabId, token);
+        return;
+      }
+      grant.indicatorDocument = document;
+    } catch {
+      this.report(new Error('INDICATOR_UNAVAILABLE'));
+    }
+  }
+
+  stopFromPage(message, sender, extensionId) {
+    const grant = this.grants.get(message?.target_id);
+    if (message?.type !== 'page.stop' || sender?.id !== extensionId || sender.frameId !== 0 ||
+        !grant || grant.state !== 'active' || sender.tab?.id !== grant.tabId ||
+        !grant.indicatorToken || message.token !== grant.indicatorToken ||
+        !grant.indicatorDocument || sender.url !== grant.indicatorDocument.url ||
+        (grant.indicatorDocument.documentId && sender.documentId !== grant.indicatorDocument.documentId)) fail('NOT_AUTHORIZED');
+    return this.end(grant.target_id, 'OWNER_PAUSED');
+  }
+
   result(message, error, result) {
     if (!this.connection || message.epoch !== this.connection.epoch ||
+        message.tenant_id !== this.connection.tenant_id ||
         message.connection_id !== this.connection.connection_id) return;
     try {
       this.send({ type: 'result', request_id: message.request_id, target_id: message.target_id,
@@ -533,6 +635,8 @@ export class Controller {
       if (grant.tabId !== tabId) continue;
       if (type === 'navigation') {
         grant.documentGeneration++;
+        grant.indicatorToken = null;
+        grant.indicatorDocument = null;
         if (url && !(url === 'about:blank' && grant.blankAllowed)) {
           let protectedPage = true;
           let protectedOrigin = false;
@@ -548,6 +652,8 @@ export class Controller {
             void this.end(grant.target_id, 'HANDOFF', true, protectedOrigin);
           }
         }
+      } else if (type === 'complete') {
+        void this.updateIndicator(grant);
       } else {
         let reason = 'OWNER_PAUSED';
         if (type === 'protected_pending') reason = 'HANDOFF';
@@ -558,6 +664,15 @@ export class Controller {
   }
 
   tick() {
+    const enrollment = this.record?.enrollment;
+    if (enrollment && !this.enrollmentPolling && enrollment.expires_at > this.now() &&
+        this.now() - this.lastEnrollmentPoll >= 2000) {
+      this.enrollmentPolling = true;
+      this.lastEnrollmentPoll = this.now();
+      void this.enrollmentStatus().catch(error => {
+        if (this.record?.enrollment === enrollment) this.report(error);
+      }).finally(() => { this.enrollmentPolling = false; });
+    }
     if (this.socket && this.now() - this.lastPing >= LIVENESS_MS) {
       this.loseConnection(this.socket, this.generation);
     }
@@ -595,6 +710,8 @@ export class Controller {
     this.config.enabled = false;
     clearTimeout(this.reconnectTimer);
     if (this.socket) this.loseConnection(this.socket, this.generation, false);
+    else this.generation++;
+    this.pending.clear();
     await Promise.all([...this.grants.values()].map(grant => this.end(grant.target_id, 'BROWSER_OFFLINE', false)));
     await Promise.allSettled([...this.teardowns]);
     await this.storage.set({ config: this.config });

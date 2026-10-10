@@ -1,189 +1,91 @@
-# Extension validation
+# Extension validation (v2 / manifest 3.0.0)
 
-From the repository root, with parent-managed dependencies already installed:
+With the pinned service dependencies already installed, from the repository root:
 
 ```sh
 node --test domagent-extension/test/*.test.js
 node scripts/build-extensions.mjs
-node domagent-mcp/node_modules/@playwright/test/cli.js test -c domagent-extension/playwright.config.cjs
-```
-
-With preinstalled engines and OS libraries in the rootless Playwright image:
-
-```sh
 podman run --rm --shm-size=512m -e PLAYWRIGHT_SKIP_BROWSER_GC=1 \
   -v "$PWD:/workspace" -w /workspace/domagent-mcp \
   mcr.microsoft.com/playwright:v1.58.2-noble npm run test:browser
 ```
 
-The default suite runs the Chrome protocol fixture, actual-service Chrome
-dashboard flow, and native Firefox RDP smoke. Only the extended Firefox Juggler
-case is skipped unless `DOMAGENT_FIREFOX_JUGGLER=1` is explicitly set. The skip
-explains the confirmed Playwright engine failure; it is not an assertion of
-extended Firefox qualification. Chrome and native Firefox assertions are not
-disabled or made optional.
+The suite uses only disposable profiles and TLS fixtures inside
+`domagent-extension/.browser-artifacts/`. It does not install host browser
+libraries, change live services, or weaken production certificate handling.
+The Chromium and Firefox engines and image must already be available.
 
-The unfiltered default `npm run test:browser` passes in the rootless image:
-**3 passed, 1 skipped (47.6s)**. The skipped test is precisely the opt-in extended
-Firefox Juggler case; the native Firefox RDP smoke runs and passes by default.
+## Automated coverage
 
-The Chrome and Firefox tests use throwaway profiles and a self-signed HTTPS/WSS
-fixture in `domagent-extension/.browser-artifacts/`, clean it up, and verify packaged
-UI/runtime sender isolation, signed enrollment/handshake/approval, dedicated tab
-creation, page operations, DNR redirect blocking, teardown, and IndexedDB key
-survival. Firefox is installed as a real temporary WebExtension through its
-remote-debugging addons actor; tests attempt to navigate the actual packaged
-extension options UI, not a simulated page-world helper. The remote debugger and signature
-preferences are confined to this throwaway test profile. Test-only browser
-certificate overrides trust the HTTPS fixture. Production
-code always requires HTTPS/WSS and never sets certificate exceptions.
+- Real Chromium protocol fixture: signed tenant-bound enrollment and handshake,
+  local sharing approval, dedicated tabs, MAIN-only script execution without
+  extension APIs, page operations, screenshot PNGs, CSP behavior, protected
+  requests/redirects, stop/reapproval, and IndexedDB identity after restart.
+- Actual-service Chromium: real `Store` and `createApp`, anonymous setup request,
+  browser fragment-token exchange and HttpOnly flow, authenticated setup form,
+  once-shown operator settings, public connection link, automatic installation
+  wizard, server approval form, automatic proof/connection without a local
+  second confirmation, and no grant before separate local sharing approval.
+  Same-origin/different-tenant credentials, devices and targets are isolated.
+  Switching kills old grants and preserves independent keys.
+- Native Firefox RDP: real temporary WebExtension and actual service, signed
+  pairing, separate local approval, protected fetch/image/frame/redirects,
+  selector errors, submit/form POST/JSON-viewer regressions, browser-restricted
+  document refusal, optional-operation failures, fresh approval, and full
+  process restart with persisted identity and empty tab provenance.
+- Named page indicators, page-local Stop sharing, extraction exclusion,
+  `clear_overlays` preserving the indicator, and independent toolbar status.
+- Unit tests cover strict missing-tenant rejection, nonextractable per-pair
+  keys, legacy records, queued/running work on switch, stale documents, stop-only
+  sender/tab/frame/document binding, install-versus-update behavior, and cosmetic
+  failure that warns without blocking command authority or teardown.
 
-Dedicated-tab provenance uses `storage.session` only: IDs from a previous browser
-session are never trusted to adopt tabs in a later session. Device identity and
-nonextractable signing keys use extension IndexedDB, not the tab inventory.
-
-Tests also exercise owner pause/fresh reapproval, MAIN-world execution without
-extension APIs, real page-CSP capability behavior, tab-specific PNG screenshots
-or an explicit Firefox unavailable error, and protected-origin page fetches.
-
-`service.spec.cjs` uses the actual `Store`, `createApp`, enrollment endpoints,
-signed device bridge, owner dashboard approval, and HTTP MCP SDK. Only the OIDC
-issuer and initial test-owner session are fixtures. The client is registered by
-a different invited owner to exercise explicit cross-owner linking. The browser
-still performs final enrollment confirmation and per-client approval locally.
-
-Current qualification: the real Chromium fixture passes, including blocking a
-protected top-level redirect and a protected page fetch. Firefox installation
-succeeds without manifest warnings. RDP confirms an active policy, running
-background, and the exact packaged options URL. Native Firefox loads that
-document in an `extension` process, but the supplied Playwright 1.58.2 Firefox
-engine fails at `chrome://juggler/content/content/FrameTree.js:543` with
-`this.domWindow() is undefined`, followed by JSWindowActor message errors.
-Playwright observes `about:blank` instead of the loaded document. Both headless
-and headed/Xvfb attempts fail. No engine patch or extension-process security
-preference workaround is applied; the full Firefox page-operation matrix remains a release
-gate. Opt into that retained extended case inside the container with:
+The extended Playwright Firefox Juggler test remains explicitly skipped by
+default: the supplied 1.58.2 engine crashes on extension documents at
+`FrameTree.js:543`. The native Firefox test runs by default; its assertions
+are not skipped. For diagnostics only:
 
 ```sh
-DOMAGENT_FIREFOX_JUGGLER=1 npm run test:browser -- --grep 'real firefox' --reporter=line
+# Inside the same container, /workspace/domagent-mcp:
+DOMAGENT_FIREFOX_JUGGLER=1 npm run test:browser -- --grep 'real firefox'
 ```
 
-For a rootless extended run, add `-e DOMAGENT_FIREFOX_JUGGLER=1` to the image
-command above and append `-- --grep 'real firefox' --reporter=line`. This remains
-a diagnostic/release-qualification command expected to fail on the supplied
-Juggler engine, not the normal validation path.
+The native run uses Firefox's own RDP, not Juggler. Its console cannot synthesize
+a physical permission gesture, so trusted options-page runtime messages drive
+configuration and sharing with fixture hosts pre-granted. Server approval uses
+the real Store; Chrome exercises both server browser forms. Both sides still
+perform actual signed enrollment and WSS authentication.
 
-Reproduce the native-browser versus Playwright diagnostic with
-`DOMAGENT_FIREFOX_JUGGLER=1 DOMAGENT_FIREFOX_DIAGNOSTICS=1 DOMAGENT_FIREFOX_NATIVE_OPTIONS=1`; for headed
-diagnosis, additionally set `DOMAGENT_HEADED_FIREFOX=1` and run under Xvfb.
+Firefox 146.0.1 in this image does not expose `tabs.captureTab`; screenshots are
+not advertised and explicitly return `CAPABILITY_UNAVAILABLE`, never substitute
+the visible tab. Page CSP can deny evaluation without disabling text/navigation.
+Candidate minimum browser versions still require separate release qualification.
 
-The actual-service Chrome case passes signed enrollment, the actual dashboard
-approval form, local final confirmation, authentication, cross-owner MCP control,
-a real PNG screenshot, and pause. No Store approval override is used. Chrome's
-Origin-absent challenge GET and Origin-present signed POST succeed against the
-actual service, and the dashboard form sends its exact Origin after the service's
-`same-origin` response policy fix.
+## Physical acceptance limits
 
-Both Chrome cases pass without any approval override:
+Headless fixture manifests pre-grant HTTP(S) hosts. The Chrome setup test records
+the real UI permission calls: onboarding requests only the connection server;
+broad website permission is requested later by **Share a tab**. This does **not**
+qualify the browser's visible permission/notification prompt UX.
 
-```sh
-# In the rootless image, working directory /workspace/domagent-mcp:
-npm run test:browser -- --grep 'real [cC]hrome' --reporter=line
-```
+With manifest version **3.0.0**, manually verify in supported Chrome and Firefox:
 
-`firefox-native.spec.cjs` launches the Firefox binary directly and controls it only
-through native RDP, without using Playwright's Juggler pipe. It inspects the actual
-installed options document, trusts the fixture CA only in its disposable profile,
-and pre-grants page hosts. The native console has no real user-activation gesture,
-so configuration and grant decisions use the same trusted options-page runtime
-sender boundary; enrollment/status/final confirmation and pause use actual
-packaged controls. Owner approval is supplied through the real Store fixture.
-This does not qualify browser permission prompts or physical approval clicks.
-The native RDP test passes on Firefox 146.0.1, proving actual signed enrollment,
-final local confirmation, authentication, dedicated-tab page control, and local
-pause. It additionally checks explicitly granted MAIN-world evaluation returns
-ordinary page values without extension APIs, while a restrictive page CSP returns
-`CAPABILITY_UNAVAILABLE` without ending the otherwise usable target.
+1. Installation opens the one-link wizard; updating an existing identity does
+   not open it. Decline then accept the server-only permission prompt.
+2. The public link starts focused sign-in/approval and automatically connects.
+   No tabs are shared and no general website permission is requested yet.
+3. Decline website permission at **Share a tab**: no target activates. Retry,
+   select intended abilities, and explicitly opt into page scripts if needed.
+4. Confirm the named page border/banner and toolbar, keyboard-accessible
+   **Stop sharing**, navigation reinstallation, and removal after stop. A website
+   may hide or imitate DOM decoration; the toolbar remains independent.
+5. Switch connections with active sharing, disconnect, suspend/restart, and
+   verify fresh local approval is required. No old target works.
+6. Qualify Firefox capture availability and CSP-denied evaluation, real
+   notifications, and browser-policy refusal on the operator's own browser.
 
-The tested build does not expose `browser.tabs.captureTab`, so capture is absent
-from advertised/granted capabilities and the MCP call explicitly fails. The test
-does not mistake this for a grant configuration problem or use visible-tab capture.
-
-Protected fetch, image, frame, and top-level redirect requests must never reach
-the fixture's protected endpoint. Disconnect and reconnection retain identity but
-require fresh local approval. A full Firefox process stop/relaunch, followed by
-temporary add-on reinstallation in the same profile, verifies device key/identity
-survival, empty session tab provenance, invalid old targets, and fresh approval.
-
-```sh
-npm run test:browser -- --grep 'native Firefox RDP smoke' --reporter=line
-```
-
-The final combined run passes all three selected cases in 44.2s without any
-Chrome approval override or changes to service files:
-
-```sh
-npm run test:browser -- --grep 'real [cC]hrome|native Firefox RDP smoke' --reporter=line
-```
-
-The extension unit tests, source syntax checks, and both bundled builds pass.
-
-Commands require an absolute `expires_at` timestamp from the original server
-enqueue. The extension takes the earlier of that deadline and its own local
-budget, and checks it again after asynchronous document inspection before issuing
-page work. It never retries an expired command.
-
-The native Firefox regression also covers an explicit attribute selector,
-no-match and malformed selectors, an implicit-submit button, a real form POST
-returning JSON with Firefox's JSON viewer enabled, and navigation back to HTML.
-It additionally configures a test-only loopback hostname as a Firefox-restricted
-domain. Refused document inspection must produce `PAGE_UNAVAILABLE`, end both
-local and server authority, preserve the connection/tab, and require fresh local
-approval. This tests a real browser policy refusal without claiming that every
-website-specific POST failure has been reproduced.
-Fresh-grant assertions read the actual state and require a new active target;
-the UI text `inactive` must never satisfy an `active` assertion.
-
-Browser-test host permissions are pre-granted in the fixture manifest, not in
-the production packages. Qualify the real optional-host permission prompts and
-notification behavior manually in Chrome and Firefox. A Chromium Playwright
-binary and Firefox binary must already be installed; this suite does not install
-them. Required OS libraries must be provisioned separately; the dependency
-command is `sudo node domagent-mcp/node_modules/playwright/cli.js install-deps chromium firefox`.
-
-Firefox unit tests separately exercise its blocking webRequest adapter, MAIN-only
-supplied
-script path, CSP failure, and tab-specific screenshot capability. They are **not**
-real Firefox validation. The integration suite supplies temporary WebExtension
-loading through Firefox RDP, which Playwright does not expose itself. Before
-release, additionally load `dist/firefox/manifest.json` in Firefox
-128+ with a trusted-TLS service, verify local pairing/host prompts, CSP-denied
-evaluation, `captureTab` permission/availability, protected redirects/frames/
-subresources, background restart, and fresh approval after disconnect.
-
-### Physical Firefox beta.2 acceptance checks
-
-These require the operator's browser and are not covered by headless pre-granted
-fixtures. Load the released Firefox ZIP (manifest version `2.0.1`) and:
-
-1. Save the known service origin; decline and then accept the service-host prompt.
-   A decline must not enroll or connect the device.
-2. Start a local control approval; decline page-host permission and verify no
-   target activates. Retry locally, accept permission, and choose the intended
-   capabilities. Evaluation is unchecked by default; select it explicitly.
-3. Verify `1 + 1` through MCP on an ordinary page, then verify a CSP-denied page
-   fails evaluation without blocking text/navigation. Do not bypass CSP.
-4. Confirm screenshots are absent if `captureTab` is unavailable. If another
-   Firefox build exposes capture, verify its PNG comes from the authorized tab
-   while a different tab is visible.
-5. Repeat the reported form interaction. A CSS miss must be `ELEMENT_NOT_FOUND`.
-   A browser-refused document must end control with `PAGE_UNAVAILABLE`; inspect
-   or navigate the retained tab yourself before a fresh local approval.
-6. Verify the toolbar/notification makes pause, refusal, and disconnect visible.
-   Restarting Firefox removes a temporary install: reload it, verify identity,
-   and confirm no control returns until a new approval.
-
-Candidate minimum browser versions require release qualification. Password/
-CAPTCHA heuristics deliberately fail closed when detected, but are not complete
-secret protection. Persistent site effects and previously scheduled page code
-cannot be undone by stopping control.
+Shared tabs use the same website sessions, not a network sandbox or isolated
+profile. Password/CAPTCHA detection is conservative, not complete secret
+protection. Stop cannot undo requests, account changes, or already scheduled
+page JavaScript. Commands retain the server's original absolute `expires_at`
+and never retry after their deadline.

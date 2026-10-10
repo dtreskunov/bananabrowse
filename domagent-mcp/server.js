@@ -32,7 +32,8 @@ export class BridgeServer {
     this.timer.unref();
   }
   upgrade(req, socket, head) {
-    if (req.url !== '/extension' || this.sockets.size >= 128 ||
+    const tenant = /^\/extension\/(t_[A-Za-z0-9_-]{22})$/.exec(req.url || '')?.[1];
+    if (!tenant || !this.store.tenant(tenant) || this.sockets.size >= 128 ||
         !/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(req.headers.origin || '')) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       audit('ws_rejected', { code: 'NOT_AUTHORIZED' });
@@ -43,7 +44,7 @@ export class BridgeServer {
   connected(ws, req) {
     this.sockets.add(ws);
     const session = {
-      ws, origin: req.headers.origin, connection_id: randomUUID(),
+      ws, origin: req.headers.origin, tenant_id: req.url.split('/')[2], connection_id: randomUUID(),
       lastSeen: Date.now(), authenticated: false, device: null, challenge: null,
       processing: Promise.resolve(), queued: 0,
     };
@@ -81,12 +82,12 @@ export class BridgeServer {
   }
   send(session, message) {
     if (session.ws.readyState !== 1) return false;
-    session.ws.send(JSON.stringify(message));
+    session.ws.send(JSON.stringify({ ...message, tenant_id: session.tenant_id }));
     return true;
   }
   current(session) {
     return session.authenticated && this.connections.get(session.device.id) === session &&
-      Boolean(this.store.device(session.device.id));
+      Boolean(this.store.device(session.device.id, session.tenant_id));
   }
   refreshLiveness(session) {
     session.lastSeen = Date.now();
@@ -98,14 +99,15 @@ export class BridgeServer {
     session.liveness.unref();
   }
   async message(session, m) {
+    requireValue(m.tenant_id === session.tenant_id, 'NOT_AUTHORIZED', 403);
     if (!session.authenticated) {
       if (m.type === 'hello' && !session.challenge) {
         requireValue(m.version === VERSION, 'VERSION_UNSUPPORTED');
-        const device = this.store.deviceByKey(m.key_id);
+        const device = this.store.deviceByKey(m.key_id, session.tenant_id);
         requireValue(device && device.extension_origin === session.origin, 'NOT_AUTHORIZED', 403);
         session.device = device;
         session.challenge = {
-          origin: this.config.origin, epoch: this.epoch, connection_id: session.connection_id,
+          origin: this.config.origin, tenant_id: session.tenant_id, epoch: this.epoch, connection_id: session.connection_id,
           nonce: token(), key_id: device.key_id,
         };
         this.send(session, { type: 'challenge', ...session.challenge });
@@ -116,7 +118,7 @@ export class BridgeServer {
       session.challenge = null;
       requireValue(await verify(JSON.parse(session.device.public_key), authPayload(challenge), m.signature),
         'NOT_AUTHORIZED', 403);
-      requireValue(this.store.device(session.device.id) && session.ws.readyState === 1,
+      requireValue(this.store.device(session.device.id, session.tenant_id) && session.ws.readyState === 1,
         'NOT_AUTHORIZED', 403);
       const old = this.connections.get(session.device.id);
       if (old) {
@@ -129,6 +131,7 @@ export class BridgeServer {
       this.send(session, {
         type: 'authenticated', device_id: session.device.id, owner_id: session.device.owner_id,
         owner_label: this.store.owner(session.device.owner_id).label,
+        tenant_label: this.store.tenant(session.tenant_id).label,
         epoch: this.epoch, connection_id: session.connection_id,
         protected_origins: this.config.protectedOrigins,
       });
@@ -139,7 +142,7 @@ export class BridgeServer {
     this.refreshLiveness(session);
     if (m.type === 'pong') return;
     if (m.type === 'access.request') {
-      this.requestAccess(m.client_id, session.device.id, true);
+      this.requestAccess(m.client_id, session.device.id, true, session.tenant_id);
       return;
     }
     if (m.type === 'approval.deny') {
@@ -170,7 +173,7 @@ export class BridgeServer {
         if (grant.client_id === r.client_id && grant.device_id === r.device_id) this.endGrant(id, 'REPLACED');
       }
       this.grants.set(m.target_id, {
-        client_id: r.client_id, device_id: r.device_id, connection_id: r.connection_id,
+        tenant_id: session.tenant_id, client_id: r.client_id, device_id: r.device_id, connection_id: r.connection_id,
         target_id: m.target_id, capabilities: m.capabilities, queued: 0, tail: Promise.resolve(),
       });
       this.send(session, { type: 'grant.active', client_id: r.client_id, target_id: m.target_id });
@@ -250,8 +253,9 @@ export class BridgeServer {
     }
     audit('grant_ended', { client_id: grant.client_id, device_id: grant.device_id, target_id: targetId, code: reason });
   }
-  requestAccess(clientId, deviceId, ownerInitiated = false) {
-    requireValue(this.store.linked(clientId, deviceId), 'NOT_AUTHORIZED', 403);
+  requestAccess(clientId, deviceId, ownerInitiated = false, tenant) {
+    const client = this.store.client(clientId, tenant);
+    requireValue(client && this.store.linked(clientId, deviceId, client.tenant_id), 'NOT_AUTHORIZED', 403);
     const session = this.connections.get(deviceId);
     requireValue(session && this.current(session), 'BROWSER_OFFLINE', 409);
     for (const grant of this.grants.values()) {
@@ -270,6 +274,7 @@ export class BridgeServer {
     requireValue(this.requests.size < 1000, 'RATE_LIMITED', 429);
     const request = {
       type: 'approval.request', request_id: randomUUID(), client_id: clientId,
+      tenant_id: client.tenant_id,
       client_label: this.store.client(clientId).label, device_id: deviceId,
       epoch: this.epoch, connection_id: session.connection_id, nonce: token(),
       policy_id: POLICY_ID, expires_at: Date.now() + 120_000,
@@ -280,9 +285,10 @@ export class BridgeServer {
     audit('access_requested', { client_id: clientId, device_id: deviceId, request_id: request.request_id });
     return { state: 'pending', request_id: request.request_id };
   }
-  targets(clientId) {
-    requireValue(this.store.client(clientId), 'NOT_AUTHORIZED', 403);
-    return this.store.devicesForClient(clientId).map(device => {
+  targets(clientId, tenant) {
+    const client = this.store.client(clientId, tenant);
+    requireValue(client, 'NOT_AUTHORIZED', 403);
+    return this.store.devicesForClient(clientId, client.tenant_id).map(device => {
       const grant = [...this.grants.values()].find(g =>
         g.client_id === clientId && g.device_id === device.id);
       const pending = [...this.requests.values()].some(r =>
@@ -293,12 +299,13 @@ export class BridgeServer {
       else if (pending) state = 'pending';
       return {
         device_id: device.id, label: device.label,
+        tenant_id: device.tenant_id,
         state,
         target_id: grant?.target_id ?? null, capabilities: grant?.capabilities ?? [],
       };
     });
   }
-  async operate(clientId, targetId, operation, args, signal) {
+  async operate(clientId, targetId, operation, args, signal, tenant) {
     requireValue(typeof targetId === 'string' && ID.test(targetId), 'INVALID_ARGUMENTS');
     requireValue(OPERATIONS.includes(operation) && args && typeof args === 'object' && !Array.isArray(args),
       'INVALID_ARGUMENTS');
@@ -307,7 +314,8 @@ export class BridgeServer {
       allowed.every(key => typeof args[key] === 'string' && args[key].length <= 65536),
       'INVALID_ARGUMENTS');
     const grant = this.grants.get(targetId);
-    requireValue(grant && grant.client_id === clientId && this.store.linked(clientId, grant.device_id),
+    requireValue(grant && grant.client_id === clientId && (!tenant || grant.tenant_id === tenant) &&
+      this.store.linked(clientId, grant.device_id, grant.tenant_id),
       'NOT_AUTHORIZED', 403);
     requireValue(grant.capabilities.includes(operation), 'CAPABILITY_UNAVAILABLE');
     if (operation === 'navigate') {
@@ -326,7 +334,7 @@ export class BridgeServer {
     try {
       await previous;
       requireValue(!signal?.aborted && Date.now() < deadline, 'COMMAND_EXPIRED');
-      requireValue(this.grants.get(targetId) === grant && this.store.linked(clientId, grant.device_id),
+      requireValue(this.grants.get(targetId) === grant && this.store.linked(clientId, grant.device_id, grant.tenant_id),
         'NOT_AUTHORIZED', 403);
       const session = this.connections.get(grant.device_id);
       requireValue(session?.connection_id === grant.connection_id && this.current(session), 'BROWSER_OFFLINE');

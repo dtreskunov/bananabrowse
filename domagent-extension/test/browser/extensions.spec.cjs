@@ -5,6 +5,7 @@ const https = require('node:https');
 const http = require('node:http');
 const { execFileSync } = require('node:child_process');
 const { once } = require('node:events');
+const { randomBytes } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const localRequire = createRequire(path.join(__dirname, '../../../domagent-mcp/package.json'));
 const { test, expect, chromium, firefox } = localRequire('@playwright/test');
@@ -20,6 +21,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   test.skip(browserName === 'firefox' && process.env.DOMAGENT_FIREFOX_JUGGLER !== '1',
     'Extended Firefox harness requires DOMAGENT_FIREFOX_JUGGLER=1: Playwright 1.58.2 Juggler crashes on extension documents at FrameTree.js:543. Native Firefox RDP smoke remains in the default suite.');
   const artifacts = path.join(artifactRoot, browserName);
+  await fs.rm(artifacts, { recursive: true, force: true });
   protocol = await import(pathToFileURL(path.join(root, 'shared/protocol.js')).href);
   await fs.mkdir(artifacts, { recursive: true });
   process.env.TMPDIR = artifacts;
@@ -46,8 +48,9 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   let protectedHits = 0;
   let handshake = 0;
   const messages = [];
-  const owner = { owner_id: 'owner-test', owner_label: 'Test Owner', device_id: 'device-test' };
-  const binding = { epoch: 'epoch-test', connection_id: 'connection-test' };
+  const tenant_id = `t_${randomBytes(16).toString('base64url')}`;
+  const owner = { tenant_id, tenant_label: 'Atlas', owner_id: 'owner-test', owner_label: 'Test Owner', device_id: 'device-test' };
+  const binding = { tenant_id, epoch: 'epoch-test', connection_id: 'connection-test' };
   const server = https.createServer({
     key: await fs.readFile(path.join(artifacts, 'key.pem')),
     cert: await fs.readFile(path.join(artifacts, 'cert.pem')),
@@ -61,19 +64,20 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : null;
     let value;
     const origin = `https://127.0.0.1:${server.address().port}`;
-    if (req.url === '/api/enrollment/challenge') value = { origin, nonce: 'nonce-start' };
-    else if (req.url === '/api/enrollment/start') {
+    if (req.url === `/api/tenants/${tenant_id}/enrollment/challenge`) value = { origin, tenant_id, nonce: 'nonce-start' };
+    else if (req.url === `/api/tenants/${tenant_id}/enrollment/start`) {
+      expect(body.tenant_id).toBe(tenant_id);
       key = body.public_key;
       expect(await protocol.verify(key, protocol.startPayload({ ...body, origin }), body.signature)).toBe(true);
       enrollment = { ...body, origin, enrollment_id: 'enrollment-test' };
-      value = { enrollment_id: enrollment.enrollment_id, verification_url: `${origin}/verify`,
+      value = { tenant_id, enrollment_id: enrollment.enrollment_id, verification_url: `${origin}/pair/${tenant_id}?enrollment=${enrollment.enrollment_id}`,
         expires_at: Date.now() + 60_000 };
-    } else if (req.url === '/api/enrollment/status') {
+    } else if (req.url === `/api/tenants/${tenant_id}/enrollment/status`) {
       expect(await protocol.verify(key, protocol.statusPayload({ ...body, origin }), body.signature)).toBe(true);
-      value = { state: dashboardApproved ? 'approved' : 'pending', enrollment_id: enrollment.enrollment_id };
+      value = { tenant_id, state: dashboardApproved ? 'approved' : 'pending', enrollment_id: enrollment.enrollment_id };
       if (dashboardApproved) Object.assign(value, { ...owner, key_id: enrollment.key_id, nonce: 'nonce-confirm',
         extension_origin: enrollment.extension_origin, protected_origins: [origin], expires_at: Date.now() + 60_000 });
-    } else if (req.url === '/api/enrollment/confirm') {
+    } else if (req.url === `/api/tenants/${tenant_id}/enrollment/confirm`) {
       expect(await protocol.verify(key, protocol.enrollmentPayload({
         ...owner, ...enrollment, nonce: 'nonce-confirm',
       }), body.signature)).toBe(true);
@@ -91,13 +95,14 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const origin = `https://127.0.0.1:${server.address().port}`;
-  const wss = new WebSocketServer({ server, path: '/extension' });
+  const wss = new WebSocketServer({ server, path: `/extension/${tenant_id}` });
   let pingTimer;
   wss.on('connection', client => {
     socket = client;
     const current = { ...binding, connection_id: `connection-${++handshake}` };
     client.on('message', async raw => {
       const message = JSON.parse(raw);
+      expect(message.tenant_id).toBe(tenant_id);
       messages.push(message);
       if (message.type === 'grant.end') console.log(`[${browserName} end reason]`, message.reason);
       if (message.type === 'hello') {
@@ -112,7 +117,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
           protected_origins: [origin] }));
         clearInterval(pingTimer);
         pingTimer = setInterval(() => {
-          if (client.readyState === 1) client.send(JSON.stringify({ type: 'ping' }));
+          if (client.readyState === 1) client.send(JSON.stringify({ type: 'ping', tenant_id }));
         }, 1000);
         socket.binding = current;
       } else if (message.type === 'grant.approve') {
@@ -120,7 +125,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
           ...socket.approval, ...message, origin, ...current,
         }), message.signature)).toBe(true);
         target = message.target_id;
-        client.send(JSON.stringify({ type: 'grant.active', target_id: target, client_id: 'client-test' }));
+        client.send(JSON.stringify({ type: 'grant.active', tenant_id, target_id: target, client_id: 'client-test' }));
       }
     });
   });
@@ -232,10 +237,10 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
       policy_id: 'page-control-v1', nonce: `nonce-${requestId}`, protected_origins: [origin],
       expires_at: Date.now() + 60_000 };
     socket.send(JSON.stringify(socket.approval));
-    await expect(options.locator('#requests')).toContainText('client-test');
+    await expect(options.locator('#requests')).toContainText('<script>untrusted label</script>');
     await expect(options.locator('#requests script')).toHaveCount(0);
-    await options.getByLabel('evaluate_script', { exact: false }).check();
-    await options.getByRole('button', { name: 'Approve new dedicated-tab control' }).click();
+    await options.getByLabel('Run page scripts', { exact: false }).check();
+    await options.getByRole('button', { name: 'Share a tab', exact: true }).click();
     await expect.poll(() => options.evaluate(async previous => {
       const api = globalThis.browser || globalThis.chrome;
       const state = (await api.runtime.sendMessage({ type: 'ui.state' })).value;
@@ -266,24 +271,16 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
       });
     }
     console.log(`[${browserName}] options loaded`);
-    await expect(options.locator('#status')).toContainText('not configured');
-    await options.locator('#origin').fill(origin);
-    await options.getByRole('button', { name: 'Save service' }).click();
-    await expect(options.locator('#status')).toContainText(origin);
+    await expect(options.locator('#status')).toContainText('Connect your browser');
+    await options.locator('#connection-link').fill(`${origin}/join/${tenant_id}`);
+    await options.getByRole('button', { name: 'Continue', exact: true }).click();
+    await expect(options.locator('#identity')).toContainText(new URL(origin).host);
     console.log(`[${browserName}] service configured`);
-    await options.getByRole('button', { name: 'Start enrollment' }).click();
-    await expect(options.locator('#enrollment')).toContainText('pending');
+    await expect(options.locator('#enrollment')).toContainText('Sign in on the website');
     console.log(`[${browserName}] enrollment pending`);
-    await options.getByRole('button', { name: 'Check dashboard approval' }).click();
-    await expect(options.locator('#confirm-enrollment')).toBeDisabled();
+    expect(await options.evaluate(async () => (await (globalThis.browser || globalThis.chrome).runtime.sendMessage({ type: 'ui.state' })).value.identity)).toBeNull();
     dashboardApproved = true;
-    await options.getByRole('button', { name: 'Check dashboard approval' }).click();
-    await expect(options.locator('#enrollment')).toContainText('owner-test');
-    await options.getByRole('button', { name: 'Locally confirm' }).click();
-    await expect(options.locator('#identity')).toContainText('device-test');
-    console.log(`[${browserName}] local enrollment confirmed`);
-    await options.getByRole('button', { name: 'Connect identity only' }).click();
-    await expect(options.locator('#status')).toContainText('authenticated');
+    await expect(options.locator('#status')).toContainText("You're connected to Atlas");
     console.log(`[${browserName}] device authenticated`);
 
     // Ordinary pages have no bridge and cannot manufacture trusted runtime senders.
@@ -311,6 +308,13 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await waitForTab(state.targets[0].tabId);
     console.log(`[${browserName}] dedicated tab navigated`);
     expect((await command('get_text')).result.text).toContain('Owned page');
+    const shared = context.pages().find(page => page !== userTab && page.url() === `${pageOrigin}/`);
+    await expect(shared.locator('[data-domagent-sharing]')).toHaveCount(1);
+    await expect(shared.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
+    expect((await command('get_text')).result.text).not.toContain('can use this tab');
+    expect(JSON.stringify((await command('get_interactive_elements')).result)).not.toContain('Stop sharing');
+    expect((await command('clear_overlays')).result.cleared).toBe(true);
+    await expect(shared.locator('[data-domagent-sharing]')).toHaveCount(1);
     expect((await command('get_text', {}, 'other-client')).error.code).toBe('APPROVAL_REQUIRED');
     expect((await command('forwardCDPCommand')).error.code).toBe('CAPABILITY_UNAVAILABLE');
     expect((await command('click', { selector: '#counter' })).result.clicked).toBe(true);
@@ -338,8 +342,8 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     if (browserName === 'firefox') expect(cspEvaluation.error.code).toBe('CAPABILITY_UNAVAILABLE');
     else expect(cspEvaluation.result.value).toBe(42);
     expect((await command('get_text')).result.text).toContain('Owned page');
-    await options.getByRole('button', { name: 'Pause', exact: true }).click();
-    await expect(options.locator('#targets')).toContainText('inactive');
+    await options.getByRole('button', { name: 'Stop sharing', exact: true }).click();
+    await expect(options.locator('#targets')).toContainText('not being shared');
     expect((await command('get_text')).error.code).toBe('APPROVAL_REQUIRED');
     const oldTarget = target;
     const fresh = await approve(options, 'approval-fresh');
@@ -348,17 +352,17 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await command('navigate', { url: `${pageOrigin}/password` });
     await waitForTab(state.targets[0].tabId);
     expect((await command('get_text')).error.code).toBe('HANDOFF_REQUIRED');
-    await expect(options.locator('#targets')).toContainText('inactive');
+    await expect(options.locator('#targets')).toContainText('not being shared');
     // Simulate the browser owner finishing the login, not a remote command.
     const loginPage = context.pages().find(page => page.url() === `${pageOrigin}/password`);
     await loginPage.evaluate(() => document.querySelector('input[type="password"]').remove());
     await approve(options, 'approval-after-human');
     // Trigger a protected redirect while controlled; DNR must prevent the request.
     await command('navigate', { url: `${pageOrigin}/redirect` });
-    await expect(options.locator('#targets')).toContainText('inactive');
+    await expect(options.locator('#targets')).toContainText('not being shared');
     expect(protectedHits).toBe(0);
     if (browserName === 'chrome') {
-      expect(await worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules())).toEqual([]);
+      await expect.poll(() => worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules())).toEqual([]);
     }
     expect(await userTab.title()).toBe('Fixture Page');
 
@@ -366,14 +370,14 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await context.close();
     context = await launch();
     const restarted = await optionsPage();
-    await expect(restarted.page.locator('#identity')).toContainText('device-test');
-    await expect(restarted.page.locator('#status')).toContainText('authenticated');
-    await expect(restarted.page.locator('#targets')).toContainText('No dedicated tabs');
+    await expect(restarted.page.locator('#status')).toContainText("You're connected to Atlas");
+    await expect(restarted.page.locator('#targets')).toContainText('No shared tabs');
     const restartedState = await restarted.page.evaluate(async () => {
       const api = globalThis.browser || globalThis.chrome;
       return (await api.runtime.sendMessage({ type: 'ui.state' })).value;
     });
     expect(restartedState.key_id).toBe(keyBefore);
+    expect(restartedState.identity.device_id).toBe('device-test');
     expect(restartedState.pending).toEqual([]);
     expect(restartedState.targets.every(target => target.state === 'inactive')).toBe(true);
     expect(restarted.extensionId).toBe(extensionId);

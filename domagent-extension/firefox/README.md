@@ -6,11 +6,22 @@ This source directory is not an installable package. Firefox 128+ is the
 candidate baseline for MAIN-world scripting; actual Firefox release validation
 is still required.
 
-Use extension options to save an **HTTPS** service origin and local
-IdP/management origins, start enrollment, verify on the owner dashboard, check
-approval, and explicitly confirm the displayed owner. Reconnecting restores
-identity only. Approving a client locally requests optional HTTP(S) host access,
-including intranet hosts, and creates only a dedicated automation tab.
+Installation opens **Connect your browser**. Paste the public HTTPS connection
+link (`https://server.example/join/<tenant-id>`) and choose **Continue**. Permission
+is requested only for that server. Sign in and choose **Connect browser** on the
+server; verified approval completes automatically, without sharing a tab.
+
+Saved connections have independent nonextractable device keys. One connection
+is enabled at a time; switching ends sharing and queued actions. Updates keep
+identity without reopening setup. Legacy origin-only records cannot authorize
+v2 connections and require fresh pairing.
+
+**Share a tab** requires separate local approval and optional HTTP(S) website
+permission, including intranet hosts. A named page border/banner and toolbar
+show sharing. The page's **Stop sharing** stops only that tab's current document,
+never approves, resumes, or changes settings. Decoration is best-effort and can
+be hidden or imitated by a website; cosmetic failures warn but do not block
+otherwise usable control.
 
 A blocking webRequest listener protects all requests from each active dedicated
 tab, including redirects and subresources, before grant approval. Remote code is

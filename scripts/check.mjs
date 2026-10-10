@@ -11,6 +11,6 @@ function check(directory) {
     const checked = spawnSync(process.execPath, ['--check', path], { stdio: 'inherit' });
     if (checked.status !== 0) process.exit(checked.status || 1);
   }
-  for (const directory of ['shared', 'domagent-mcp', 'domagent-extension', 'scripts']) check(resolve(root, directory));
 }
+for (const directory of ['shared', 'domagent-mcp', 'domagent-extension', 'scripts']) check(resolve(root, directory));
 console.log('JavaScript syntax checks passed.');

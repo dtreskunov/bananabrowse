@@ -1,5 +1,6 @@
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
 export function pageHelper(operation, args = {}) {
+  const marker = '[data-domagent-sharing]';
   const visible = element => {
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
@@ -20,6 +21,7 @@ export function pageHelper(operation, args = {}) {
   if (['click', 'type_text', 'get_text'].includes(operation) && !element) {
     return { error: 'ELEMENT_NOT_FOUND' };
   }
+  if (element?.closest(marker)) return { error: 'ELEMENT_NOT_FOUND' };
   if (operation === 'click') {
     const labelControl = element.closest('label')?.control;
     if (!visible(element) || element.matches('input[type="file"],input[type="password"]') ||
@@ -49,10 +51,26 @@ export function pageHelper(operation, args = {}) {
     element.dispatchEvent(new Event('change', { bubbles: true }));
     return { typed: true };
   }
-  if (operation === 'get_text') return { text: (element.innerText || element.textContent || '').slice(0, 200_000) };
+  if (operation === 'get_text') {
+    // Read rendered text in place: detached clones fall back to textContent
+    // and expose scripts/hidden text that innerText would omit.
+    if (element.querySelector?.(marker)) {
+      const read = node => {
+        if (node.nodeType === 3) return node.textContent;
+        if (node.nodeType !== 1 || node.matches(marker)) return '';
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden' ||
+            ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.tagName)) return '';
+        return [...node.childNodes].map(read).join('') +
+          (style.display === 'block' || node.tagName === 'BR' ? '\n' : '');
+      };
+      return { text: read(element).slice(0, 200_000) };
+    }
+    return { text: (element.innerText || element.textContent || '').slice(0, 200_000) };
+  }
   if (operation === 'get_interactive_elements') {
     return { elements: [...document.querySelectorAll('a,button,input,textarea,select,[role="button"]')]
-      .filter(visible).slice(0, 500).map(element => {
+      .filter(element => !element.closest(marker) && visible(element)).slice(0, 500).map(element => {
         const rect = element.getBoundingClientRect();
         return { tag: element.tagName.toLowerCase(), id: element.id, type: element.getAttribute('type'),
           text: (element.innerText || element.getAttribute('aria-label') || '').slice(0, 500),
@@ -61,10 +79,46 @@ export function pageHelper(operation, args = {}) {
   }
   // Remove only DomAgent's own markers; never guess which site UI is safe to remove.
   if (operation === 'clear_overlays') {
-    document.querySelectorAll('[data-domagent-overlay]').forEach(element => element.remove());
+    document.querySelectorAll('[data-domagent-overlay]').forEach(element => {
+      if (!element.closest(marker) && !element.querySelector(marker)) element.remove();
+    });
     return { cleared: true };
   }
   return { error: 'CAPABILITY_UNAVAILABLE' };
+}
+
+export function sharingIndicator(details) {
+  const old = document.querySelector('[data-domagent-sharing]');
+  if (!details) { old?.remove(); return { url: location.href }; }
+  if (details.remove) {
+    if (old?.getAttribute('data-domagent-sharing') === details.token) old.remove();
+    return { url: location.href };
+  }
+  old?.remove();
+  const host = document.createElement('div');
+  host.setAttribute('data-domagent-sharing', details.token);
+  host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;border:4px solid #ffb000!important;box-sizing:border-box!important;';
+  const root = host.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent = ':host{color-scheme:light}div{position:absolute;top:4px;right:12px;max-width:min(90vw,440px);padding:8px 12px;background:#17202a;color:#fff;border:2px solid #ffb000;border-radius:6px;font:14px/1.5 system-ui;pointer-events:auto;box-shadow:0 2px 8px #0008}button{margin-left:10px;padding:6px 10px;background:#fff;color:#17202a;border:0;border-radius:4px;font:inherit;cursor:pointer}button:focus-visible{outline:3px solid #ffb000}';
+  const banner = document.createElement('div');
+  banner.setAttribute('role', 'status');
+  const label = document.createElement('span');
+  label.textContent = `${details.label} can use this tab.`;
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.textContent = 'Stop sharing';
+  stop.addEventListener('click', () => {
+    const api = typeof browser === 'undefined' ? chrome : browser;
+    stop.disabled = true;
+    api.runtime.sendMessage({ type: 'page.stop', target_id: details.target_id, token: details.token })
+      .then(response => { if (!response?.ok) stop.disabled = false; })
+      .catch(() => { stop.disabled = false; });
+  });
+  banner.append(label, stop);
+  root.append(style, banner);
+  document.documentElement.append(host);
+  return { url: location.href };
 }
 
 // Only injected into MAIN. A CSP denying page eval is an unsupported capability,

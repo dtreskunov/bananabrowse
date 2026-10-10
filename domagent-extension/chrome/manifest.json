@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "minimum_chrome_version": "118",
-  "description": "Owner-approved dedicated-tab page control over authenticated HTTPS/WSS. No automatic tab adoption.",
+  "description": "Connect to your assistant and choose when to share a separate browser tab.",
   "permissions": ["debugger", "tabs", "storage", "scripting", "webNavigation", "notifications", "declarativeNetRequest"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js" },

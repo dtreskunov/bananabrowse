@@ -39,8 +39,13 @@ export function isUiSender(sender, runtime) {
     ['options.html', 'popup.html'].some(page => sender.url === runtime.getURL(page));
 }
 
+export function needsSetup(reason, identity) {
+  return reason === 'install' && !identity;
+}
+
 export function checkBinding(message, connection) {
   if (!connection || message.epoch !== connection.epoch ||
+      !connection.tenant_id || message.tenant_id !== connection.tenant_id ||
       message.connection_id !== connection.connection_id) fail('NOT_AUTHORIZED');
 }
 
@@ -51,6 +56,7 @@ export function validateCommand(message, grant, connection, protectedOrigins, no
   checkBinding(message, connection);
   if (!grant || grant.state !== 'active' || grant.target_id !== message.target_id ||
       grant.client_id !== message.client_id || grant.epoch !== message.epoch ||
+      grant.tenant_id !== message.tenant_id ||
       grant.connection_id !== message.connection_id) fail('APPROVAL_REQUIRED');
   if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= 0) fail('INVALID_ARGUMENT');
   if (message.expires_at <= now) fail('OUTCOME_UNKNOWN');
@@ -80,7 +86,8 @@ export function errorCode(error) {
     'CAPABILITY_UNAVAILABLE', 'HANDOFF_REQUIRED', 'OUTCOME_UNKNOWN', 'QUEUE_FULL',
     'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE',
     'RESULT_TOO_LARGE', 'ENROLLMENT_EXPIRED', 'COMMAND_EXPIRED',
-    'PERMISSION_REQUIRED', 'PROTECTION_UNAVAILABLE',
+    'PERMISSION_REQUIRED', 'PROTECTION_UNAVAILABLE', 'INVALID_TENANT', 'INVALID_CONNECTION_LINK',
+    'INDICATOR_UNAVAILABLE',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

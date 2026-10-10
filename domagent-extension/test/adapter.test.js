@@ -44,6 +44,20 @@ function fixture(browser = 'chrome') {
   return { api, calls, adapter: new BrowserAdapter(api, browser) };
 }
 
+test('cosmetic indicator cleanup cannot delay debugger and network protection teardown', async () => {
+  const f = fixture();
+  await f.adapter.initialize([]);
+  await f.adapter.protect(100, ['https://control.example']);
+  await f.adapter.attach(100);
+  let finish;
+  f.api.scripting.executeScript = () => new Promise(resolve => { finish = resolve; });
+  await f.adapter.release(100, { indicatorToken: 'old-marker' });
+  assert.equal(f.adapter.attached.has(100), false);
+  assert.equal(f.adapter.guards.has(100), false);
+  assert.equal(f.calls.some(call => call[0] === 'detach'), true);
+  finish([]);
+});
+
 test('Chrome installs tab-scoped blocking for all resources and removes only its own rules', async () => {
   const f = fixture();
   await f.adapter.initialize([]);

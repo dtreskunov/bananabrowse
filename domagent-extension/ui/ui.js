@@ -15,7 +15,8 @@ const errors = {
   ENROLLMENT_EXPIRED: 'This request expired. Choose Start again.',
   BROWSER_OFFLINE: 'Connection lost. No tabs are being shared. Try again.',
   PROTECTION_UNAVAILABLE: 'Sharing is unavailable because browser protection could not start.',
-  INDICATOR_UNAVAILABLE: 'The sharing banner could not be displayed. The toolbar still shows sharing status.',
+  HANDOFF_REQUIRED: 'Sharing stopped so you can finish signing in or checking this page. Use View tab, then Ask to share again when you are ready.',
+  PAGE_UNAVAILABLE: 'Sharing stopped because the browser could not inspect this page. Use View tab before asking to share again.',
   APPROVAL_REQUIRED: 'This sharing request ended. Ask your assistant to try again.',
 };
 
@@ -158,15 +159,26 @@ function render(snapshot) {
     const article = document.createElement('article');
     paragraph(article, target.state === 'active'
       ? `${target.client_label || name} can use this tab.` : 'This tab is not being shared.');
+    if (target.indicator_unavailable) {
+      paragraph(article, 'This tab is still being shared, but its banner could not be displayed. You can stop sharing here.');
+    } else if (target.end_reason === 'HANDOFF') {
+      paragraph(article, 'Sharing stopped so you can finish signing in or checking this page. View the tab, then ask to share again when you are ready.');
+    }
     button(article, 'View tab', () => request('inspectTab', { tabId: target.tabId }));
     if (target.target_id) {
       button(article, 'Stop sharing', () => request('end', { target_id: target.target_id, reason: 'OWNER_PAUSED' }));
     } else {
-      button(article, 'Ask to share again', () => request('resume', { client_id: target.client_id }));
+      if (snapshot.pending.some(pending => pending.client_id === target.client_id)) {
+        paragraph(article, 'A sharing request is waiting above. Choose Share a tab to approve it.');
+      } else {
+        button(article, 'Ask to share again', () => request('resume', { client_id: target.client_id }));
+      }
     }
     byId('targets').append(article);
   }
-  if (snapshot.failures.length) showError(new Error(snapshot.failures.at(-1)));
+  const failures = snapshot.failures.filter(code => code !== 'INDICATOR_UNAVAILABLE');
+  if (failures.length) showError(new Error(failures.at(-1)));
+  else byId('error').textContent = '';
 }
 
 async function refresh() {

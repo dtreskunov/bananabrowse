@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "minimum_chrome_version": "118",
   "description": "Connect to your assistant and choose when to share a separate browser tab.",
   "permissions": ["debugger", "tabs", "storage", "scripting", "webNavigation", "notifications", "declarativeNetRequest"],

@@ -81,6 +81,11 @@ The page-edge border/banner is a helpful, spoofable DOM decoration, not a
 security boundary. Its stop-only action may end only its granted tab/document.
 Toolbar/extension UI state is independent. Cosmetic failures warn rather than
 claim tamper-proof decoration or disabling otherwise usable sharing.
+Banner warnings are scoped to the currently shared tab and clear when rendering
+recovers or sharing ends. Historical cosmetic failures must not override current
+connection/sharing status. After human handoff the retained tab explains what
+stopped and offers **Ask to share again**; an existing pending request is reviewed
+above instead of creating a duplicate.
 
 Tabs share website sign-ins, readable cookies/storage, and internal-network
 access. Text/images/scripts may expose private information. Password/CAPTCHA

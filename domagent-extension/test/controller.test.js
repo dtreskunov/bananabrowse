@@ -609,8 +609,35 @@ test('cosmetic marker failures warn, but independent authority and toolbar state
   await flush();
   assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), true);
   assert.equal(f.controller.snapshot().targets[0].state, 'active');
+  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, true);
   f.controller.enqueue(command(grant));
   await flush();
   assert.equal(f.socket.sent.at(-1).result.text, 'page');
+  f.adapter.indicator = async () => ({ url: 'https://page.example/', documentId: 'fresh-document' });
+  await f.controller.updateIndicator(grant);
+  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, false);
+  await f.controller.end(grant.target_id, 'HANDOFF');
+  const inactive = f.controller.snapshot().targets[0];
+  assert.equal(inactive.state, 'inactive');
+  assert.equal(inactive.indicator_unavailable, false);
+  assert.equal(inactive.end_reason, 'HANDOFF');
+  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), true);
+  f.controller.dispose();
+});
+
+test('late banner failure after handoff cannot claim the inactive tab is still sharing', async () => {
+  const f = await fixture();
+  let reject;
+  f.adapter.indicator = () => new Promise((_, fail) => { reject = fail; });
+  const { grant } = await approve(f);
+  await flush();
+  await f.controller.receive(JSON.stringify({
+    type: 'grant.end', tenant_id, target_id: grant.target_id, reason: 'HANDOFF_REQUIRED',
+  }), f.socket, f.controller.generation);
+  reject(new Error('Page context destroyed during handoff'));
+  await flush();
+  assert.equal(f.controller.snapshot().targets[0].end_reason, 'HANDOFF');
+  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, false);
+  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), false);
   f.controller.dispose();
 });

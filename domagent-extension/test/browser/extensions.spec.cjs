@@ -354,6 +354,8 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await waitForTab(state.targets[0].tabId);
     expect((await command('get_text')).error.code).toBe('HANDOFF_REQUIRED');
     await expect(options.locator('#targets')).toContainText('not being shared');
+    await expect(options.locator('#targets')).toContainText('Sharing stopped so you can finish signing in');
+    await expect(options.getByRole('button', { name: 'Ask to share again', exact: true })).toBeVisible();
     // Simulate the browser owner finishing the login, not a remote command.
     const loginPage = context.pages().find(page => page.url() === `${pageOrigin}/password`);
     await loginPage.evaluate(() => document.querySelector('input[type="password"]').remove());

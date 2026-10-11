@@ -193,6 +193,24 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     await expect(options.locator('#targets')).toContainText('not being shared');
     await expect(shared.locator('[data-domagent-sharing]')).toHaveCount(0);
     expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('IDLE');
+    expect(await worker.evaluate(() => chrome.action.getTitle({}))).toContain('No tabs are being shared');
+    // Reproduce a historical cosmetic failure without changing browser authority.
+    await options.evaluate(() => {
+      const original = chrome.runtime.sendMessage.bind(chrome.runtime);
+      globalThis.restoreMessages = () => { chrome.runtime.sendMessage = original; };
+      chrome.runtime.sendMessage = async message => {
+        const response = await original(message);
+        if (message.type === 'ui.state' && response.ok) {
+          response.value.failures = ['INDICATOR_UNAVAILABLE'];
+          response.value.targets = response.value.targets.map(target => ({ ...target, end_reason: 'HANDOFF' }));
+        }
+        return response;
+      };
+    });
+    await expect(options.locator('#targets')).toContainText('Sharing stopped so you can finish signing in');
+    await expect(options.locator('#error')).toBeEmpty();
+    await expect(options.getByRole('button', { name: 'Ask to share again', exact: true })).toBeVisible();
+    await options.evaluate(() => globalThis.restoreMessages());
     const paused = await client.callTool({
       name: 'get_text', arguments: { target_id: target.target_id, selector: 'body' },
     });

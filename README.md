@@ -12,7 +12,7 @@ an upgraded service against an unmigrated database.
 ## Browser installation
 
 Download the browser-specific ZIP from
-[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.2)
+[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.3)
 and extract all files together.
 
 - Firefox: open `about:debugging#/runtime/this-firefox`, choose **Load Temporary
@@ -102,6 +102,10 @@ Page decorations are best-effort visual cues; toolbar/extension state is authori
 Reconnect, pause, revoke, or restart ends all grants. Physical permission prompts,
 notification UX, and advertised browser-version qualification remain release gates.
 
-Firefox manifest version `3.0.1` uses a persistent MV2 background page so an
+Firefox uses a persistent MV2 background page so an
 idle identity connection does not require keeping the toolbar popup open.
 The wire protocol stays v2; existing tenant pairing and credentials need no reset.
+
+Extension version `3.0.2` scopes banner warnings to actively shared tabs. When
+sharing stops, its warning clears and the tab explains human handoff with
+**Ask to share again**. Historical cosmetic failures do not mean control is active.

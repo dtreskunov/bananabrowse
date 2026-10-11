@@ -98,7 +98,8 @@ export class Controller {
         const grant = [...this.grants.values()].find(grant => grant.tabId === tab.tabId);
         return { client_id: tab.client_id, client_label: grant?.client_label || tab.client_label,
           tabId: tab.tabId, target_id: grant?.target_id,
-          state: grant?.state || 'inactive' };
+          state: grant?.state || 'inactive', end_reason: grant ? null : tab.end_reason,
+          indicator_unavailable: grant?.state === 'active' && grant.indicatorUnavailable === true };
       }),
       failures: this.failures,
     };
@@ -375,7 +376,9 @@ export class Controller {
       this.changed();
     } else if (message.type === 'grant.end') {
       id(message.target_id);
-      const reason = END_REASONS.has(message.reason) ? message.reason : 'REVOKED';
+      let reason = 'REVOKED';
+      if (message.reason === 'HANDOFF_REQUIRED') reason = 'HANDOFF';
+      else if (END_REASONS.has(message.reason)) reason = message.reason;
       await this.end(message.target_id, reason, false);
     } else if (message.type === 'command') {
       // Commands queue independently; the heartbeat/teardown stream never waits for page work.
@@ -474,6 +477,12 @@ export class Controller {
     // Disable authority synchronously, before any browser/API cleanup awaits.
     this.grants.delete(targetId);
     grant.state = 'ended';
+    const tab = this.inventory.find(tab => tab.tabId === grant.tabId &&
+      tab.origin === this.config.service_origin && tab.tenant_id === grant.tenant_id);
+    if (tab) {
+      tab.end_reason = reason;
+      void this.inventoryStorage.set({ dedicatedTabs: this.inventory }).catch(error => this.report(error));
+    }
     const indicatorToken = grant.indicatorCleanupToken || grant.indicatorToken;
     grant.indicatorToken = null;
     this.changed();
@@ -525,7 +534,11 @@ export class Controller {
         target_id: grant.target_id, token, label: grant.client_label,
       });
       if (!document) {
-        if (grant.indicatorToken === token) grant.indicatorToken = null;
+        if (grant.indicatorToken === token) {
+          grant.indicatorToken = null;
+          grant.indicatorUnavailable = false;
+          this.changed();
+        }
         return;
       }
       if (this.grants.get(grant.target_id) !== grant || grant.documentGeneration !== documentGeneration ||
@@ -534,8 +547,14 @@ export class Controller {
         return;
       }
       grant.indicatorDocument = document;
+      grant.indicatorUnavailable = false;
+      this.changed();
     } catch {
-      this.report(new Error('INDICATOR_UNAVAILABLE'));
+      if (this.grants.get(grant.target_id) === grant && grant.documentGeneration === documentGeneration &&
+          grant.indicatorToken === token) {
+        grant.indicatorUnavailable = true;
+        this.report(new Error('INDICATOR_UNAVAILABLE'));
+      }
     }
   }
 

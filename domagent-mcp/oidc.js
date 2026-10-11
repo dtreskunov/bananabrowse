@@ -23,9 +23,11 @@ export async function createOidc(config) {
         pkceCodeVerifier: flow.verifier, idTokenExpected: true,
       });
       const claims = tokens.claims();
-      requireValue(claims && claims.iss === config.issuer && typeof claims.sub === 'string',
+      requireValue(claims && claims.iss === config.issuer && typeof claims.sub === 'string' && claims.sub,
         'OIDC_IDENTITY_INVALID');
-      return { issuer: claims.iss, subject: claims.sub };
+      const name = [claims.name, claims.preferred_username].find(value =>
+        typeof value === 'string' && value.trim());
+      return { issuer: claims.iss, subject: claims.sub, label: name ? name.trim().slice(0, 80) : 'Connected user' };
     },
   };
 }

@@ -97,12 +97,16 @@ export class Store {
     requireValue(owner, 'OWNER_ALREADY_REGISTERED');
     return owner.id;
   }
-  admit(issuer, subject) {
+  admit(issuer, subject, label = 'Connected user') {
+    requireValue(typeof issuer === 'string' && issuer && typeof subject === 'string' && subject &&
+      typeof label === 'string' && label.trim() && label.length <= 80, 'OIDC_IDENTITY_INVALID', 403);
+    this.db.prepare(`INSERT INTO owners(id,issuer,subject,label,admitted,invitation_expires)
+      VALUES(?,?,?,?,1,0) ON CONFLICT(issuer,subject) DO NOTHING`)
+      .run(randomUUID(), issuer, subject, label.trim());
     const owner = this.db.prepare('SELECT * FROM owners WHERE issuer=? AND subject=?').get(issuer, subject);
-    requireValue(owner && !owner.disabled &&
-      (owner.admitted || owner.invitation_expires > Date.now()), 'OWNER_NOT_INVITED', 403);
+    requireValue(owner && !owner.disabled, 'OWNER_DISABLED', 403);
     this.db.prepare('UPDATE owners SET admitted=1 WHERE id=?').run(owner.id);
-    return owner;
+    return this.owner(owner.id);
   }
   owner(id) {
     return this.db.prepare('SELECT * FROM owners WHERE id=? AND disabled=0 AND admitted=1').get(id);

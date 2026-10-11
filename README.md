@@ -5,14 +5,14 @@ standalone service with tenant-specific HTTP MCP endpoints, its own OIDC login,
 and Chrome/Firefox extensions. It has no dependency on a particular agent
 application or credential manager.
 
-**3.0.0-beta.1 is a breaking upgrade from beta.2.** Existing databases require
+**3.0.0 is a breaking upgrade from 2.0.0-beta.2.** Existing databases require
 explicit tenant assignment and browsers require fresh pairing. Do not restart
 an upgraded service against an unmigrated database.
 
 ## Browser installation
 
 Download the browser-specific ZIP from
-[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.1)
+[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.2)
 and extract all files together.
 
 - Firefox: open `about:debugging#/runtime/this-firefox`, choose **Load Temporary
@@ -37,7 +37,7 @@ If no connection exists, the application's agent may request one:
 
 1. Validate the operator-provided HTTPS domain and fetch `/.well-known/domagent`.
 2. `POST /api/setup-requests` with `agent_name` and `request_description`.
-3. Give the user the returned short-lived `verification_url` for invited-account
+3. Give the user the returned short-lived `verification_url` for account
    sign-in and explicit approval.
 4. Poll `POST /api/setup-requests/<id>/status` with the separate `status_receipt`.
    Approval returns public connection/MCP URLs, never the client credential.
@@ -60,11 +60,13 @@ npm start
 
 Configure a canonical HTTPS origin, exact OIDC issuer, the service's own OIDC
 client ID, restricted secret file if needed, and protected control-plane origins.
-Register `https://your-server/oidc/callback`. Invite owners with:
+Register `https://your-server/oidc/callback`. Users who authenticate through this
+configured provider register automatically and can approve creating their own
+connections. No DomAgent invitation is required. Restrict who may use the OIDC
+application at your identity provider if needed.
 
-```sh
-node admin.js invite https://your-exact-issuer owner-subject 'Browser owner'
-```
+Registration grants no membership in other users' connections. Disabled DomAgent
+accounts remain blocked; connection owners must explicitly add other accounts.
 
 The server must run behind TLS on an independently administered host. Do not
 expose its plaintext backend listener. See
@@ -99,3 +101,7 @@ Local approval governs new commands, not effects or JavaScript already scheduled
 Page decorations are best-effort visual cues; toolbar/extension state is authoritative.
 Reconnect, pause, revoke, or restart ends all grants. Physical permission prompts,
 notification UX, and advertised browser-version qualification remain release gates.
+
+Firefox manifest version `3.0.1` uses a persistent MV2 background page so an
+idle identity connection does not require keeping the toolbar popup open.
+The wire protocol stays v2; existing tenant pairing and credentials need no reset.

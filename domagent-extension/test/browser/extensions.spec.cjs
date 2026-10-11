@@ -31,7 +31,8 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
   // Test profiles pre-grant hosts; production permissions remain optional and
   // require a real browser owner gesture/prompt, separately qualified manually.
-  manifest.host_permissions = ['http://*/*', 'https://*/*'];
+  if (manifest.manifest_version === 2) manifest.permissions.push('http://*/*', 'https://*/*');
+  else manifest.host_permissions = ['http://*/*', 'https://*/*'];
   if (browserName === 'chrome') manifest.permissions.push('declarativeNetRequestFeedback');
   await fs.writeFile(manifestPath, JSON.stringify(manifest));
   await fs.writeFile(path.join(extension, 'probe.html'), '<!doctype html><title>Non-UI extension page</title>');

@@ -8,14 +8,17 @@ npm ci --ignore-scripts
 npm start
 ```
 
-Configuration and OIDC owner invitations are described in
+Configuration and OIDC sign-in are described in
 [the deployment guide](../docs/SECURE-PAIRING.md).
 Upgrade existing beta.2 databases through [explicit tenant migration](../docs/TENANT-MIGRATION.md)
 before restarting. Browsers must use matching protocol-v2 extensions.
 
 Public metadata: `GET /.well-known/domagent`.
 Create a pending request: `POST /api/setup-requests` with `agent_name` and
-`request_description`. Invited-user approval creates one tenant/client.
+`request_description`. Signed-in user approval creates one tenant/client.
+Validated users of the configured OIDC provider register automatically; no
+DomAgent invitation is required. Disabled accounts remain blocked, and registration
+does not grant access to another user's tenant.
 Poll `POST /api/setup-requests/<request>/status` using the separate status receipt;
 it returns public URLs, never a credential.
 

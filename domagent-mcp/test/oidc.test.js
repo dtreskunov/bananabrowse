@@ -20,7 +20,7 @@ test('OIDC library binds discovery, PKCE, state, nonce, issuer, audience and exp
   const claims = {
     iss: ISSUER, sub: 'immutable-owner-subject', aud: CLIENT,
     iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 300,
-    nonce: flow.nonce,
+    nonce: flow.nonce, name: 'Denis',
   };
   let returnedClaims = claims;
   let discoveryIssuer = ISSUER;
@@ -64,7 +64,7 @@ test('OIDC library binds discovery, PKCE, state, nonce, issuer, audience and exp
 
   const callback = new URL(`${ORIGIN}/oidc/callback?code=test-code&state=${flow.state}`);
   assert.deepEqual(await provider.finish(callback, flow), {
-    issuer: ISSUER, subject: 'immutable-owner-subject',
+    issuer: ISSUER, subject: 'immutable-owner-subject', label: 'Denis',
   });
   const priorExchanges = exchanges;
   await assert.rejects(provider.finish(new URL(`${ORIGIN}/oidc/callback?code=test-code&state=wrong`), flow));
@@ -72,7 +72,7 @@ test('OIDC library binds discovery, PKCE, state, nonce, issuer, audience and exp
 
   for (const invalid of [
     { nonce: 'wrong-nonce' }, { iss: 'https://other.test/' }, { aud: 'another-client' },
-    { exp: claims.iat - 120 }, { sub: undefined },
+    { exp: claims.iat - 120 }, { sub: undefined }, { sub: '' },
   ]) {
     returnedClaims = { ...claims, ...invalid };
     await assert.rejects(provider.finish(callback, flow));

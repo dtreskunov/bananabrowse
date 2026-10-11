@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   authPayload, connectionUrl, enrollmentPayload, grantPayload, parseConnectionUrl, sign, verify,
 } from '../../shared/protocol.js';
@@ -16,6 +17,16 @@ const grant = { ...binding, state: 'active', client_id: 'client-1', target_id: '
   capabilities: ['navigate', 'get_text', 'evaluate_script'] };
 const command = { ...binding, type: 'command', request_id: 'request-1', target_id: 'target-1',
   client_id: 'client-1', operation: 'get_text', args: {}, expires_at: Date.now() + 25_000 };
+
+test('Firefox uses a persistent background without broadening website permissions', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../firefox/manifest.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.manifest_version, 2);
+  assert.equal(manifest.background.persistent, true);
+  assert.deepEqual(manifest.background.scripts, ['background.js']);
+  assert.deepEqual(manifest.optional_permissions, ['http://*/*', 'https://*/*']);
+  assert(!manifest.permissions.some(permission => permission.startsWith('http')));
+  assert.equal(manifest.externally_connectable, undefined);
+});
 
 test('only a fresh installation opens setup; updates/restarts never pop up or restore sharing', () => {
   assert.equal(needsSetup('install', null), true);

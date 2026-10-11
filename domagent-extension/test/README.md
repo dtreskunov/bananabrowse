@@ -1,4 +1,4 @@
-# Extension validation (v2 / manifest 3.0.0)
+# Extension validation (protocol v2)
 
 With the pinned service dependencies already installed, from the repository root:
 
@@ -33,6 +33,9 @@ The Chromium and Firefox engines and image must already be available.
   selector errors, submit/form POST/JSON-viewer regressions, browser-restricted
   document refusal, optional-operation failures, fresh approval, and full
   process restart with persisted identity and empty tab provenance.
+- Unattended Firefox: all extension pages are closed, extension-target debugger
+  observation is released, and no extension UI is polled for 65 seconds. The
+  same authenticated connection must remain online with no shared tab.
 - Named page indicators, page-local Stop sharing, extraction exclusion,
   `clear_overlays` preserving the indicator, and independent toolbar status.
 - Unit tests cover strict missing-tenant rejection, nonextractable per-pair
@@ -68,7 +71,7 @@ the real UI permission calls: onboarding requests only the connection server;
 broad website permission is requested later by **Share a tab**. This does **not**
 qualify the browser's visible permission/notification prompt UX.
 
-With manifest version **3.0.0**, manually verify in supported Chrome and Firefox:
+With the released browser build, manually verify in supported Chrome and Firefox:
 
 1. Installation opens the one-link wizard; updating an existing identity does
    not open it. Decline then accept the server-only permission prompt.
@@ -83,6 +86,10 @@ With manifest version **3.0.0**, manually verify in supported Chrome and Firefox
    verify fresh local approval is required. No old target works.
 6. Qualify Firefox capture availability and CSP-denied evaluation, real
    notifications, and browser-policy refusal on the operator's own browser.
+7. Leave the popup and settings closed for at least two minutes with no shared
+   tab. The browser must remain connected and deliver a subsequent local request.
+   The persistent Firefox background avoids event-page suspension without fake
+   API traffic or automatically restored control.
 
 Shared tabs use the same website sessions, not a network sandbox or isolated
 profile. Password/CAPTCHA detection is conservative, not complete secret

@@ -19,7 +19,7 @@ implementation notes, not wording to show ordinary users.
 | --- | --- |
 | Server-generated tenant IDs and isolated endpoints | Application-specific APIs or configuration brokers |
 | One initial client per tenant | Multiple-client administration and a general role-management UI |
-| Existing invited-user sign-in and tenant membership checks | New identity systems or self-service server administration |
+| Configured-provider sign-in, automatic account registration, and tenant membership checks | New identity systems or self-service server administration |
 | Agent setup link with name and short explanation | Identity attestations, rich request content, or a chat client |
 | One Connection link field after extension installation | Automatic webpage-to-extension configuration bridges |
 | Automatic connection after the user approves on the server | A second confirmation or mandatory fingerprint comparison |
@@ -30,9 +30,11 @@ implementation notes, not wording to show ordinary users.
 | Explicit migration and browser re-pairing | A parallel beta.2 compatibility service |
 
 The MVP keeps a tenant owner and authorized browser members. Reuse the existing
-invitation/sign-in mechanism and host administration where possible, rather than
+OIDC sign-in mechanism and host administration where possible, rather than
 building a new management platform. Server admission alone is not membership in
 every tenant.
+Any user authenticated by the configured provider may approve creating their own
+connection without a DomAgent invitation. Disabled accounts remain blocked.
 
 ## 2. The end-to-end journey
 
@@ -236,7 +238,7 @@ Preserve flow through existing OIDC cookies and fixed server-side destinations.
 No token-bearing IdP redirects, third-party page resources, or raw request-body
 logs. Concurrent approvals create at most one tenant.
 
-An eligible invited account can approve a forwarded setup link; for this MVP,
+An eligible authenticated account can approve a forwarded setup link; for this MVP,
 trust the account review and expected request rather than requiring another
 identity-checking ceremony. The model/chat may see the expiring setup link, but
 must never see the durable MCP credential.
@@ -321,7 +323,8 @@ its skill handles existing MCP detection and manual credential configuration.
 
 Keep the existing 70 unit tests and browser regressions. Add coverage for:
 
-- Anonymous setup, invited-user approval, expiry/replay, and no credential exposure.
+- Anonymous setup, first-user registration and authenticated approval, expiry/replay,
+  disabled-account rejection, and no credential exposure.
 - Tenant A credentials/proofs/targets being rejected by tenant B.
 - Fresh-install one-link setup and automatic completion after server approval.
 - No sharing or broad site permissions during onboarding.

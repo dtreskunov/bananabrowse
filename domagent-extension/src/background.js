@@ -5,6 +5,7 @@ import { errorCode, fail, isUiSender, needsSetup } from './security.js';
 import { parseConnectionUrl } from '../../shared/protocol.js';
 
 const api = typeof browser === 'undefined' ? chrome : browser;
+const action = api.action || api.browserAction;
 const adapter = new BrowserAdapter(api, BUILD_BROWSER);
 let controller;
 let ready;
@@ -27,9 +28,9 @@ function updateBadge() {
     title = `DomAgent: connected to ${snapshot.identity.tenant_label}. No tabs are being shared.`;
   }
   Promise.all([
-    api.action.setBadgeText({ text: badge }),
-    api.action.setBadgeBackgroundColor({ color: active ? '#a4262c' : '#365375' }),
-    api.action.setTitle({ title }),
+    action.setBadgeText({ text: badge }),
+    action.setBadgeBackgroundColor({ color: active ? '#a4262c' : '#365375' }),
+    action.setTitle({ title }),
   ]).catch(error => console.error('DomAgent badge update:', error));
 }
 

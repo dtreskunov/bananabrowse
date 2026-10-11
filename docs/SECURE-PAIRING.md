@@ -7,10 +7,15 @@ extension package, and update channel are trusted. Agents and webpages are not.
 DomAgent is generic: calling applications handle their own configuration and
 credential managers. The service never needs their internal group IDs.
 
-An invited OIDC account approves creation of a server-generated tenant and its
+An authenticated account from the configured OIDC provider approves creation of a server-generated tenant and its
 initial client. Server admission does not confer membership in other tenants.
 Tenant owners may add/remove admitted accounts. Browser pairing makes the
 tenant's initial client eligible to request control; it creates no active grant.
+
+Accounts register automatically on first validated OIDC sign-in; no invitation
+prerequisite is required. Access to the OIDC application can be restricted at the
+provider. Existing disabled accounts remain blocked. Provider profile names are
+display labels only; exact issuer/subject determines identity and tenant access.
 
 Every HTTP MCP request authenticates and matches its credential's tenant to
 `/mcp/<tenant>`. WSS `/extension/<tenant>` authenticates the device key in that
@@ -28,7 +33,7 @@ values, stored as hashes. Requests expire after 15 minutes.
 The secret approval link uses a fragment. Packaged same-origin JS removes it from
 history and establishes provisional HttpOnly setup-flow state. GET previews do
 not approve or consume the link. Existing OIDC state/nonce/PKCE and session/CSRF
-checks govern explicit invited-user approval. Approval creates at most one tenant
+checks govern explicit signed-in user approval. Approval creates at most one tenant
 and shows a client credential once. Status polling returns public URLs only.
 Never log request bodies, token-bearing URLs, credentials, page contents, or proofs.
 
@@ -52,6 +57,9 @@ invalidates old queues, proofs, and grant authority before connecting the new pa
 
 - Five-second heartbeats; silent devices lose authority at 15 seconds plus
   scheduling delay. Identity reconnect never restores grants.
+- Identity remains connected while no tab is shared. Firefox uses a persistent
+  MV2 background page to avoid idle event-page suspension; Chrome retains its
+  MV3 worker. Neither requires a popup or settings page to remain open.
 - Dedicated extension-created tabs only; explicit target IDs on every operation.
 - Serialized target queue capped at 32; original 25-second command deadline is
   carried to the extension. Uncertain mutations end control, never retry.
@@ -107,6 +115,12 @@ Audit logs are allowlisted metadata only. Keep raw proxy access logs disabled
 and review proxy errors/journal access. A calling application may retain returned
 page content independently. Backups preserve revocation state, not active grants;
 restoring stale credentials requires reconciliation/rotation.
+
+Socket diagnostics record device/tenant IDs, a server-selected reason, numeric
+close code, and connection duration. `HEARTBEAT_TIMEOUT` means liveness expiry;
+`SOCKET_CLOSED` with 1001 means the peer or intermediary closed the connection.
+It does not prove an authentication failure or a particular browser action.
+Untrusted close-reason strings are never logged.
 
 ## Validation and release gates
 

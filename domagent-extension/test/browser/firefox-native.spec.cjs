@@ -27,7 +27,8 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
   const manifestPath = path.join(extension, 'manifest.json');
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
   // Only this throwaway profile pre-grants page hosts and trusts its fixture CA.
-  manifest.host_permissions = ['http://*/*', 'https://*/*'];
+  if (manifest.manifest_version === 2) manifest.permissions.push('http://*/*', 'https://*/*');
+  else manifest.host_permissions = ['http://*/*', 'https://*/*'];
   await fs.writeFile(manifestPath, JSON.stringify(manifest));
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', path.join(artifacts, 'ca-key.pem'), '-out', path.join(artifacts, 'ca.pem'),
@@ -151,6 +152,7 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
   let rdp;
   let client;
   let optionsConsole;
+  let watcherActor;
   let parent;
   async function connectOptions() {
     rdp = await openNativeRdp(port);
@@ -178,6 +180,7 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
     })()`);
     expect(optionsUrl).toBe(descriptor.manifestURL.replace('/manifest.json', '/options.html'));
     const watcher = await rdp.request(descriptor.actor, 'getWatcher');
+    watcherActor = watcher.actor;
     await rdp.request(watcher.actor, 'watchTargets', { targetType: 'frame' });
     const { target } = await rdp.event(packet => packet.type === 'target-available-form' &&
       packet.target.url === optionsUrl);
@@ -213,6 +216,11 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
     await expect.poll(async () => (await state()).identity?.owner_id).toBe(ownerId);
     const deviceId = (await state()).identity.device_id;
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
+    const idleConnection = app.bridge.connections.get(deviceId).connection_id;
+    await new Promise(resolve => setTimeout(resolve, 21_000));
+    expect((await state()).phase).toBe('authenticated');
+    expect(app.bridge.connections.get(deviceId).connection_id).toBe(idleConnection);
+    expect(app.bridge.grants.size).toBe(0);
     client = new Client({ name: 'native-firefox-smoke', version: '1.0.0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${backend.port}/mcp/${tenant.id}`), {
       requestInit: { headers: { Authorization: `Bearer ${credentials.credential}` } },
@@ -242,7 +250,7 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
       func:() => document.querySelector("[data-domagent-sharing]")?.shadowRoot?.textContent || ""
     }).then(results => results[0].result)`);
     await expect.poll(marker).toContain('Native smoke client can use this tab.');
-    expect(await evaluate('browser.action.getBadgeText({})')).toBe('ON');
+    expect(await evaluate('(browser.action || browser.browserAction).getBadgeText({})')).toBe('ON');
     for (const [name, args] of [['evaluate_script', { script: '1 + 1' }], ['get_screenshot', {}]]) {
       const unapproved = await client.callTool({ name, arguments: { target_id: grant.target_id, ...args } });
       expect(unapproved.isError).toBe(true);
@@ -414,7 +422,7 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
       func:() => { document.querySelector("[data-domagent-sharing]").shadowRoot.querySelector("button").click(); }
     })`);
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('inactive');
-    await expect.poll(() => evaluate('browser.action.getBadgeText({})')).toBe('IDLE');
+    await expect.poll(() => evaluate('(browser.action || browser.browserAction).getBadgeText({})')).toBe('IDLE');
     const paused = await client.callTool({ name: 'get_text', arguments: { target_id: pausedTarget, selector: 'body' } });
     expect(paused.isError).toBe(true);
     await client.callTool({ name: 'request_browser_access', arguments: { device_id: deviceId } });
@@ -447,6 +455,30 @@ test('native Firefox RDP smoke: pairing, capabilities, protected requests, resta
       capabilities: ['navigate', 'get_text'] });
     await expect.poll(async () => (await state()).targets[0]?.state).toBe('active');
     expect((await state()).targets[0].target_id).not.toBe(beforeRestart);
+    await request({ type: 'ui.end', target_id: (await state()).targets[0].target_id, reason: 'OWNER_PAUSED' });
+    const unattendedConnection = app.bridge.connections.get(deviceId).connection_id;
+    // This RDP method is one-way: do not wait for a reply that cannot arrive.
+    const unwatch = JSON.stringify({ to: watcherActor, type: 'unwatchTargets', targetType: 'frame' });
+    rdp.socket.write(`${Buffer.byteLength(unwatch)}:${unwatch}`);
+    await rdp.evaluate(parent.consoleActor, `(() => {
+      const window = Services.wm.getMostRecentWindow("navigator:browser");
+      for (const tab of Array.from(window.gBrowser.tabs)) {
+        if (tab.linkedBrowser.currentURI.spec.startsWith("moz-extension://")) window.gBrowser.removeTab(tab);
+      }
+      return true;
+    })()`);
+    // No extension-page polling or open popup may keep an idle background alive.
+    await new Promise(resolve => setTimeout(resolve, 65_000));
+    console.log('[native Firefox unattended background]', await rdp.evaluate(parent.consoleActor, `(() => {
+      const { ExtensionParent } = ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
+      const extension = ExtensionParent.GlobalManager.getExtension(${JSON.stringify(manifest.browser_specific_settings.gecko.id)});
+      return { state: extension.backgroundState, persistent: extension.manifest.background.persistent,
+        idleEnabled: Services.prefs.getBoolPref("extensions.webextensions.background.idle.enabled", true),
+        idleTimeout: Services.prefs.getIntPref("extensions.webextensions.background.idle.timeout", -1) };
+    })()`));
+    expect(app.bridge.connections.get(deviceId)?.connection_id).toBe(unattendedConnection);
+    expect(app.bridge.grants.size).toBe(0);
+    expect(app.bridge.targets(credentials.id)[0].state).toBe('approval_required');
   } catch (error) {
     if (rdp && optionsConsole) {
       try {

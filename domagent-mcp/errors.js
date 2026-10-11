@@ -16,7 +16,7 @@ export function failureCode(error) {
 
 const FIELDS = new Set([
   'tenant_id', 'owner_id', 'device_id', 'client_id', 'target_id', 'request_id',
-  'operation', 'code', 'duration_ms',
+  'operation', 'code', 'duration_ms', 'close_code',
 ]);
 
 export function audit(event, fields = {}) {

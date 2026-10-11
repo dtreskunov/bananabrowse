@@ -45,7 +45,7 @@ export class BridgeServer {
     this.sockets.add(ws);
     const session = {
       ws, origin: req.headers.origin, tenant_id: req.url.split('/')[2], connection_id: randomUUID(),
-      lastSeen: Date.now(), authenticated: false, device: null, challenge: null,
+      lastSeen: Date.now(), connectedAt: Date.now(), authenticated: false, device: null, challenge: null,
       processing: Promise.resolve(), queued: 0,
     };
     const timeout = setTimeout(() => {
@@ -65,18 +65,20 @@ export class BridgeServer {
       }).catch(error => {
         audit('ws_failure', { device_id: session.device?.id, code: failureCode(error) });
         this.send(session, { type: 'error', code: failureCode(error) });
-        this.disconnected(session);
+        this.disconnected(session, failureCode(error));
         ws.close(1008, 'PROTOCOL_FAILURE');
       }).finally(() => { session.queued--; });
     });
-    ws.on('close', () => {
+    ws.on('close', closeCode => {
       clearTimeout(timeout);
       this.sockets.delete(ws);
-      this.disconnected(session);
+      this.disconnected(session, 'SOCKET_CLOSED', closeCode);
+      audit('socket_closed', { device_id: session.device?.id, tenant_id: session.tenant_id,
+        close_code: closeCode, duration_ms: Date.now() - session.connectedAt });
     });
     ws.on('error', () => {
       audit('ws_failure', { device_id: session.device?.id, code: 'CONNECTION_ERROR' });
-      this.disconnected(session);
+      this.disconnected(session, 'CONNECTION_ERROR');
       ws.terminate();
     });
   }
@@ -93,7 +95,7 @@ export class BridgeServer {
     session.lastSeen = Date.now();
     clearTimeout(session.liveness);
     session.liveness = setTimeout(() => {
-      this.disconnected(session);
+      this.disconnected(session, 'HEARTBEAT_TIMEOUT');
       session.ws.terminate();
     }, LIVENESS_MS);
     session.liveness.unref();
@@ -122,7 +124,7 @@ export class BridgeServer {
         'NOT_AUTHORIZED', 403);
       const old = this.connections.get(session.device.id);
       if (old) {
-        this.disconnected(old);
+        this.disconnected(old, 'REPLACED');
         old.ws.close(1000, 'REPLACED');
       }
       session.authenticated = true;
@@ -135,7 +137,7 @@ export class BridgeServer {
         epoch: this.epoch, connection_id: session.connection_id,
         protected_origins: this.config.protectedOrigins,
       });
-      audit('device_connected', { device_id: session.device.id });
+      audit('device_connected', { device_id: session.device.id, tenant_id: session.tenant_id });
       return;
     }
     requireValue(this.current(session), 'NOT_AUTHORIZED', 403);
@@ -228,9 +230,13 @@ export class BridgeServer {
     }
     throw new Fault('INVALID_MESSAGE');
   }
-  disconnected(session) {
+  disconnected(session, code = 'SOCKET_CLOSED', closeCode) {
     clearTimeout(session.liveness);
     if (!session.device) return;
+    if (session.authenticated) {
+      audit('device_disconnected', { device_id: session.device.id, tenant_id: session.tenant_id,
+        code, close_code: closeCode, duration_ms: Date.now() - session.connectedAt });
+    }
     if (this.connections.get(session.device.id) === session) this.connections.delete(session.device.id);
     for (const [id, grant] of this.grants) {
       if (grant.connection_id === session.connection_id) this.endGrant(id, 'BROWSER_OFFLINE');
@@ -388,7 +394,7 @@ export class BridgeServer {
     }
     for (const session of this.connections.values()) {
       if (!this.store.device(session.device.id)) {
-        this.disconnected(session);
+        this.disconnected(session, 'REVOKED');
         session.ws.close(1008, 'REVOKED');
       }
     }
@@ -400,7 +406,7 @@ export class BridgeServer {
     }
     for (const session of this.connections.values()) {
       if (Date.now() - session.lastSeen > LIVENESS_MS) {
-        this.disconnected(session);
+        this.disconnected(session, 'HEARTBEAT_TIMEOUT');
         session.ws.terminate();
       } else {
         this.send(session, { type: 'ping' });
@@ -409,7 +415,7 @@ export class BridgeServer {
   }
   close() {
     clearInterval(this.timer);
-    for (const session of this.connections.values()) this.disconnected(session);
+    for (const session of this.connections.values()) this.disconnected(session, 'SERVICE_STOPPED');
     for (const ws of this.sockets) ws.terminate();
     this.wss.close();
   }

@@ -66,8 +66,9 @@ Then load the extension for the browser you want to work on:
 - **Firefox:** `about:debugging` → Load Temporary Add-on → select `dist/firefox/manifest.json`
 
 Do not load unbuilt source directories. Follow [the deployment guide](docs/SECURE-PAIRING.md)
-to configure the required HTTPS origin, independent OIDC registration, and invited
-owner before starting the production service. There is no insecure development
+to configure the required HTTPS origin and independent OIDC registration
+before starting the production service. Users of that provider register on
+validated sign-in. There is no insecure development
 login or unauthenticated localhost bridge.
 
 See the browser-specific READMEs for full setup instructions:
@@ -219,7 +220,7 @@ There is no automated linter configured yet. Follow the patterns already present
 
 ### Extension-specific
 
-- Chrome uses an MV3 worker; Firefox uses a background script. Worker/browser
+- Chrome uses an MV3 worker; Firefox uses a persistent MV2 background script. Worker/browser
   restart ends control and requires fresh approval, not grant restoration.
 - Dedicated-tab provenance is session-only. Device keys live in extension-private
   IndexedDB. Do not adopt an arbitrary existing tab.

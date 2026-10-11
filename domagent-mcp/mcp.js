@@ -26,7 +26,7 @@ const tools = [
 ];
 
 export async function handleMcp(req, res, body, client, bridge) {
-  const server = new Server({ name: 'domagent', version: '3.0.0-beta.1' },
+  const server = new Server({ name: 'domagent', version: '3.0.0-beta.2' },
     { capabilities: { tools: {} } });
   server.onerror = () => audit('mcp_protocol_failure', { client_id: client.id, code: 'PROTOCOL_FAILURE' });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));

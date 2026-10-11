@@ -6,6 +6,13 @@ This source directory is not an installable package. Firefox 128+ is the
 candidate baseline for MAIN-world scripting; actual Firefox release validation
 is still required.
 
+Firefox uses Manifest V2 with a persistent background page for its long-lived
+authenticated browser connection. The earlier MV3 event-page build could be
+suspended while the browser was idle; opening the toolbar then woke it again.
+This is not a requirement to share a tab or keep the popup/settings open.
+Website access remains optional and is still requested only on local approval.
+Chrome continues to use its MV3 service worker.
+
 Installation opens **Connect your browser**. Paste the public HTTPS connection
 link (`https://server.example/join/<tenant-id>`) and choose **Continue**. Permission
 is requested only for that server. Sign in and choose **Connect browser** on the

@@ -131,22 +131,26 @@ test('config and connection link validation reject insecure and ambiguous inputs
   assert.throws(() => tenantId('FJGHB'), /INVALID_TENANT/);
 });
 
-test('owner admission is exact issuer/subject scoped and disabled/expired identities fail', () => {
+test('authenticated identities register without invitations; issuer/subject remain scoped and disabled accounts fail', () => {
   const store = new Store(':memory:');
   try {
     const id = store.invite(ISSUER, 'owner', 'Owner');
-    assert.throws(() => store.admit('https://other.test', 'owner'), /OWNER_NOT_INVITED/);
+    const distinct = store.admit('https://other.test', 'owner', 'Different account');
+    assert.notEqual(distinct.id, id);
     store.admit(ISSUER, 'owner');
     const session = store.createSession(id);
     assert(store.session(session.token));
     store.disableOwner(id);
     assert.equal(store.session(session.token), undefined);
-    assert.throws(() => store.admit(ISSUER, 'owner'), /OWNER_NOT_INVITED/);
+    assert.throws(() => store.admit(ISSUER, 'owner'), /OWNER_DISABLED/);
     assert.throws(() => store.invite(ISSUER, 'owner', 'Owner'), /OWNER_ALREADY_REGISTERED/);
     const expired = store.invite(ISSUER, 'expired', 'Expired');
     store.db.prepare('UPDATE owners SET invitation_expires=0 WHERE id=?').run(expired);
-    assert.throws(() => store.admit(ISSUER, 'expired'), /OWNER_NOT_INVITED/);
-    assert.equal(store.invite(ISSUER, 'expired', 'Renewed'), expired);
+    assert.equal(store.admit(ISSUER, 'expired').id, expired);
+    const newOwner = store.admit(ISSUER, 'new-user', 'New user');
+    assert.equal(newOwner.admitted, 1);
+    assert.deepEqual(store.tenantsForOwner(newOwner.id), []);
+    assert.equal(store.member(newOwner.id, store.createTenant(distinct.id, 'Separate tenant').id), false);
   } finally { store.close(); }
 });
 
@@ -409,7 +413,7 @@ test('tenant-bound captured WSS proof cannot authenticate a device on another en
     authPayload({ origin: ORIGIN, tenant_id: other.tenant.id }));
 });
 
-test('setup preview creates no authority; invited approval creates one tenant and reveals credential only once', async t => {
+test('setup preview creates no authority; signed-in approval creates one tenant and reveals credential only once', async t => {
   const ctx = await setup(t);
   const create = await ctx.request('/api/setup-requests', { agent_name: '<b>Atlas</b>', request_description: 'Help me use a website.' });
   assert.equal(create.status, 201);
@@ -438,6 +442,54 @@ test('setup preview creates no authority; invited approval creates one tenant an
   assert.equal(ctx.store.db.prepare('SELECT count(*) AS n FROM tenants').get().n, count + 1);
   assert.equal((await ctx.request(`${verification.pathname}/approve`, { csrf: ctx.session.csrf }, headers)).status, 404);
   assert.equal((await ctx.request(`/api/setup-requests/${id}/open`, { token: credential }, { Origin: ORIGIN })).status, 404);
+});
+
+test('a clean database completes agent-initiated setup after OIDC sign-in without pre-inviting the account', async t => {
+  const store = new Store(':memory:');
+  const app = createApp(store, {
+    origin: ORIGIN, issuer: ISSUER, bind: '127.0.0.1', port: 0, protectedOrigins: [ORIGIN, ISSUER],
+  }, {
+    start: async flow => `${ISSUER}/authorize?state=${flow.state}`,
+    finish: async () => ({ issuer: ISSUER, subject: 'fresh-pocketid-user', label: 'Denis' }),
+  });
+  const address = await app.listen();
+  t.after(async () => { await app.close(); store.close(); });
+  const request = (path, data, headers = {}, method = 'POST') => fetch(`http://127.0.0.1:${address.port}${path}`, {
+    method, redirect: 'manual', headers: { ...(data ? { 'Content-Type': 'application/json' } : {}), ...headers },
+    body: data ? JSON.stringify(data) : undefined,
+  });
+  const created = await (await request('/api/setup-requests', {
+    agent_name: 'Atlas', request_description: 'Help with my browser.',
+  })).json();
+  const link = new URL(created.verification_url);
+  const opened = await request(`/api/setup-requests/${created.request_id}/open`,
+    { token: new URLSearchParams(link.hash.slice(1)).get('token') }, { Origin: ORIGIN });
+  const setupCookie = opened.headers.get('set-cookie').split(';')[0];
+  const login = await request(`/login?setup=${created.request_id}`, null, { Cookie: setupCookie }, 'GET');
+  const state = new URL(login.headers.get('location')).searchParams.get('state');
+  const callback = await request(`/oidc/callback?state=${state}&code=fixture`, null,
+    { Cookie: `${setupCookie}; __Host-domagent_flow=${state}` }, 'GET');
+  assert.equal(callback.status, 303);
+  assert.equal(callback.headers.get('location'), link.pathname);
+  const account = store.db.prepare('SELECT * FROM owners WHERE subject=?').get('fresh-pocketid-user');
+  assert.equal(account.label, 'Denis');
+  assert.equal(account.admitted, 1);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM tenants').get().n, 0);
+  const sessionCookie = callback.headers.getSetCookie().find(cookie => cookie.startsWith('__Host-domagent_session=')).split(';')[0];
+  const cookie = `${setupCookie}; ${sessionCookie}`;
+  const approval = await request(link.pathname, null, { Cookie: cookie }, 'GET');
+  assert.equal(approval.status, 200);
+  const csrf = (await approval.text()).match(/name="csrf" value="([^"]+)"/)[1];
+  const confirmed = await request(`${link.pathname}/approve`, { csrf }, { Cookie: cookie, Origin: ORIGIN });
+  assert.equal(confirmed.status, 200);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM tenants').get().n, 1);
+  store.disableOwner(account.id);
+  const again = await request('/login', null, {}, 'GET');
+  const newState = new URL(again.headers.get('location')).searchParams.get('state');
+  const disabled = await request(`/oidc/callback?state=${newState}&code=fixture`, null,
+    { Cookie: `__Host-domagent_flow=${newState}` }, 'GET');
+  assert.equal(disabled.status, 403);
+  assert((await disabled.text()).includes('disabled'));
 });
 
 test('setup receipts cannot redeem links; invalid, expired and cross-origin requests fail', async t => {

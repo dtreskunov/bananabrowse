@@ -12,7 +12,7 @@ import { Fault, requireValue, failureCode, audit } from './errors.js';
 const COOKIE = '__Host-domagent_session';
 const FLOW_COOKIE = '__Host-domagent_flow';
 const SETUP_COOKIE = '__Host-domagent_setup';
-const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.1';
+const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.2';
 const secureCookie = (name, value, age) =>
   `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${age}`;
 const equal = (a, b) => {
@@ -93,7 +93,7 @@ const copyScript = `document.querySelector("[data-copy]").addEventListener("clic
 });`;
 const pageFailure = code => ({
   TENANT_ACCESS_REQUIRED: "You don't have access to this connection. Ask its owner.",
-  OWNER_NOT_INVITED: "Your account needs an invitation. Contact the server administrator.",
+  OWNER_DISABLED: 'Your account has been disabled. Contact the server administrator.',
   ENROLLMENT_UNAVAILABLE: 'This connection request has expired or is no longer available. Start again in the extension.',
   SETUP_UNAVAILABLE: 'This link has expired or has already been used. Ask for a new one.',
   OIDC_LOGIN_FAILED: "We couldn't sign you in. Try again.",
@@ -272,7 +272,7 @@ export function createApp(store, config, oidc) {
       return;
     }
     if ((path === '/' || path === '/health') && ['GET', 'HEAD'].includes(method)) {
-      json(res, 200, { service: 'domagent', status: 'ok', version: '3.0.0-beta.1', protocol_version: VERSION });
+      json(res, 200, { service: 'domagent', status: 'ok', version: '3.0.0-beta.2', protocol_version: VERSION });
       return;
     }
     if (path === '/style.css' && method === 'GET') {
@@ -310,7 +310,8 @@ export function createApp(store, config, oidc) {
       requireValue(flow && flow.expires > Date.now() && equal(cookies(req)[FLOW_COOKIE], state), 'OIDC_STATE_INVALID', 403);
       let identity;
       try { identity = await oidc.finish(url, flow); } catch { throw new Fault('OIDC_LOGIN_FAILED', 403); }
-      const owner = store.admit(identity.issuer, identity.subject);
+      requireValue(identity.issuer === config.issuer, 'OIDC_IDENTITY_INVALID', 403);
+      const owner = store.admit(identity.issuer, identity.subject, identity.label);
       const session = store.createSession(owner.id);
       res.setHeader('Set-Cookie', [secureCookie(FLOW_COOKIE, '', 0), secureCookie(COOKIE, session.token, 28800)]);
       audit('owner_login', { owner_id: owner.id });
@@ -423,7 +424,7 @@ export function createApp(store, config, oidc) {
             form(`/dashboard/tenants/${tenant}/revoke-device`, session.csrf, { device_id: d.id }, button('Disconnect browser'))).join('') +
           (owned ? '<details><summary>Connection administration</summary>' +
             form(`/dashboard/tenants/${tenant}/add-member`, session.csrf, {},
-              '<label>Invited account ID <input name="owner_id" required></label>' + button('Allow account to connect')) +
+              '<label>Account ID <input name="owner_id" required></label>' + button('Allow account to connect')) +
             form(`/dashboard/tenants/${tenant}/remove-member`, session.csrf, {},
               '<label>Account ID <input name="owner_id" required></label>' + button('Remove account access')) +
             form(`/dashboard/tenants/${tenant}/disable`, session.csrf, {}, button('Disable connection')) + '</details>' : '') +

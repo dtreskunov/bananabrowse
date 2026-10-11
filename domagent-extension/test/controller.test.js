@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { authPayload, grantPayload, LIVENESS_MS, verify } from '../../shared/protocol.js';
+import { authPayload, grantPayload, LIVENESS_MS, POLICY_ID, verify } from '../../shared/protocol.js';
 import { Controller } from '../src/controller.js';
 import { DeviceKeys } from '../src/keys.js';
 
@@ -9,43 +9,35 @@ const tenant_id = 't_abcdefghijklmnopqrstuv';
 const binding = { tenant_id, epoch: 'epoch-1', connection_id: 'connection-1' };
 const extensionUrl = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/';
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
-
 class Socket {
-  static instances = [];
-  constructor(url) {
-    this.url = url;
-    this.readyState = 1;
-    this.sent = [];
-    Socket.instances.push(this);
-  }
+  constructor() { this.readyState = 1; this.sent = []; }
   send(raw) { this.sent.push(JSON.parse(raw)); }
   close() { this.readyState = 3; }
 }
 
-async function fixture() {
+async function fixture(t) {
   let clock = 10_000;
-  let tab = 100;
   const calls = [];
   const saved = {};
-  const keys = new DeviceKeys({
-    async get() { return undefined; }, async put(record) { return record; },
-  });
+  const keys = new DeviceKeys({ async get() {}, async put(record) { return record; } });
   const record = await keys.get(origin, tenant_id);
   record.identity = { tenant_id, tenant_label: 'Atlas', device_id: 'device-1', owner_id: 'owner-1', owner_label: 'Owner' };
   const adapter = {
     capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
-    async initialize() {},
-    async createTab(previous) { calls.push(['create', previous]); return { id: previous || tab++ }; },
-    async protect(tabId, origins) { calls.push(['protect', tabId, origins]); },
+    async initialize(inventory) { calls.push(['initialize', inventory]); },
+    async selectedTabById(id) { calls.push(['select', id]); return { id, url: 'https://site.example/' }; },
+    async requestWindow(id) { calls.push(['window', id]); },
+    async closeRequestWindow(id) { calls.push(['closeWindow', id]); },
+    async protect(id, origins) { calls.push(['protect', id, origins]); },
     async inspect() {},
-    async attach(tabId) { calls.push(['attach', tabId]); },
-    async release(tabId) { calls.push(['release', tabId]); },
+    async attach(id) { calls.push(['attach', id]); },
+    async release(id) { calls.push(['release', id]); },
     async execute(grant, operation, args, check) { check(); calls.push(['execute', grant.tabId, operation]); return { text: 'page' }; },
   };
   const controller = new Controller({
     adapter, keys, Socket, extensionUrl, now: () => clock,
     storage: { async get() { return saved; }, async set(value) { Object.assign(saved, value); } },
-    inventoryStorage: { async get() { return saved; }, async set(value) { Object.assign(saved, value); } },
+    inventoryStorage: { async get() { return { dedicatedTabs: [{ tabId: 999 }] }; }, async set() {} },
   });
   controller.report = error => controller.failures.push(error.message);
   controller.config = { service_origin: origin, tenant_id, local_protected_origins: ['https://idp.example'], enabled: true };
@@ -53,591 +45,325 @@ async function fixture() {
   controller.connect();
   const socket = controller.socket;
   socket.onopen();
+  const receive = message => controller.receive(JSON.stringify(message), socket, controller.generation);
   const challenge = { type: 'challenge', origin, ...binding, nonce: 'nonce-1', key_id: record.key_id };
-  await controller.receive(JSON.stringify(challenge), socket, controller.generation);
-  await controller.receive(JSON.stringify({ type: 'authenticated', ...binding, ...record.identity,
-    protected_origins: ['https://idp.example'] }), socket, controller.generation);
-  return { controller, adapter, calls, socket, saved, record, challenge,
-    advance(ms) { clock += ms; }, flush };
+  await receive(challenge);
+  await receive({ type: 'authenticated', ...binding, ...record.identity, protected_origins: ['https://idp.example'] });
+  t.after(() => controller.dispose());
+  return { controller, adapter, calls, socket, saved, record, challenge, receive,
+    advance(ms) { clock += ms; controller.lastPing = clock; } };
 }
 
-async function pending(f, clientId = 'client-1', requestId = 'approval-1') {
-  const request = { type: 'approval.request', ...binding, request_id: requestId, client_id: clientId,
-    client_label: '<img src=x onerror=evil()>', policy_id: 'page-control-v1', nonce: `nonce-${requestId}`,
-    expires_at: f.controller.now() + 60_000, protected_origins: ['https://idp.example'] };
-  await f.controller.receive(JSON.stringify(request), f.socket, f.controller.generation);
+async function pending(f, client_id = 'client-1', request_id = crypto.randomUUID()) {
+  const request = { type: 'approval.request', ...binding, request_id, client_id,
+    client_label: '<img src=x onerror=evil()>', description: 'Help me research a website',
+    policy_id: POLICY_ID, nonce: `nonce-${request_id}`,
+    expires_at: f.controller.now() + 600_000, protected_origins: ['https://idp.example'] };
+  await f.receive(request);
   return request;
 }
-
-function command(grant, extra = {}) {
-  return { type: 'command', ...binding, request_id: crypto.randomUUID(), target_id: grant.target_id,
-    client_id: grant.client_id, operation: 'get_text', args: {}, expires_at: 25_000, ...extra };
-}
-
-async function approve(f, clientId = 'client-1', requestId = 'approval-1', ack = true) {
-  const request = await pending(f, clientId, requestId);
-  await f.controller.approve(requestId, ['navigate', 'get_text']);
-  const grant = [...f.controller.grants.values()].find(grant => grant.client_id === clientId);
-  if (ack) await f.controller.receive(JSON.stringify({ type: 'grant.active', tenant_id,
-    target_id: grant.target_id, client_id: clientId }), f.socket, f.controller.generation);
+async function approve(f, clientId = 'client-1', tabId = 100, ack = true) {
+  const request = await pending(f, clientId);
+  await f.controller.approve(request.request_id, tabId);
+  const grant = [...f.controller.grants.values()].find(grant => grant.tabId === tabId);
+  if (ack) await f.receive({ type: 'grant.active', tenant_id, target_id: grant.target_id, tab_id: tabId, client_id: clientId });
   return { grant, request };
 }
+function command(f, grant, extra = {}) {
+  return { type: 'command', ...binding, request_id: crypto.randomUUID(), target_id: grant.target_id,
+    client_id: grant.client_id, operation: 'get_text', args: {}, description: 'Read this page',
+    expires_at: f.controller.now() + 600_000, ...extra };
+}
+async function execute(f, grant, message, action = 'approve') {
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, action);
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  await flush();
+  return f.socket.sent.find(value => value.type === 'result' && value.request_id === message.request_id);
+}
 
-test('handshake sends key-only hello and challenge-bound proof; no preauth commands', async () => {
-  const f = await fixture();
-  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 2, tenant_id, key_id: f.record.key_id });
-  assert.equal(await verify(f.record.public_key, authPayload(f.challenge), f.socket.sent[1].signature), true);
-  assert.match(f.socket.url, /^wss:/);
-  const generation = f.controller.generation;
-  f.controller.connection = null;
-  await assert.rejects(f.controller.receive(JSON.stringify(command({ target_id: 'target', client_id: 'client' })),
-    f.socket, generation), /NOT_AUTHORIZED/);
-  f.controller.dispose();
+test('v3 identity proofs preserve keys and require exact tenant/connection', async t => {
+  const f = await fixture(t);
+  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 3, tenant_id, key_id: f.record.key_id });
+  assert(await verify(f.record.public_key, authPayload(f.challenge), f.socket.sent[1].signature));
+  await assert.rejects(f.receive({ type: 'ping', tenant_id: 'other' }), /NOT_AUTHORIZED/);
 });
-
-test('native browser fetch is invoked with its required global receiver', async () => {
-  const originalFetch = globalThis.fetch;
+test('native browser fetch has its global receiver', async t => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
   globalThis.fetch = async function () {
     assert.equal(this, globalThis);
     return { ok: true, async text() { return '{"nonce":"test"}'; } };
   };
-  try {
-    const controller = new Controller({
-      adapter: {}, extensionUrl, keys: {}, storage: {}, inventoryStorage: {},
-    });
-    controller.config.service_origin = origin;
-    controller.config.tenant_id = tenant_id;
-    assert.deepEqual(await controller.api('challenge'), { nonce: 'test' });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  const f = await fixture(t);
+  assert.deepEqual(await f.controller.api('challenge'), { nonce: 'test' });
 });
-
-test('wrong service-origin challenge and mismatched authenticated generation are rejected', async () => {
-  const f = await fixture();
-  f.controller.phase = 'authenticating';
-  await assert.rejects(f.controller.receive(JSON.stringify({ ...f.challenge, origin: 'https://evil.example' }),
-    f.socket, f.controller.generation), /NOT_AUTHORIZED/);
-  f.controller.phase = 'proving';
-  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'authenticated', ...binding,
-    connection_id: 'other', ...f.record.identity, protected_origins: [] }),
-  f.socket, f.controller.generation), /NOT_AUTHORIZED/);
-  f.controller.dispose();
-});
-
-test('rules precede privileged attachment and signed approval; commands need ACK', async () => {
-  const f = await fixture();
-  const { grant, request } = await approve(f, 'client-1', 'approval-1', false);
-  assert.deepEqual(f.calls.map(call => call[0]).slice(0, 3), ['create', 'protect', 'attach']);
-  const approval = f.socket.sent.find(message => message.type === 'grant.approve');
-  assert.equal(await verify(f.record.public_key, grantPayload({
-    ...request, origin, target_id: grant.target_id, capabilities: approval.capabilities,
-  }), approval.signature), true);
-  f.controller.enqueue(command(grant));
+test('every sharing request opens a trusted window before any heartbeat; description is visible', async t => {
+  const f = await fixture(t);
+  const request = await pending(f);
   await flush();
-  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
-  assert.equal(f.socket.sent.at(-1).error.code, 'APPROVAL_REQUIRED');
-  f.controller.dispose();
+  assert(f.calls.some(call => call[0] === 'window' && call[1] === request.request_id));
+  assert.equal(f.controller.snapshot().pending[0].description, request.description);
 });
-
-test('failed protection never signs/activates a grant', async () => {
-  const f = await fixture();
+test('actual selected tab and fixed capabilities are signed after protection and attachment', async t => {
+  const f = await fixture(t);
+  const { grant, request } = await approve(f, 'client-1', 42);
+  const approval = f.socket.sent.find(message => message.type === 'grant.approve');
+  assert.equal(grant.tabId, 42);
+  assert.deepEqual(approval.capabilities, f.adapter.capabilities());
+  assert.deepEqual(f.calls.filter(call => ['select', 'protect', 'attach'].includes(call[0])).map(call => call[0]),
+    ['select', 'protect', 'attach']);
+  assert(await verify(f.record.public_key, grantPayload({ ...request, origin,
+    target_id: grant.target_id, tab_id: 42, capabilities: approval.capabilities }), approval.signature));
+  assert.equal(await verify(f.record.public_key, grantPayload({ ...request, origin,
+    target_id: grant.target_id, tab_id: 43, capabilities: approval.capabilities }), approval.signature), false);
+});
+test('failed protection and changed selection never grant authority', async t => {
+  const f = await fixture(t);
+  const request = await pending(f);
+  f.adapter.selectedTabById = async () => { throw new Error('TARGET_STALE'); };
+  await assert.rejects(f.controller.approve(request.request_id, 42), /TARGET_STALE/);
+  f.adapter.selectedTabById = async id => ({ id });
   f.adapter.protect = async () => { throw new Error('PROTECTION_UNAVAILABLE'); };
-  await pending(f);
-  await assert.rejects(f.controller.approve('approval-1', ['get_text']), /PROTECTION_UNAVAILABLE/);
+  await assert.rejects(f.controller.approve(request.request_id, 42), /PROTECTION_UNAVAILABLE/);
   assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.socket.sent.some(message => message.type === 'grant.approve'), false);
-  assert.equal(f.calls.some(call => call[0] === 'attach'), false);
-  f.controller.dispose();
+  assert(!f.socket.sent.some(message => message.type === 'grant.approve'));
 });
-
-test('two clients remain isolated; no method or target fallback exists', async () => {
-  const f = await fixture();
-  const { grant: first } = await approve(f);
-  const { grant: second } = await approve(f, 'client-2', 'approval-2');
-  assert.notEqual(first.tabId, second.tabId);
-  for (const extra of [
-    { target_id: second.target_id }, { client_id: 'client-2' },
-    { args: { target_id: second.target_id } }, { operation: 'forwardCDPCommand' },
-    { epoch: 'old' }, { connection_id: 'old' },
-  ]) f.controller.enqueue(command(first, extra));
+test('multiple tabs per client are independent and another client cannot steal a shared tab', async t => {
+  const f = await fixture(t);
+  const { grant: a } = await approve(f, 'client-1', 1);
+  const { grant: b } = await approve(f, 'client-1', 2);
+  assert.notEqual(a.target_id, b.target_id);
+  const other = await pending(f, 'client-2');
+  await assert.rejects(f.controller.approve(other.request_id, 1), /APPROVAL_REQUIRED/);
+  assert.equal(f.controller.grants.get(a.target_id), a);
+  const { grant: reused } = await approve(f, 'client-1', 1);
+  assert.equal(reused.target_id, a.target_id);
+  assert.equal(f.controller.grants.size, 2);
+});
+test('grant ACK includes actual tab and no commands execute before ACK', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f, 'client-1', 100, false);
+  f.controller.enqueue(command(f, grant));
+  assert.equal(f.socket.sent.at(-1).error.code, 'APPROVAL_REQUIRED');
+  await assert.rejects(f.receive({ type: 'grant.active', tenant_id, target_id: grant.target_id,
+    client_id: grant.client_id, tab_id: 200 }), /NOT_AUTHORIZED/);
+});
+test('commands wait for local decision and then server execution handshake', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const message = command(f, grant);
+  f.controller.enqueue(message);
   await flush();
   assert.equal(f.calls.some(call => call[0] === 'execute'), false);
-  f.controller.enqueue(command(first));
-  await flush();
-  assert.deepEqual(f.calls.find(call => call[0] === 'execute'), ['execute', first.tabId, 'get_text']);
-  f.controller.dispose();
-});
-
-test('local approval binds a stable public client ID, not an assumed client registration owner', async () => {
-  const f = await fixture();
-  const request = await pending(f, 'client-from-another-owner', 'cross-owner');
-  await f.controller.approve(request.request_id, ['get_text']);
-  const grant = [...f.controller.grants.values()][0];
-  assert.equal(grant.client_id, 'client-from-another-owner');
-  assert.equal(f.controller.record.identity.owner_id, 'owner-1');
-  const approval = f.socket.sent.find(message => message.type === 'grant.approve');
-  assert.equal(approval.client_id, request.client_id);
-  assert.equal(await verify(f.record.public_key, grantPayload({
-    ...request, origin, target_id: grant.target_id, capabilities: ['get_text'],
-  }), approval.signature), true);
-  f.controller.dispose();
-});
-
-test('pause disables authority synchronously, keeps tab and fresh request generates a new target', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  const ending = f.controller.end(grant.target_id, 'OWNER_PAUSED');
-  assert.equal(f.controller.grants.size, 0);
-  f.controller.enqueue(command(grant));
-  await ending;
-  assert.equal(f.controller.inventory.length, 1);
-  assert.equal(f.socket.sent.find(message => message.type === 'grant.end').reason, 'OWNER_PAUSED');
-  f.controller.resume(grant.client_id);
-  assert.equal(f.socket.sent.at(-1).type, 'access.request');
-  assert.equal(f.controller.grants.size, 0);
-  const { grant: fresh } = await approve(f, 'client-1', 'fresh');
-  assert.notEqual(fresh.target_id, grant.target_id);
-  f.controller.dispose();
-});
-
-test('missing heartbeat, disconnect and old socket close cannot carry grants into reconnect', async () => {
-  const f = await fixture();
-  await approve(f);
-  f.advance(LIVENESS_MS);
-  f.controller.tick();
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.pending.size, 0);
-  assert.equal(f.controller.connection, null);
-  f.controller.connect();
-  const freshSocket = f.controller.socket;
-  f.socket.onclose();
-  assert.equal(f.controller.socket, freshSocket);
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.record.identity.device_id, 'device-1');
-  f.controller.dispose();
-});
-
-test('queues are serialized, bounded and reject stale-document work without retry', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  let release;
-  f.adapter.execute = async (local, operation, args, check) => {
-    check();
-    f.calls.push(['execute', local.tabId]);
-    await new Promise(resolve => { release = resolve; });
-    return { text: 'page' };
-  };
-  f.controller.enqueue(command(grant));
-  await flush();
-  for (let i = 0; i < 17; i++) f.controller.enqueue(command(grant));
-  assert.equal(grant.queue.length, 16);
-  assert.equal(f.socket.sent.at(-1).error.code, 'QUEUE_FULL');
-  f.controller.tabEvent(grant.tabId, 'navigation', 'https://ordinary.example/');
-  release();
-  await flush();
-  assert.equal(f.calls.filter(call => call[0] === 'execute').length, 1);
-  assert.equal(f.socket.sent.at(-1).error.code, 'TARGET_STALE');
-  f.controller.dispose();
-});
-
-test('protected navigation requires handoff, and remote lists cannot remove pinned origins', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  f.controller.enqueue(command(grant, { operation: 'navigate', args: { url: `${origin}/dashboard` } }));
-  await flush();
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.socket.sent.find(message => message.type === 'result').error.code, 'HANDOFF_REQUIRED');
-  const request = await pending(f, 'client-1', 'next');
-  request.protected_origins = [];
-  await f.controller.receive(JSON.stringify({ ...request, request_id: 'next-2' }),
-    f.socket, f.controller.generation);
-  assert.ok(f.controller.protectedOrigins().includes('https://idp.example'));
-  f.controller.dispose();
-});
-
-test('restart reads persistent identity but never grants or pending decisions', async () => {
-  const f = await fixture();
-  await approve(f);
-  assert.equal('grants' in f.saved, false);
-  assert.equal('pending' in f.saved, false);
-  assert.equal(JSON.stringify(f.controller.snapshot()).includes('privateKey'), false);
-  f.controller.dispose();
-});
-
-test('disconnect while a protection install is pending cannot later attach or sign approval', async () => {
-  const f = await fixture();
-  let unblock;
-  f.adapter.protect = async () => new Promise(resolve => { unblock = resolve; });
-  await pending(f);
-  const approval = f.controller.approve('approval-1', ['get_text']);
-  await flush();
-  await f.controller.disconnect();
-  unblock();
-  await assert.rejects(approval, /APPROVAL_REQUIRED/);
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.calls.some(call => call[0] === 'attach'), false);
-  assert.equal(f.socket.sent.some(message => message.type === 'grant.approve'), false);
-  assert.equal(f.controller.busyTabs.size, 0);
-  f.controller.dispose();
-});
-
-test('a newly protected remote origin ends old grants rather than retaining incomplete filters', async () => {
-  const f = await fixture();
-  await approve(f);
-  const request = { type: 'approval.request', ...binding, request_id: 'new-protection',
-    client_id: 'client-2', client_label: 'client-2', policy_id: 'page-control-v1',
-    nonce: 'nonce-new', expires_at: f.controller.now() + 60_000,
-    protected_origins: ['https://new-idp.example'] };
-  await f.controller.receive(JSON.stringify(request), f.socket, f.controller.generation);
-  assert.equal(f.controller.grants.size, 0);
-  assert.ok(f.controller.protectedOrigins().includes('https://new-idp.example'));
-  assert.ok(f.controller.protectedOrigins().includes('https://idp.example'));
-  assert.equal(f.calls.some(call => call[0] === 'release'), true);
-  f.controller.dispose();
-});
-
-test('no new command starts after liveness expires, even before the timer runs', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  f.advance(LIVENESS_MS);
-  f.controller.enqueue(command(grant));
+  assert.equal(f.controller.snapshot().targets[0].commands[0].description, message.description);
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  assert.equal(f.socket.sent.at(-1).type, 'command.ready');
   await flush();
   assert.equal(f.calls.some(call => call[0] === 'execute'), false);
-  f.controller.tick();
-  assert.equal(f.controller.grants.size, 0);
-  f.controller.dispose();
-});
-
-test('server expiry is checked at arrival and again after asynchronous inspection before execution', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  f.controller.enqueue(command(grant, { expires_at: f.controller.now() }));
-  await flush();
-  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
-  assert.equal(f.socket.sent.at(-1).error.code, 'OUTCOME_UNKNOWN');
-  let inspectDone;
-  f.adapter.execute = async (local, operation, args, check) => {
-    await new Promise(resolve => { inspectDone = resolve; });
-    check();
-    f.calls.push(['executed_after_inspection', local.tabId]);
-    return {};
-  };
-  f.controller.enqueue(command(grant, { expires_at: f.controller.now() + 10 }));
-  await flush();
-  f.advance(11);
-  inspectDone();
-  await flush();
-  assert.equal(f.calls.some(call => call[0] === 'executed_after_inspection'), false);
-  assert.equal(f.socket.sent.findLast(message => message.type === 'result').error.code, 'OUTCOME_UNKNOWN');
-  f.controller.dispose();
-});
-
-test('a command expiring behind an earlier serialized operation never starts', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  let completeFirst;
-  const started = [];
-  f.adapter.execute = async (local, operation, args, check) => {
-    check();
-    started.push(args.selector);
-    await new Promise(resolve => { completeFirst = resolve; });
-    return { text: 'first result' };
-  };
-  const first = command(grant, { args: { selector: '#first' }, expires_at: f.controller.now() + 1000 });
-  const second = command(grant, { args: { selector: '#second' }, expires_at: f.controller.now() + 50 });
-  f.controller.enqueue(first);
-  f.controller.enqueue(second);
-  await flush();
-  assert.deepEqual(started, ['#first']);
-  f.advance(100);
-  completeFirst();
-  await flush();
-  assert.deepEqual(started, ['#first']);
-  const result = f.socket.sent.find(message => message.type === 'result' && message.request_id === second.request_id);
-  assert.equal(result.error.code, 'OUTCOME_UNKNOWN');
-  assert.equal(f.controller.grants.size, 0);
-  f.controller.dispose();
-});
-
-test('server COMMAND_EXPIRED is reported and invalidates all local command authority', async () => {
-  const f = await fixture();
-  await approve(f);
-  f.socket.onmessage({ data: JSON.stringify({ type: 'error', tenant_id, code: 'COMMAND_EXPIRED' }) });
-  await flush();
-  assert.ok(f.controller.failures.includes('COMMAND_EXPIRED'));
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.connection, null);
-  assert.equal(f.socket.readyState, 3);
-  f.controller.dispose();
-});
-
-test('a late ping after background suspension cannot resurrect a stale grant', async () => {
-  const f = await fixture();
-  await approve(f);
-  f.advance(LIVENESS_MS + 1);
-  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'ping', tenant_id }),
-    f.socket, f.controller.generation), /BROWSER_OFFLINE/);
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.connection, null);
-  f.controller.dispose();
-});
-
-test('an expired ACK cannot activate a grant before the timer sweep', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f, 'client-1', 'approval-1', false);
-  f.advance(10_001);
-  await assert.rejects(f.controller.receive(JSON.stringify({ type: 'grant.active', tenant_id,
-    target_id: grant.target_id, client_id: grant.client_id }),
-  f.socket, f.controller.generation), /APPROVAL_REQUIRED/);
-  assert.equal(f.controller.grants.size, 0);
-  f.controller.dispose();
-});
-
-test('browser restart ignores local tab ID inventory; only session-store provenance is trusted', async () => {
-  const f = await fixture();
-  const localStorage = {
-    async get() {
-      return { config: { ...f.controller.config, enabled: false },
-        dedicatedTabs: [{ tabId: 1, client_id: 'client-1' }] };
-    },
-    async set() {},
-  };
-  const restarted = new Controller({
-    adapter: f.adapter, keys: { async get() { return f.record; } }, storage: localStorage,
-    inventoryStorage: { async get() { return {}; }, async set() {} },
-    extensionUrl, Socket,
-  });
-  await restarted.initialize();
-  assert.equal(restarted.inventory.length, 0);
-  assert.equal(restarted.grants.size, 0);
-  restarted.dispose();
-  f.controller.dispose();
-});
-
-test('server-requested human handoff ends authority and explicitly notifies the owner', async () => {
-  const f = await fixture();
-  const notifications = [];
-  f.controller.notify = (...args) => notifications.push(args);
-  const { grant } = await approve(f);
-  await f.controller.receive(JSON.stringify({ type: 'grant.end', tenant_id, target_id: grant.target_id, reason: 'HANDOFF' }),
-    f.socket, f.controller.generation);
-  assert.equal(f.controller.grants.size, 0);
-  assert.match(notifications.at(-1)[1], /Prior\/scheduled JavaScript is not undone/);
-  f.controller.dispose();
-});
-
-test('service timeout/offline/replacement reasons tear down grants without emitting an invalid local end', async () => {
-  for (const reason of ['OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'REPLACED']) {
-    const f = await fixture();
-    const { grant } = await approve(f);
-    await f.controller.receive(JSON.stringify({ type: 'grant.end', tenant_id, target_id: grant.target_id, reason }),
-      f.socket, f.controller.generation);
-    assert.equal(f.controller.grants.size, 0);
-    assert.equal(f.socket.sent.some(message => message.type === 'grant.end'), false);
-    f.controller.dispose();
-  }
-});
-
-test('closing a dedicated tab uses the agreed TARGET_CLOSED reason and removes its session provenance', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  f.controller.tabEvent(grant.tabId, 'closed');
-  await flush();
-  assert.equal(f.controller.inventory.length, 0);
-  assert.equal(f.socket.sent.find(message => message.type === 'grant.end').reason, 'TARGET_CLOSED');
-  f.controller.dispose();
-});
-
-test('uninspectable documents end authority and queued work instead of leaving an active wedged target', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  const first = command(grant);
-  const queued = command(grant);
-  f.adapter.execute = async () => { throw new Error('PAGE_UNAVAILABLE'); };
-  f.controller.enqueue(first);
-  f.controller.enqueue(queued);
-  await flush();
-  assert.equal(f.socket.sent.find(message => message.request_id === first.request_id).error.code, 'PAGE_UNAVAILABLE');
-  assert.equal(f.socket.sent.find(message => message.request_id === queued.request_id).error.code, 'APPROVAL_REQUIRED');
-  assert.equal(f.socket.sent.find(message => message.type === 'grant.end').reason, 'CAPABILITY_UNAVAILABLE');
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.snapshot().targets[0].state, 'inactive');
-  assert.equal(f.controller.inventory[0].tabId, grant.tabId);
-  assert.deepEqual(f.calls.at(-1), ['release', grant.tabId]);
-  assert.equal(f.controller.connection.connection_id, binding.connection_id);
-  f.controller.dispose();
-});
-
-test('optional-operation capability failures do not end otherwise inspectable grants', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  f.adapter.execute = async () => { throw new Error('CAPABILITY_UNAVAILABLE'); };
-  f.controller.enqueue(command(grant));
-  await flush();
-  assert.equal(f.socket.sent.at(-1).error.code, 'CAPABILITY_UNAVAILABLE');
-  assert.equal(f.controller.grants.size, 1);
-  assert.equal(f.controller.snapshot().targets[0].state, 'active');
-  f.controller.dispose();
-});
-
-test('completed submit clicks acknowledge the action without authorizing queued work for the new document', async () => {
-  const f = await fixture();
-  await pending(f);
-  await f.controller.approve('approval-1', ['navigate', 'get_text', 'click']);
-  const grant = [...f.controller.grants.values()][0];
-  await f.controller.receive(JSON.stringify({
-    type: 'grant.active', tenant_id, target_id: grant.target_id, client_id: grant.client_id,
-  }), f.socket, f.controller.generation);
-  let completeClick;
-  f.adapter.execute = async (local, operation, args, check) => {
-    check();
-    f.calls.push(['execute', operation]);
-    await new Promise(resolve => { completeClick = resolve; });
-    f.controller.tabEvent(local.tabId, 'navigation', 'https://ordinary.example/submitted');
-    return { clicked: true };
-  };
-  const click = command(grant, { operation: 'click', args: { selector: 'button' } });
-  const queued = command(grant);
-  f.controller.enqueue(click);
-  f.controller.enqueue(queued);
-  completeClick();
-  await flush();
-  assert.deepEqual(f.socket.sent.find(message => message.request_id === click.request_id).result, { clicked: true });
-  assert.equal(f.socket.sent.find(message => message.request_id === queued.request_id).error.code, 'TARGET_STALE');
-  assert.deepEqual(f.calls.filter(call => call[0] === 'execute'), [['execute', 'click']]);
-  assert.equal(f.controller.grants.size, 1);
-  f.controller.dispose();
-});
-
-test('missing or different tenant on every inbound message cannot authorize, stop or execute work', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  for (const type of ['ping', 'grant.active', 'grant.end', 'approval.request', 'command', 'authenticated', 'challenge']) {
-    for (const tenant of [undefined, 't_ABCDEFGHIJKLMNOPQRSTUV']) {
-      await assert.rejects(f.controller.receive(JSON.stringify({
-        ...command(grant), type, tenant_id: tenant, reason: 'REVOKED',
-      }), f.socket, f.controller.generation), /NOT_AUTHORIZED/);
-    }
-  }
-  assert.equal(grant.state, 'active');
-  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
-  assert.equal(f.socket.sent.every(message => message.tenant_id === tenant_id), true);
-  f.controller.dispose();
-});
-
-test('switching saved pairs immediately invalidates running/queued work and never restores old grants', async () => {
-  const f = await fixture();
-  const { grant } = await approve(f);
-  let finish;
-  f.adapter.execute = async () => new Promise(resolve => { finish = resolve; });
-  f.controller.enqueue(command(grant));
-  f.controller.enqueue(command(grant));
-  await flush();
-  const secondTenant = 't_ABCDEFGHIJKLMNOPQRSTUV';
-  const second = await f.controller.keys.get(origin, secondTenant);
-  second.identity = { tenant_id: secondTenant, tenant_label: 'Harbor', owner_id: 'owner-1',
-    owner_label: 'Owner', device_id: 'device-2' };
-  f.controller.keys.get = async (url, tenant) => tenant === tenant_id ? f.record : second;
-  await f.controller.saveConnection(f.record);
-  await f.controller.saveConnection(second);
-  const switching = f.controller.switchConnection(second.connection_url);
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(grant.queue.length, 0);
-  assert.equal(f.socket.readyState, 3);
-  await switching;
-  assert.equal(f.controller.record.key_id, second.key_id);
-  assert.notEqual(second.key_id, f.record.key_id);
-  assert.deepEqual(f.controller.snapshot().targets, []);
-  finish({ text: 'old result' });
-  await flush();
-  assert.equal(f.controller.socket.sent.some(message => message.type === 'result'), false);
-  await f.controller.switchConnection(f.record.connection_url);
-  assert.equal(f.controller.record.key_id, f.record.key_id);
-  assert.equal(f.controller.grants.size, 0);
-  assert.equal(f.controller.snapshot().targets[0].state, 'inactive');
-  assert.deepEqual(f.controller.config.local_protected_origins, ['https://idp.example']);
-  f.controller.dispose();
-});
-
-test('origin-only legacy config never loads keys or authenticates and requires fresh pairing', async () => {
-  let loads = 0;
-  const controller = new Controller({
-    adapter: { async initialize() {}, capabilities: () => [] },
-    keys: { async get() { loads++; } }, extensionUrl, Socket,
-    storage: { async get() { return { config: { service_origin: origin, enabled: true } }; } },
-    inventoryStorage: { async get() { return {}; } },
-  });
-  await controller.initialize();
-  assert.equal(loads, 0);
-  assert.equal(controller.socket, null);
-  assert.equal(controller.record, null);
-  assert.equal(controller.config.service_origin, '');
-  controller.dispose();
-});
-
-test('banner stop is scoped to the active tab, frame and document, and cannot approve or resume', async () => {
-  const f = await fixture();
-  f.adapter.indicator = async () => ({ url: 'https://page.example/', documentId: 'document-1' });
-  const { grant } = await approve(f);
-  await flush();
-  const sender = { id: 'extension-id', frameId: 0, tab: { id: grant.tabId },
-    url: 'https://page.example/', documentId: 'document-1' };
-  const stop = { type: 'page.stop', target_id: grant.target_id, token: grant.indicatorToken };
-  for (const wrong of [
-    { ...sender, id: 'other' }, { ...sender, frameId: 2 }, { ...sender, tab: { id: grant.tabId + 1 } },
-    { ...sender, documentId: 'old-document' }, { ...sender, url: 'https://other.example/' },
-  ]) assert.throws(() => f.controller.stopFromPage(stop, wrong, 'extension-id'), /NOT_AUTHORIZED/);
-  for (const type of ['ui.approve', 'ui.resume', 'ui.configure']) {
-    assert.throws(() => f.controller.stopFromPage({ ...stop, type }, sender, 'extension-id'), /NOT_AUTHORIZED/);
-  }
-  f.controller.tabEvent(grant.tabId, 'navigation', 'https://page.example/');
-  assert.throws(() => f.controller.stopFromPage(stop, sender, 'extension-id'), /NOT_AUTHORIZED/);
-  f.controller.tabEvent(grant.tabId, 'complete');
-  await flush();
-  assert.notEqual(grant.indicatorToken, stop.token);
-  const stopping = f.controller.stopFromPage({ ...stop, token: grant.indicatorToken }, sender, 'extension-id');
-  assert.equal(f.controller.grants.size, 0);
-  await stopping;
-  f.controller.dispose();
-});
-
-test('cosmetic marker failures warn, but independent authority and toolbar state stay active', async () => {
-  const f = await fixture();
-  f.adapter.indicator = async () => { throw new Error('cosmetic failure'); };
-  const { grant } = await approve(f);
-  await flush();
-  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), true);
-  assert.equal(f.controller.snapshot().targets[0].state, 'active');
-  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, true);
-  f.controller.enqueue(command(grant));
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
   await flush();
   assert.equal(f.socket.sent.at(-1).result.text, 'page');
-  f.adapter.indicator = async () => ({ url: 'https://page.example/', documentId: 'fresh-document' });
-  await f.controller.updateIndicator(grant);
-  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, false);
-  await f.controller.end(grant.target_id, 'HANDOFF');
-  const inactive = f.controller.snapshot().targets[0];
-  assert.equal(inactive.state, 'inactive');
-  assert.equal(inactive.indicator_unavailable, false);
-  assert.equal(inactive.end_reason, 'HANDOFF');
-  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), true);
-  f.controller.dispose();
 });
-
-test('late banner failure after handoff cannot claim the inactive tab is still sharing', async () => {
-  const f = await fixture();
-  let reject;
-  f.adapter.indicator = () => new Promise((_, fail) => { reject = fail; });
+test('an unsolicited execute cannot bypass approval', async t => {
+  const f = await fixture(t);
   const { grant } = await approve(f);
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  await assert.rejects(f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 }), /APPROVAL_REQUIRED/);
+  assert(!f.calls.some(call => call[0] === 'execute'));
+});
+test('Decline returns ACTION_DECLINED without ending sharing', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, 'decline');
+  assert.equal(f.socket.sent.at(-1).error.code, 'ACTION_DECLINED');
+  assert.equal(grant.state, 'active');
+});
+test('allow-all affects ordinary page commands in only this grant; never human Done', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  await execute(f, grant, command(f, grant), 'allow_all');
+  const next = command(f, grant);
+  f.controller.enqueue(next);
+  assert.equal(grant.queue[0].state, 'ready');
+  f.controller.cancelCommand(next);
+  const human = command(f, grant, { operation: 'request_handoff' });
+  f.controller.enqueue(human);
+  assert.equal(grant.queue[0].state, 'pending');
+  assert.throws(() => f.controller.decide(grant.target_id, human.request_id, 'approve'), /INVALID_ARGUMENT/);
+  const { grant: other } = await approve(f, 'client-1', 200);
+  f.controller.enqueue(command(f, other));
+  assert.equal(other.queue[0].state, 'pending');
+});
+test('human Done survives login navigation, completes handshake, and retains sharing', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const human = command(f, grant, { operation: 'request_handoff', description: 'Sign in yourself' });
+  f.controller.enqueue(human);
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/login');
+  f.controller.decide(grant.target_id, human.request_id, 'done');
+  assert.equal(f.socket.sent.at(-1).type, 'command.ready');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: human.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
   await flush();
-  await f.controller.receive(JSON.stringify({
-    type: 'grant.end', tenant_id, target_id: grant.target_id, reason: 'HANDOFF_REQUIRED',
-  }), f.socket, f.controller.generation);
-  reject(new Error('Page context destroyed during handoff'));
+  assert.deepEqual(f.socket.sent.at(-1).result, { state: 'completed', user_confirmed: true });
+  assert.equal(grant.state, 'active');
+  assert(!f.calls.some(call => call[0] === 'execute'));
+});
+test('Cancel human assistance declines only that request', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const message = command(f, grant, { operation: 'request_handoff' });
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, 'decline');
+  assert.equal(f.socket.sent.at(-1).error.code, 'ACTION_DECLINED');
+  assert.equal(grant.state, 'active');
+});
+test('navigation rejects old-document queued and ready actions without ending sharing', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/new');
+  assert.equal(f.socket.sent.at(-1).error.code, 'TARGET_STALE');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  assert.equal(grant.state, 'active');
+  assert(!f.calls.some(call => call[0] === 'execute'));
+});
+test('expired human wait returns COMMAND_EXPIRED and keeps grant', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  f.controller.enqueue(command(f, grant, { expires_at: f.controller.now() + 100 }));
+  f.advance(101);
+  f.controller.tick();
+  assert.equal(f.socket.sent.at(-1).error.code, 'COMMAND_EXPIRED');
+  assert.equal(grant.state, 'active');
+});
+test('human wait is bounded at 16 without starving heartbeats', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  for (let i = 0; i < 17; i++) f.controller.enqueue(command(f, grant));
+  assert.equal(grant.queue.length, 16);
+  assert.equal(f.socket.sent.at(-1).error.code, 'QUEUE_FULL');
+  await f.receive({ type: 'ping', tenant_id });
+  assert.equal(f.socket.sent.at(-1).type, 'pong');
+});
+test('stop immediately invalidates pending/executing work; no late execute or results', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  let finish;
+  f.adapter.execute = () => new Promise(resolve => { finish = resolve; });
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  const ending = f.controller.end(grant.target_id, 'OWNER_PAUSED');
+  assert.equal(f.controller.grants.size, 0);
+  await ending;
+  const resultCount = f.socket.sent.filter(value => value.type === 'result').length;
+  finish({ text: 'late' });
   await flush();
-  assert.equal(f.controller.snapshot().targets[0].end_reason, 'HANDOFF');
-  assert.equal(f.controller.snapshot().targets[0].indicator_unavailable, false);
-  assert.equal(f.controller.failures.includes('INDICATOR_UNAVAILABLE'), false);
-  f.controller.dispose();
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  assert.equal(f.socket.sent.filter(value => value.type === 'result').length, resultCount);
+});
+test('server cancel removes waiting work but uncertain execution ends grant', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const pending = command(f, grant);
+  f.controller.enqueue(pending);
+  await f.receive({ ...pending, type: 'command.cancel' });
+  assert.equal(grant.queue.length, 0);
+  assert.equal(grant.state, 'active');
+  f.adapter.execute = () => new Promise(() => {});
+  const running = command(f, grant);
+  f.controller.enqueue(running);
+  f.controller.decide(grant.target_id, running.request_id, 'approve');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: running.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  await f.receive({ ...running, type: 'command.cancel' });
+  assert.equal(f.controller.grants.size, 0);
+});
+test('execution timeout never retries or advances another side effect', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  const result = await execute(f, grant, command(f, grant), 'allow_all');
+  assert(result.result);
+  f.adapter.execute = async () => { throw new Error('OUTCOME_UNKNOWN'); };
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.enqueue(command(f, grant));
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  await flush();
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(f.socket.sent.filter(value => value.type === 'command.ready').length, 2);
+  assert.equal(f.socket.sent.find(value => value.request_id === message.request_id && value.type === 'result').error.code, 'OUTCOME_UNKNOWN');
+});
+test('selector/handoff errors retain sharing; inspection failure ends unusable grant', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'HANDOFF_REQUIRED']) {
+    f.adapter.execute = async () => { throw new Error(code); };
+    assert.equal((await execute(f, grant, command(f, grant))).error.code, code);
+    assert.equal(grant.state, 'active');
+  }
+  f.adapter.execute = async () => { throw new Error('PAGE_UNAVAILABLE'); };
+  await execute(f, grant, command(f, grant));
+  assert.equal(f.controller.grants.size, 0);
+});
+test('protected origins still end authority and retain redirect protection', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  f.controller.tabEvent(grant.tabId, 'protected_pending', `${origin}/account`);
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(f.socket.sent.at(-1).reason, 'HANDOFF');
+});
+test('request cancellation and closing a request window deny no other requests', async t => {
+  const f = await fixture(t);
+  const first = await pending(f);
+  const second = await pending(f);
+  f.adapter.onRequestClosed(first.request_id);
+  assert.equal(f.controller.pending.size, 1);
+  assert.equal(f.socket.sent.at(-1).type, 'approval.deny');
+  await f.receive({ type: 'approval.cancel', tenant_id, request_id: second.request_id, reason: 'timeout' });
+  assert.equal(f.controller.pending.size, 0);
+});
+test('page decisions bind nonce, sender, tab, frame, URL, document, grant and request', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  grant.indicatorToken = 'nonce';
+  grant.indicatorDocument = { url: 'https://site.example/', documentId: 'document-1' };
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  const sender = { id: 'extension', tab: { id: 100 }, frameId: 0, documentId: 'document-1', url: 'https://site.example/' };
+  const decision = { type: 'page.decision', target_id: grant.target_id, request_id: message.request_id, token: 'nonce', action: 'approve' };
+  for (const change of [{ id: 'other' }, { frameId: 2 }, { tab: { id: 999 } }, { documentId: 'old' }, { url: 'https://other.example/' }]) {
+    assert.throws(() => f.controller.decisionFromPage(decision, { ...sender, ...change }, 'extension'), /NOT_AUTHORIZED/);
+  }
+  assert.throws(() => f.controller.decisionFromPage({ ...decision, token: 'old' }, sender, 'extension'), /NOT_AUTHORIZED/);
+  f.controller.decisionFromPage(decision, sender, 'extension');
+  assert.equal(f.socket.sent.at(-1).type, 'command.ready');
+});
+test('liveness loss and restart preserve pairing but never restore user-tab authority', async t => {
+  const f = await fixture(t);
+  await approve(f);
+  f.advance(LIVENESS_MS);
+  f.controller.lastPing = f.controller.now() - LIVENESS_MS;
+  f.controller.tick();
+  assert.equal(f.controller.grants.size, 0);
+  assert.equal(f.record.identity.device_id, 'device-1');
+  f.saved.config = undefined;
+  await f.controller.initialize();
+  assert.deepEqual(f.calls.find(call => call[0] === 'initialize')[1], []);
+  assert.equal(f.controller.inventory.length, 0);
 });

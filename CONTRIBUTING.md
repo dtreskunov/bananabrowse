@@ -236,7 +236,9 @@ There is no automated linter configured yet. Follow the patterns already present
   operation names live in `shared/protocol.js`.
 - Do not reintroduce stdio authorization bypasses, raw CDP forwarding, direct
   credential fallback, or remote control approval.
-- All protocol-v2 state and signatures bind the service origin and tenant.
+- All protocol-v3 state and signatures bind the service origin and tenant;
+  sharing also binds the user-selected tab ID. Approval waiting must not block
+  heartbeat processing or execute an unapproved command.
   Applications maintain their own integration skills and credential workflows;
   do not add application-specific configuration dependencies to DomAgent.
 

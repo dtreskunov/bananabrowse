@@ -3,6 +3,11 @@
 **Status:** implemented in 3.0.0-beta.1; a breaking upgrade from beta.2.
 **Updated:** 2026-10-10.
 
+**Collaborative update:** 4.0.0-beta.1 replaces this document's dedicated-tab,
+capability selection, and revoking handoff with user-selected tab sharing and
+per-action supervision. See [the current protocol](COLLABORATIVE-BROWSING.md);
+tenant onboarding and the generic service/application separation remain.
+
 Build a simple way to connect a browser to an assistant, with separate logical
 MCP endpoints on one DomAgent server. Keep the security boundaries that prevent
 cross-tenant access and unauthorized browser control; avoid turning first-run

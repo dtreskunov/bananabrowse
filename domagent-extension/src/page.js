@@ -1,15 +1,14 @@
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
 export function pageHelper(operation, args = {}) {
+  const documentKey = '__domagentDocumentNonce';
+  if (!globalThis[documentKey]) globalThis[documentKey] = crypto.randomUUID();
+  if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
   const marker = '[data-domagent-sharing]';
   const visible = element => {
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
   };
-  const handoff = [...document.querySelectorAll(
-    'input[type="password"],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],[data-sitekey]')]
-    .some(visible);
-  if (handoff) return { error: 'HANDOFF_REQUIRED' };
-  if (operation === 'inspect') return { url: location.href };
+  if (operation === 'inspect') return { url: location.href, document_nonce: globalThis[documentKey] };
   const selector = args.selector;
   let element;
   try {
@@ -24,8 +23,8 @@ export function pageHelper(operation, args = {}) {
   if (element?.closest(marker)) return { error: 'ELEMENT_NOT_FOUND' };
   if (operation === 'click') {
     const labelControl = element.closest('label')?.control;
-    if (!visible(element) || element.matches('input[type="file"],input[type="password"]') ||
-        labelControl?.matches('input[type="file"],input[type="password"]')) {
+    if (!visible(element) || element.matches('input[type="file"]') ||
+        labelControl?.matches('input[type="file"]')) {
       return { error: 'HANDOFF_REQUIRED' };
     }
     const target = element.closest('a[href]');
@@ -38,7 +37,7 @@ export function pageHelper(operation, args = {}) {
   }
   if (operation === 'type_text') {
     if (!visible(element) || !element.matches('input,textarea,[contenteditable="true"]') ||
-        element.matches('input[type="password"],input[type="file"]')) {
+        element.matches('input[type="file"]')) {
       return { error: 'HANDOFF_REQUIRED' };
     }
     element.focus();
@@ -105,17 +104,46 @@ export function sharingIndicator(details) {
   banner.setAttribute('role', 'status');
   const label = document.createElement('span');
   label.textContent = `${details.label} can use this tab.`;
-  const stop = document.createElement('button');
-  stop.type = 'button';
-  stop.textContent = 'Stop sharing';
-  stop.addEventListener('click', () => {
-    const api = typeof browser === 'undefined' ? chrome : browser;
-    stop.disabled = true;
-    api.runtime.sendMessage({ type: 'page.stop', target_id: details.target_id, token: details.token })
-      .then(response => { if (!response?.ok) stop.disabled = false; })
-      .catch(() => { stop.disabled = false; });
-  });
-  banner.append(label, stop);
+  banner.append(label);
+  const api = typeof browser === 'undefined' ? chrome : browser;
+  // Capture the isolated-world runtime method, never a page-world bridge.
+  const send = api.runtime.sendMessage.bind(api.runtime);
+  const add = (label, action) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.addEventListener('click', event => {
+      // Page scripts can reach this cosmetic DOM, but cannot supply a user gesture.
+      if (action !== 'stop' && !event.isTrusted) return;
+      button.disabled = true;
+      send({ type: action === 'stop' ? 'page.stop' : 'page.decision',
+        target_id: details.target_id, token: details.token,
+        request_id: details.command?.request_id, action })
+        .then(response => { if (!response?.ok) button.disabled = false; })
+        .catch(() => { button.disabled = false; });
+    });
+    banner.append(button);
+  };
+  if (details.command) {
+    const description = document.createElement('p');
+    description.textContent = `${details.command.operation}: ${details.command.description}`;
+    banner.append(description);
+    if (details.command.state === 'pending') {
+      if (details.command.operation === 'request_handoff') {
+        add('Done', 'done');
+        add('Cancel', 'decline');
+      } else {
+        add('Approve', 'approve');
+        add('Decline', 'decline');
+        add('Allow all while sharing', 'allow_all');
+      }
+    } else {
+      const waiting = document.createElement('p');
+      waiting.textContent = details.command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…';
+      banner.append(waiting);
+    }
+  }
+  add('Stop sharing', 'stop');
   root.append(style, banner);
   document.documentElement.append(host);
   return { url: location.href };

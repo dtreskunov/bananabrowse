@@ -14,9 +14,16 @@ function fixture(browser = 'chrome') {
     permissions: { async contains() { return true; } },
     tabs: {
       onUpdated: event(), onRemoved: event(),
+      onActivated: event(),
+      async query() { return [{ id: 1, active: true, url: 'https://site.example/' }]; },
       async get(id) { return { id, active: true, url: 'https://site.example/', status: 'complete' }; },
       async create(args) { calls.push(['create', args]); return { id: 100, ...args }; },
       async update(id, args) { calls.push(['update', id, args]); },
+    },
+    windows: {
+      onFocusChanged: event(), onRemoved: event(),
+      async get() { return { id: 10, type: 'normal' }; },
+      async getAll() { return [{ id: 10, focused: true, type: 'normal' }]; },
     },
     webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event() },
     webRequest: { onBeforeRequest: event() },
@@ -25,12 +32,13 @@ function fixture(browser = 'chrome') {
       async updateSessionRules(args) { calls.push(['rules', args]); sessionRules = args.addRules || []; },
     },
     debugger: {
-      onDetach: event(),
+      onDetach: event(), onEvent: event(),
       async getTargets() { return []; },
       async attach(args) { calls.push(['attach', args]); },
       async detach(args) { calls.push(['detach', args]); },
       async sendCommand(target, method, args) {
         calls.push(['cdp', target, method, args]);
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main-frame' } } };
         return { result: { value: 'page' }, data: 'aW1hZ2U=' };
       },
     },
@@ -41,7 +49,9 @@ function fixture(browser = 'chrome') {
       },
     },
   };
-  return { api, calls, adapter: new BrowserAdapter(api, browser) };
+  const adapter = new BrowserAdapter(api, browser);
+  adapter.contexts.set(100, new Map([['main-frame', { id: 1, uniqueId: 'main-context' }]]));
+  return { api, calls, adapter };
 }
 
 test('cosmetic indicator cleanup cannot delay debugger and network protection teardown', async () => {
@@ -137,17 +147,16 @@ test('failed privileged detach retains protection and reports failure rather tha
   assert.equal(f.calls.some(call => call[0] === 'rules' && call[1].removeRuleIds), false);
 });
 
-test('active tabs are never adopted, even when previously dedicated', async () => {
+test('only the user-selected normal-window tab can be shared; no dedicated tab adoption', async () => {
   const f = fixture();
-  assert.equal((await f.adapter.createTab(1)).id, 100);
-  assert.deepEqual(f.calls[0], ['create', { url: 'about:blank', active: false }]);
-  f.api.tabs.get = async id => ({ id, active: false, url: 'https://site.example/' });
-  assert.equal((await f.adapter.createTab(2)).id, 2);
-  f.api.tabs.get = async id => ({ id, active: false, url: 'chrome://settings' });
-  assert.equal((await f.adapter.createTab(3)).id, 100);
+  assert.equal((await f.adapter.selectedTabById(1)).id, 1);
+  await assert.rejects(f.adapter.selectedTabById(2), /TARGET_STALE/);
+  f.api.tabs.query = async () => [{ id: 3, url: 'chrome://settings' }];
+  assert.equal(await f.adapter.selectedTab(), null);
+  assert.equal(f.calls.some(call => call[0] === 'create'), false);
 });
 
-test('only the extension-created neutral blank tab may bootstrap navigation, including its initial pending load', async () => {
+test('neutral or protected pages are not eligible for sharing', async () => {
   const f = fixture();
   f.api.tabs.get = async () => ({ id: 100, pendingUrl: 'about:blank', status: 'loading' });
   assert.deepEqual(await f.adapter.inspect(100, ['https://control.example'], true), { url: 'about:blank' });
@@ -162,9 +171,10 @@ test('Chrome dispatcher only issues narrowly named tab evaluation/screenshot met
   await f.adapter.execute(grant, 'evaluate_script', { script: 'document.title' }, () => {});
   await f.adapter.execute(grant, 'get_screenshot', {}, () => {});
   const methods = f.calls.filter(call => call[0] === 'cdp');
-  assert.deepEqual(methods.map(call => call[2]), ['Runtime.evaluate', 'Page.captureScreenshot']);
+  assert.deepEqual(methods.map(call => call[2]), ['Page.getFrameTree', 'Runtime.evaluate', 'Page.captureScreenshot']);
   assert.ok(methods.every(call => call[1].tabId === 100));
-  assert.equal(methods[0][3].contextId, undefined);
+  assert.equal(methods[1][3].contextId, undefined);
+  assert.equal(methods[1][3].uniqueContextId, 'main-context');
 });
 
 test('Firefox remote script is passed as data to MAIN only, not a content-message dispatcher', async () => {

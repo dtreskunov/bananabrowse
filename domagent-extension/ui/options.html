@@ -26,7 +26,7 @@
     </details>
   </form>
   <div id="enrollment"></div>
-  <button id="done" type="button" hidden>Done</button>
+  <button id="done" type="button" hidden>Close setup</button>
   <section>
     <h2>Your connections</h2>
     <div id="connections"></div>
@@ -39,10 +39,10 @@
   <section><h2>Your tabs</h2><div id="targets"></div></section>
   <details class="warning">
     <summary>What sharing means</summary>
-    <p>Your assistant uses a separate tab, never an existing tab you are using. It shares your website sign-ins and can read private information on the page. Website access is requested only when you choose Share a tab.</p>
-    <p>Page scripts, if you choose to allow them, can read page information and make network or account changes. Pictures and page text may contain private information.</p>
-    <p>Stop sharing stops new actions, not requests or scripts that already started. The tab stays open so you can inspect it. Finish sensitive sign-ins yourself, then approve a new sharing request.</p>
-    <p>The banner is a helpful reminder, not a guarantee: websites can hide or imitate it. Check the extension toolbar too. A lost connection or browser restart stops all sharing.</p>
+    <p>You select an existing or new website tab using the toolbar. Only that tab is shared; your browser profile is not an API. Shared tabs use your website sign-ins and can reveal private information.</p>
+    <p>Actions, including page scripts, need your approval. Allow all while sharing applies only to ordinary actions in that tab until sharing ends. Page scripts can make network or account changes.</p>
+    <p>You can navigate, sign in and interact normally. Human assistance asks for Done or Cancel and does not end sharing. Stop sharing stops new actions, not scripts or requests already started, and leaves your tab open.</p>
+    <p>The banner can be hidden or imitated, but its approval handler requires a real user gesture. Check the trusted extension toolbar, popup or settings as a fallback. A lost connection or browser restart stops all sharing.</p>
   </details>
 </body>
 </html>

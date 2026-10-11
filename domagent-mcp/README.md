@@ -11,7 +11,8 @@ npm start
 Configuration and OIDC sign-in are described in
 [the deployment guide](../docs/SECURE-PAIRING.md).
 Upgrade existing beta.2 databases through [explicit tenant migration](../docs/TENANT-MIGRATION.md)
-before restarting. Browsers must use matching protocol-v2 extensions.
+before restarting. Browsers must use matching protocol-v3 extensions; 3.x
+tenant credentials and pairing identities need no reset.
 
 Public metadata: `GET /.well-known/domagent`.
 Create a pending request: `POST /api/setup-requests` with `agent_name` and
@@ -26,6 +27,13 @@ The signed-in operator configures its own application using the once-shown
 credential. MCP endpoint: `/mcp/<tenant>`. Device WSS: `/extension/<tenant>`.
 Public extension input: `/join/<tenant>`. Browser pairing completes automatically
 after server approval; local approval remains required before sharing.
+
+Protocol v3 supports user-selected existing tabs, multiple handles, supervised
+actions with `description`, and **Allow all while sharing**. `request_browser_access`
+waits for tab selection; `request_handoff` waits for human Done without revoking
+the shared session. Human waits default to five minutes (max ten), followed by a
+25-second execution budget. Configure client/proxy timeouts with headroom.
+See [collaborative protocol](../docs/COLLABORATIVE-BROWSING.md).
 
 Run `npm test`, `npm run build`, and `npm run check`. See
 [browser tests](../domagent-extension/test/README.md) for real-browser validation

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DomAgent sharing request</title>
+  <link rel="stylesheet" href="ui.css">
+  <script src="ui.js" defer></script>
+</head>
+<body class="popup">
+  <h1>Share a browser tab</h1>
+  <p id="status" role="status">Getting ready…</p>
+  <p id="identity"></p>
+  <p id="error" role="alert"></p>
+  <button id="options" type="button">Settings</button>
+  <button id="connect" type="button">Try again</button>
+  <button id="disconnect" type="button">Disconnect</button>
+  <section><h2>Sharing requests</h2><div id="requests"></div></section>
+  <section><h2>Actions in shared tabs</h2><div id="targets"></div></section>
+  <section hidden><div id="connections"></div></section>
+  <p class="warning">The application label is unverified. Shared tabs use your website sign-ins and may expose private information. Closing this request window declines its outstanding sharing request.</p>
+</body>
+</html>

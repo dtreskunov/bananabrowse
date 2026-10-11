@@ -1,111 +1,105 @@
-# DomAgent connections beta
+# DomAgent collaborative browsing beta
 
-Connect an independently approved browser to an MCP application. DomAgent is a
-standalone service with tenant-specific HTTP MCP endpoints, its own OIDC login,
-and Chrome/Firefox extensions. It has no dependency on a particular agent
-application or credential manager.
+Share a browser tab you choose with an MCP application. DomAgent is an independent
+tenant-scoped service with OIDC sign-in and Chrome/Firefox extensions. It does not
+depend on a particular agent application or credential manager.
 
-**3.0.0 is a breaking upgrade from 2.0.0-beta.2.** Existing databases require
-explicit tenant assignment and browsers require fresh pairing. Do not restart
-an upgraded service against an unmigrated database.
+## Install and connect
 
-## Browser installation
+Download your browser's compiled ZIP from
+[v4.0.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.0.0-beta.1)
+and extract all files.
 
-Download the browser-specific ZIP from
-[GitHub releases](https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.3)
-and extract all files together.
+- Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
+  extracted `manifest.json`. Unsigned temporary installs disappear on restart;
+  do not disable signature verification.
+- Chrome: `chrome://extensions` -> Developer mode -> **Load unpacked** ->
+  extracted directory.
 
-- Firefox: open `about:debugging#/runtime/this-firefox`, choose **Load Temporary
-  Add-on**, and select the extracted `manifest.json`. Temporary installs disappear
-  on restart; do not disable signature verification.
-- Chrome/Chromium: open `chrome://extensions`, enable Developer mode, choose
-  **Load unpacked**, and select the extracted directory.
+Installation opens the one-link setup wizard. Paste your public
+`https://your-server/join/<tenant>` link, sign in on the page opened by the
+extension, and approve. The browser connects automatically. No tab is shared yet.
 
-Setup opens after installation. Paste the public **Connection link** provided
-by your assistant or administrator, for example `https://your-server/join/<tenant>`.
-Continue, sign in on the page opened by the extension, and approve. Connection
-finishes automatically. **No tabs are shared until you approve a separate sharing
-request in the extension.**
+Multiple saved connections have one active connection. Firefox uses a persistent
+MV2 background page; Chrome uses an MV3 worker. Neither requires the popup to
+stay open to keep the browser online.
 
-Saved connections can be switched without reinstalling. Only one is active;
-switching never restores sharing. The shared webpage has a named border/banner
-and **Stop sharing**, with independent toolbar status.
+## Share a tab you choose
 
-## Application setup
+When an agent requests access, the extension opens a small request window and
+marks its toolbar. Go to the existing tab you want to share, or open a new one.
+Use the extension's **Share this tab** action. The waiting MCP call returns an
+opaque handle for that exact tab. It can request additional tabs separately.
 
-If no connection exists, the application's agent may request one:
+Every action includes a plain-language explanation. Review it on the shared page
+or in the extension:
 
-1. Validate the operator-provided HTTPS domain and fetch `/.well-known/domagent`.
-2. `POST /api/setup-requests` with `agent_name` and `request_description`.
-3. Give the user the returned short-lived `verification_url` for account
-   sign-in and explicit approval.
-4. Poll `POST /api/setup-requests/<id>/status` with the separate `status_receipt`.
-   Approval returns public connection/MCP URLs, never the client credential.
-5. The signed-in operator sees the credential once and configures the application
-   through its own secure credential-management workflow.
+**Approve** executes the exact action once. **Decline** rejects it.
+**Allow all while sharing** accepts supported ordinary-page actions for that
+client/tab until sharing ends. There is no capability checklist, no automatic
+user-tab adoption, and no permission for unshared tabs or browser-profile export.
 
-The service generates tenant IDs; knowing an ID is not authorization.
-MCP clients use authenticated Streamable HTTP at `/mcp/<tenant>`. Browsers use
-authenticated WSS at `/extension/<tenant>`. Each credential/device is tenant-bound.
+The user can interact with the tab at the same time. Human assistance such as
+sign-in uses **Done / Cancel / Stop sharing**, keeping the tab shared while the
+agent waits. Password/CAPTCHA detection no longer automatically revokes control.
+User navigation invalidates stale queued actions, not the sharing relationship.
+Do not automatically retry an uncertain mutation.
 
-## Service installation
+**Stop sharing** immediately disables local authority and pending work. A page
+border/banner is a useful visual cue, not an unspoofable security boundary;
+extension toolbar and popup state remain independent.
 
-Node 22.13+ is required:
+## MCP application setup
 
-```sh
-cd domagent-mcp
-npm ci --ignore-scripts
-npm start
-```
+Validate `/.well-known/domagent`, create a pending agent setup request with
+`POST /api/setup-requests`, and show the returned short-lived approval link.
+Users authenticated by the configured OIDC provider register automatically.
+Approval creates a separate tenant/client and shows its credential once to the
+operator; status receipts return only public connection/MCP URLs.
 
-Configure a canonical HTTPS origin, exact OIDC issuer, the service's own OIDC
-client ID, restricted secret file if needed, and protected control-plane origins.
-Register `https://your-server/oidc/callback`. Users who authenticate through this
-configured provider register automatically and can approve creating their own
-connections. No DomAgent invitation is required. Restrict who may use the OIDC
-application at your identity provider if needed.
+Use the application's own secure credential-management workflow for
+`https://your-server/mcp/<tenant>`. Credentials are tenant-scoped and never
+belong in chat. Device WSS is `/extension/<tenant>`.
 
-Registration grants no membership in other users' connections. Disabled DomAgent
-accounts remain blocked; connection owners must explicitly add other accounts.
+`request_browser_access` now waits for the user to share a tab.
+All page operations and `request_handoff` require `description`.
+Human waits default to five minutes, configurable up to ten; execution then
+has a separate 25-second budget. Configure actual MCP client, proxy, and network
+timeouts accordingly. A 600-second client timeout is suitable for the default
+300-second human wait, not a full 600-second wait plus execution.
+Tool-call responses stream SSE with heartbeat comments during human waits;
+initialization/discovery remain JSON-compatible. Use an MCP-aware client.
 
-The server must run behind TLS on an independently administered host. Do not
-expose its plaintext backend listener. See
-[deployment/security details](docs/SECURE-PAIRING.md) and
-[beta.2 migration](docs/TENANT-MIGRATION.md).
+See [collaborative protocol details](docs/COLLABORATIVE-BROWSING.md).
 
-## Development
+## Service and development
+
+Node 22.13+:
 
 ```sh
 npm --prefix domagent-mcp ci --ignore-scripts
-npm test
 npm run build
 npm run check
+npm test
 ```
 
-Build outputs are `dist/chrome` and `dist/firefox`, not the source manifest
-directories. See [browser validation](domagent-extension/test/README.md).
+Start `node index.js` in the MCP package after configuring the canonical HTTPS
+origin and this service's own OIDC client/issuer. Place the plaintext backend
+behind a trusted TLS proxy. See [deployment/security](docs/SECURE-PAIRING.md)
+and [2.x tenant migration](docs/TENANT-MIGRATION.md).
 
-The [MVP design](docs/ONBOARDING-AND-TENANCY.md) explains the tenant and onboarding
-boundaries. Application-specific skills are maintained by those applications,
-not shipped as DomAgent dependencies.
+**Protocol v3 is a coordinated server/extension upgrade.** 3.x tenant databases,
+credentials and device identities remain; no reset is needed. Old v2 live proofs
+and grants cannot authorize the new service. Update the extensions and reconnect,
+then explicitly share again. Beta.2 (2.x) databases still require explicit migration.
 
-## Limits
+Browser screenshot support remains limited by the actual target-specific API;
+the tested Firefox build does not expose it. Page CSP may deny scripts. No
+privileged fallback or visible-tab screenshot is provided. This is an unsigned
+private beta; physical permission prompts and all advertised browser versions
+remain acceptance gates.
 
-This is an unsigned private beta, not a production security certification.
-Firefox's tested build does not expose target-specific screenshots; page scripts
-can be unavailable under page CSP. No visible-tab capture or privileged fallback
-is provided.
-
-Shared tabs use ordinary website sign-ins and may expose private page content.
-Local approval governs new commands, not effects or JavaScript already scheduled.
-Page decorations are best-effort visual cues; toolbar/extension state is authoritative.
-Reconnect, pause, revoke, or restart ends all grants. Physical permission prompts,
-notification UX, and advertised browser-version qualification remain release gates.
-
-Firefox uses a persistent MV2 background page so an
-idle identity connection does not require keeping the toolbar popup open.
-The wire protocol stays v2; existing tenant pairing and credentials need no reset.
-
-Extension version `3.0.2` scopes banner warnings to actively shared tabs. When
-sharing stops, its warning clears and the tab explains human handoff with
-**Ask to share again**. Historical cosmetic failures do not mean control is active.
+Shared tabs use existing website sign-ins and can expose private page content,
+readable cookies/storage, and network/account actions. Human login does not promise
+secret isolation, especially under allow-all scripts. Pause/stop cannot undo effects
+or JavaScript already scheduled. Protected DomAgent/IdP management origins stay blocked.

@@ -16,7 +16,7 @@ const binding = { tenant_id, epoch: 'epoch-1', connection_id: 'connection-1' };
 const grant = { ...binding, state: 'active', client_id: 'client-1', target_id: 'target-1',
   capabilities: ['navigate', 'get_text', 'evaluate_script'] };
 const command = { ...binding, type: 'command', request_id: 'request-1', target_id: 'target-1',
-  client_id: 'client-1', operation: 'get_text', args: {}, expires_at: Date.now() + 25_000 };
+  client_id: 'client-1', operation: 'get_text', description: 'Read the page', args: {}, expires_at: Date.now() + 25_000 };
 
 test('Firefox uses a persistent background without broadening website permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../firefox/manifest.json', import.meta.url), 'utf8'));
@@ -45,9 +45,10 @@ test('only top-level exact packaged UI pages may send local decisions', () => {
   const runtime = { id: 'extension-id', getURL: page => `chrome-extension://extension-id/${page}` };
   const ui = { id: runtime.id, url: runtime.getURL('options.html'), frameId: 0, tab: { id: 1 } };
   assert.equal(isUiSender(ui, runtime), true);
+  assert.equal(isUiSender({ ...ui, url: runtime.getURL('request.html?request_id=one') }, runtime), true);
   for (const sender of [
     { ...ui, url: 'https://site.example/' },
-    { ...ui, url: runtime.getURL('options.html#approve') },
+    { ...ui, url: runtime.getURL('request.html.evil') },
     { ...ui, url: runtime.getURL('background.js') },
     { ...ui, frameId: 3 }, { ...ui, id: 'other' }, {},
   ]) assert.equal(isUiSender(sender, runtime), false);
@@ -139,7 +140,7 @@ test('proof signatures bind service, enrollment, target, capability, client and 
   assert.equal(await verify(record.public_key, authPayload({ ...auth, tenant_id: otherTenant }), signature), false);
   assert.throws(() => authPayload({ ...auth, tenant_id: undefined }), /INVALID_TENANT/);
   const approval = { ...auth, request_id: 'request', target_id: 'target', client_id: 'client',
-    policy_id: 'page-control-v1', capabilities: ['navigate', 'get_text'] };
+    policy_id: 'collaborative-tab-v1', tab_id: 7, capabilities: ['navigate', 'get_text'] };
   const grantSignature = await sign(record.privateKey, grantPayload(approval));
   for (const field of ['origin', 'epoch', 'connection_id', 'request_id', 'client_id', 'target_id', 'policy_id', 'nonce']) {
     assert.equal(await verify(record.public_key, grantPayload({ ...approval, [field]: 'changed' }), grantSignature), false);

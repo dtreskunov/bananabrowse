@@ -46,6 +46,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   let dashboardApproved = false;
   let socket;
   let target;
+  let uiPage;
   let protectedHits = 0;
   let handshake = 0;
   const messages = [];
@@ -126,7 +127,10 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
           ...socket.approval, ...message, origin, ...current,
         }), message.signature)).toBe(true);
         target = message.target_id;
-        client.send(JSON.stringify({ type: 'grant.active', tenant_id, target_id: target, client_id: 'client-test' }));
+        client.send(JSON.stringify({ type: 'grant.active', tenant_id, target_id: target, tab_id: message.tab_id, client_id: 'client-test' }));
+      } else if (message.type === 'command.ready') {
+        client.send(JSON.stringify({ type: 'command.execute', tenant_id,
+          request_id: message.request_id, target_id: message.target_id, expires_at: Date.now() + 25_000 }));
       }
     });
   });
@@ -218,7 +222,15 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   async function command(operation, args = {}, client = 'client-test') {
     const request_id = crypto.randomUUID();
     socket.send(JSON.stringify({ type: 'command', request_id, target_id: target, client_id: client,
-      operation, args, expires_at: Date.now() + 25_000, ...socket.binding }));
+      operation, args, description: `Fixture action ${operation}`, expires_at: Date.now() + 600_000, ...socket.binding }));
+    await expect.poll(async () => {
+      if (messages.some(message => message.type === 'result' && message.request_id === request_id)) return 'result';
+      const state = await uiPage.evaluate(async () => (await (globalThis.browser || globalThis.chrome).runtime.sendMessage({ type: 'ui.state' })).value);
+      return state.targets.some(target => target.commands.some(command => command.request_id === request_id)) ? 'pending' : '';
+    }).not.toBe('');
+    if (!messages.some(message => message.type === 'result' && message.request_id === request_id)) {
+      await uiPage.getByRole('button', { name: operation === 'request_handoff' ? 'Done' : 'Approve', exact: true }).click();
+    }
     await expect.poll(() => messages.find(message => message.type === 'result' && message.request_id === request_id), {
       timeout: 20_000, message: `${browserName} result for ${operation}`,
     }).toBeTruthy();
@@ -235,13 +247,13 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     const previousTarget = target;
     socket.approval = { type: 'approval.request', ...socket.binding, request_id: requestId,
       client_id: 'client-test', client_label: '<script>untrusted label</script>',
-      policy_id: 'page-control-v1', nonce: `nonce-${requestId}`, protected_origins: [origin],
+      policy_id: protocol.POLICY_ID, description: 'Share a website I choose',
+      nonce: `nonce-${requestId}`, protected_origins: [origin],
       expires_at: Date.now() + 60_000 };
     socket.send(JSON.stringify(socket.approval));
     await expect(options.locator('#requests')).toContainText('<script>untrusted label</script>');
     await expect(options.locator('#requests script')).toHaveCount(0);
-    await options.getByLabel('Run page scripts', { exact: false }).check();
-    await options.getByRole('button', { name: 'Share a tab', exact: true }).click();
+    await options.getByRole('button', { name: 'Share this tab with <script>untrusted label</script>', exact: true }).click();
     await expect.poll(() => options.evaluate(async previous => {
       const api = globalThis.browser || globalThis.chrome;
       const state = (await api.runtime.sendMessage({ type: 'ui.state' })).value;
@@ -263,6 +275,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     });
     context.on('weberror', event => console.error(`[${browserName} page error] ${event.error().message}`));
     const { page: options, worker, extensionId } = await optionsPage();
+    uiPage = options;
     if (browserName === 'chrome') {
       await worker.evaluate(() => {
         chrome.webNavigation.onBeforeNavigate.addListener(event => console.error('[navigation before]', JSON.stringify(event)));
@@ -296,6 +309,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     }));
     expect(spoof.error.code).toBe('NOT_AUTHORIZED');
     await probe.close();
+    await userTab.bringToFront();
 
     const state = await approve(options, 'approval-test');
     console.log(`[${browserName}] grant active`);
@@ -309,7 +323,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await waitForTab(state.targets[0].tabId);
     console.log(`[${browserName}] dedicated tab navigated`);
     expect((await command('get_text')).result.text).toContain('Owned page');
-    const shared = context.pages().find(page => page !== userTab && page.url() === `${pageOrigin}/`);
+    const shared = userTab;
     await expect(shared.locator('[data-domagent-sharing]')).toHaveCount(1);
     await expect(shared.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
     expect((await command('get_text')).result.text).not.toContain('can use this tab');
@@ -344,30 +358,29 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     else expect(cspEvaluation.result.value).toBe(42);
     expect((await command('get_text')).result.text).toContain('Owned page');
     await options.getByRole('button', { name: 'Stop sharing', exact: true }).click();
-    await expect(options.locator('#targets')).toContainText('not being shared');
+    await expect(options.locator('#targets')).toContainText('No shared tabs');
     expect((await command('get_text')).error.code).toBe('APPROVAL_REQUIRED');
     const oldTarget = target;
+    await shared.bringToFront();
     const fresh = await approve(options, 'approval-fresh');
     expect(target).not.toBe(oldTarget);
     expect(fresh.targets[0].tabId).toBe(state.targets[0].tabId);
     await command('navigate', { url: `${pageOrigin}/password` });
     await waitForTab(state.targets[0].tabId);
-    expect((await command('get_text')).error.code).toBe('HANDOFF_REQUIRED');
-    await expect(options.locator('#targets')).toContainText('not being shared');
-    await expect(options.locator('#targets')).toContainText('Sharing stopped so you can finish signing in');
-    await expect(options.getByRole('button', { name: 'Ask to share again', exact: true })).toBeVisible();
+    expect((await command('get_text')).result.text).toContain('Authenticate manually');
+    expect((await command('request_handoff')).result).toEqual({ state: 'completed', user_confirmed: true });
+    await expect(options.locator('#targets')).toContainText('can use this tab');
     // Simulate the browser owner finishing the login, not a remote command.
     const loginPage = context.pages().find(page => page.url() === `${pageOrigin}/password`);
     await loginPage.evaluate(() => document.querySelector('input[type="password"]').remove());
-    await approve(options, 'approval-after-human');
     // Trigger a protected redirect while controlled; DNR must prevent the request.
     await command('navigate', { url: `${pageOrigin}/redirect` });
-    await expect(options.locator('#targets')).toContainText('not being shared');
+    await expect(options.locator('#targets')).toContainText('No shared tabs');
     expect(protectedHits).toBe(0);
     if (browserName === 'chrome') {
       await expect.poll(() => worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules())).toEqual([]);
     }
-    expect(await userTab.title()).toBe('Fixture Page');
+    expect(context.pages().includes(userTab)).toBe(true);
 
     const keyBefore = enrollment.key_id;
     await context.close();

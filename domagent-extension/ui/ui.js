@@ -15,8 +15,10 @@ const errors = {
   ENROLLMENT_EXPIRED: 'This request expired. Choose Start again.',
   BROWSER_OFFLINE: 'Connection lost. No tabs are being shared. Try again.',
   PROTECTION_UNAVAILABLE: 'Sharing is unavailable because browser protection could not start.',
-  HANDOFF_REQUIRED: 'Sharing stopped so you can finish signing in or checking this page. Use View tab, then Ask to share again when you are ready.',
-  PAGE_UNAVAILABLE: 'Sharing stopped because the browser could not inspect this page. Use View tab before asking to share again.',
+  HANDOFF_REQUIRED: 'This operation is unavailable. You can complete it yourself in the shared tab.',
+  PAGE_UNAVAILABLE: 'Sharing stopped because the browser could not inspect this page.',
+  TARGET_STALE: 'The selected tab or document changed. Review the new request before approving.',
+  COMMAND_EXPIRED: 'This action expired. Ask your assistant for a fresh request.',
   APPROVAL_REQUIRED: 'This sharing request ended. Ask your assistant to try again.',
 };
 
@@ -59,19 +61,12 @@ function paragraph(parent, value) {
   parent.append(element);
 }
 
-const abilities = {
-  navigate: 'Open websites', click: 'Click page controls', type_text: 'Fill in page fields',
-  get_text: 'Read page text', get_interactive_elements: 'Find page controls',
-  get_screenshot: 'Take a picture of the shared page', clear_overlays: 'Clear assistant page markers',
-  evaluate_script: 'Run page scripts',
-};
-
 function render(snapshot) {
   const connected = snapshot.phase === 'authenticated';
   const active = snapshot.targets.filter(target => target.state === 'active');
   const name = snapshot.identity?.tenant_label || 'your assistant';
   let status = 'Connect your browser. No tabs are being shared.';
-  if (active.length) status = `${active.map(target => target.client_label || name).join(', ')} can use the shared tab.`;
+  if (active.length) status = `${active.map(target => target.client_label || name).join(', ')} can use your selected shared tabs.`;
   else if (connected) status = `You're connected to ${name}. No tabs are being shared.`;
   else if (['connecting', 'authenticating', 'proving'].includes(snapshot.phase)) {
     status = `Connecting to ${name}… No tabs are being shared.`;
@@ -126,29 +121,22 @@ function render(snapshot) {
   if (!snapshot.pending.length) paragraph(byId('requests'), 'No sharing requests.');
   for (const pending of snapshot.pending) {
     const article = document.createElement('article');
-    paragraph(article, `${pending.client_label} would like to use a tab.`);
+    paragraph(article, `${pending.client_label} would like you to share a tab.`);
+    paragraph(article, pending.description);
     paragraph(article, 'This name was supplied by the application. It is not a verified identity.');
-    paragraph(article, 'A separate tab uses your existing website sign-ins and may expose private information. You decide each time.');
-    const selections = [];
-    for (const capability of snapshot.capabilities) {
-      const label = document.createElement('label');
-      label.className = 'capability';
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.checked = capability !== 'evaluate_script';
-      selections.push({ input, capability });
-      label.append(input, document.createTextNode(` ${abilities[capability]}`));
-      article.append(label);
-    }
-    button(article, 'Share a tab', async () => {
-      const capabilities = selections.filter(selection => selection.input.checked).map(selection => selection.capability);
-      if (!capabilities.length) throw new Error('APPROVAL_REQUIRED');
+    paragraph(article, 'Visit an existing or new website tab, then use the DomAgent toolbar to share that tab. You remain free to navigate and interact.');
+    paragraph(article, 'Sharing allows page actions, including page scripts, only on your selected tab. Each action asks for approval unless you choose Allow all while sharing.');
+    const selected = snapshot.selected_tab;
+    paragraph(article, selected ? `Selected tab: ${selected.url}` : 'No website tab selected. Visit a website in a normal browser window first.');
+    button(article, `Share this tab with ${pending.client_label}`, async () => {
+      if (!selected) throw new Error('TARGET_STALE');
       // The permission call must remain directly inside the user's click, before
       // any messaging or asynchronous work loses browser user activation.
       const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
       if (!granted) throw new Error('PERMISSION_REQUIRED');
-      await request('approve', { request_id: pending.request_id, capabilities });
+      await request('approve', { request_id: pending.request_id, tabId: selected.tabId });
     });
+    article.lastElementChild.disabled = !selected;
     button(article, 'Not now', () => request('deny', { request_id: pending.request_id }));
     byId('requests').append(article);
   }
@@ -161,18 +149,31 @@ function render(snapshot) {
       ? `${target.client_label || name} can use this tab.` : 'This tab is not being shared.');
     if (target.indicator_unavailable) {
       paragraph(article, 'This tab is still being shared, but its banner could not be displayed. You can stop sharing here.');
-    } else if (target.end_reason === 'HANDOFF') {
-      paragraph(article, 'Sharing stopped so you can finish signing in or checking this page. View the tab, then ask to share again when you are ready.');
+    }
+    if (target.allow_all) paragraph(article, 'Allow all while sharing is on for ordinary actions in this tab only. Human assistance still requires Done.');
+    for (const command of target.commands || []) {
+      const pending = document.createElement('article');
+      paragraph(pending, `${command.operation}: ${command.description}`);
+      if (command.state === 'pending' && command === target.commands[0]) {
+        const decide = action => request('decision', {
+          target_id: target.target_id, request_id: command.request_id, action,
+        });
+        if (command.operation === 'request_handoff') {
+          paragraph(pending, 'Complete this task yourself in the shared tab. Done confirms completion without stopping sharing.');
+          button(pending, 'Done', () => decide('done'));
+          button(pending, 'Cancel', () => decide('decline'));
+        } else {
+          button(pending, 'Approve', () => decide('approve'));
+          button(pending, 'Decline', () => decide('decline'));
+          button(pending, 'Allow all while sharing', () => decide('allow_all'));
+        }
+      } else paragraph(pending, command.state === 'pending' ? 'Queued for review.' :
+        command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…');
+      article.append(pending);
     }
     button(article, 'View tab', () => request('inspectTab', { tabId: target.tabId }));
     if (target.target_id) {
       button(article, 'Stop sharing', () => request('end', { target_id: target.target_id, reason: 'OWNER_PAUSED' }));
-    } else {
-      if (snapshot.pending.some(pending => pending.client_id === target.client_id)) {
-        paragraph(article, 'A sharing request is waiting above. Choose Share a tab to approve it.');
-      } else {
-        button(article, 'Ask to share again', () => request('resume', { client_id: target.client_id }));
-      }
     }
     byId('targets').append(article);
   }
@@ -216,4 +217,4 @@ byId('add-connection')?.addEventListener('click', () => {
 });
 byId('done')?.addEventListener('click', () => window.close());
 refresh().catch(showError);
-setInterval(() => { if (!busy) refresh().catch(showError); }, 1000);
+setInterval(() => { if (!busy) refresh().catch(showError); }, 250);

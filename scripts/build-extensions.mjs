@@ -23,7 +23,7 @@ for (const browser of ['chrome', 'firefox']) {
     legalComments: 'none', logLevel: 'warning',
   });
   await cp(path.join(source, browser, 'icons'), path.join(output, 'icons'), { recursive: true });
-  for (const file of ['options.html', 'popup.html', 'ui.css']) {
+  for (const file of ['options.html', 'popup.html', 'request.html', 'ui.css']) {
     await cp(path.join(source, 'ui', file), path.join(output, file));
   }
   const manifest = JSON.parse(await readFile(path.join(source, browser, 'manifest.json'), 'utf8'));

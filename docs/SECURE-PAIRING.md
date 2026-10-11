@@ -1,5 +1,9 @@
 # Tenant-scoped pairing and deployment
 
+Service 4.0.0-beta.1 uses [collaborative tab sharing](COLLABORATIVE-BROWSING.md).
+It replaces dedicated tabs, capability checklists, and automatic login-page
+revocation. Identity setup remains; live connections now use wire protocol v3.
+
 ## Trust and authorization
 
 DomAgent, its independent host/TLS proxy, configured OIDC provider, browser,
@@ -19,9 +23,10 @@ display labels only; exact issuer/subject determines identity and tenant access.
 
 Every HTTP MCP request authenticates and matches its credential's tenant to
 `/mcp/<tenant>`. WSS `/extension/<tenant>` authenticates the device key in that
-tenant. Protocol v2 binds origin and tenant into every signed transcript.
+tenant. Protocol v3 binds origin and tenant into every signed transcript, including
+the user-selected tab ID in sharing approval.
 Cross-tenant client/device relationships are rejected. Bare `/mcp`, `/extension`,
-legacy enrollment endpoints, and protocol-v1 proofs are no authorization fallback.
+legacy enrollment endpoints, and older protocol proofs are no authorization fallback.
 
 ## Setup and enrollment
 
@@ -48,8 +53,9 @@ and authenticates WSS. This deliberately replaces beta.2's second local pairing
 confirmation. Server/page success alone is not proof; the extension validates
 the transaction and actual handshake.
 
-Actual browser control still requires a separate local approval and capability
-selection. Broad website permissions are requested only at that action, not
+Tab sharing still requires a separate local approval. Subsequent actions wait for
+individual approval or per-tab **Allow all while sharing**, without a capability
+checklist. Broad website permissions are requested only at local sharing, not
 during enrollment. Multiple saved pairings have one active connection. Switching
 invalidates old queues, proofs, and grant authority before connecting the new pair.
 
@@ -60,15 +66,18 @@ invalidates old queues, proofs, and grant authority before connecting the new pa
 - Identity remains connected while no tab is shared. Firefox uses a persistent
   MV2 background page to avoid idle event-page suspension; Chrome retains its
   MV3 worker. Neither requires a popup or settings page to remain open.
-- Dedicated extension-created tabs only; explicit target IDs on every operation.
-- Serialized target queue capped at 32; original 25-second command deadline is
-  carried to the extension. Uncertain mutations end control, never retry.
+- User-selected existing or newly opened tabs only; explicit target IDs on every
+  operation, multiple shared tabs and no automatic current-tab adoption.
+- Serialized target queue capped at 32. Human waits default to 300 seconds, max
+  600; execution gets a separate 25-second deadline after local approval.
+  Cancellation before execution removes work; uncertain mutations end control
+  and never retry.
 - Local denial has a 30-second prompt cooldown.
 - Protected origins include the entire service origin, identity/authorization
   provider origins, and configured control-plane sites. Block redirects and
   subresources before allowing a grant.
 - Ordinary page-world scripts only. No raw CDP, browser cookie/profile extraction,
-  privileged schemes, or user-tab adoption.
+  privileged schemes, or unshared-tab access.
 - `ELEMENT_NOT_FOUND` and `INVALID_SELECTOR` are selector failures.
   `TARGET_STALE` is a document race; don't automatically retry mutations.
   `PAGE_UNAVAILABLE` ends unusable authority and requests fresh local approval.
@@ -78,19 +87,22 @@ invalidates old queues, proofs, and grant authority before connecting the new pa
   tested build, so capture is not advertised. Page CSP can deny supplied scripts.
 
 The page-edge border/banner is a helpful, spoofable DOM decoration, not a
-security boundary. Its stop-only action may end only its granted tab/document.
+security boundary. Positive action approval and Done require actual user
+interaction in isolated packaged controls or trusted extension UI; scripts
+cannot forge approvals. Its stop action may end only its shared tab/document.
 Toolbar/extension UI state is independent. Cosmetic failures warn rather than
 claim tamper-proof decoration or disabling otherwise usable sharing.
 Banner warnings are scoped to the currently shared tab and clear when rendering
 recovers or sharing ends. Historical cosmetic failures must not override current
-connection/sharing status. After human handoff the retained tab explains what
-stopped and offers **Ask to share again**; an existing pending request is reviewed
-above instead of creating a duplicate.
+connection/sharing status. Human assistance shows Done/Cancel without revoking
+sharing. Stop/disconnect always requires fresh explicit tab sharing afterward.
 
 Tabs share website sign-ins, readable cookies/storage, and internal-network
-access. Text/images/scripts may expose private information. Password/CAPTCHA
-heuristics are best effort. Pause cannot undo completed effects or scheduled
-JavaScript; tabs remain open for the user.
+access. Text/images/scripts may expose private information. Visible login/password
+or CAPTCHA controls no longer automatically revoke the shared session; agent code
+should request human assistance rather than handle credentials. Allow-all page
+scripts are not secret-isolating. Stop cannot undo effects or scheduled JavaScript;
+tabs remain open for the user.
 
 ## Deployment
 
@@ -111,10 +123,13 @@ may use different paths. Keep secret/state files private, use an unprivileged
 service identity and restricted permissions, and do not share the container
 daemon or administration with untrusted client applications.
 
-SQLite has one schema version and rejects beta.2 state until explicitly migrated.
+SQLite has one schema version and rejects 2.x beta.2 state until explicitly migrated.
 Follow [the coordinated migration procedure](TENANT-MIGRATION.md). Do not hot-
 restart an upgraded worktree without reviewing the database/endpoint transition.
 Rollback requires matched database and code versions.
+3.x tenant databases/device identities need no schema migration for collaboration.
+Update server and extensions together, reconnect with v3, and explicitly share
+tabs again. Existing grants and allow-all state never survive a restart.
 
 Audit logs are allowlisted metadata only. Keep raw proxy access logs disabled
 and review proxy errors/journal access. A calling application may retain returned
@@ -134,6 +149,9 @@ real Chrome/native Firefox tests. The extended Firefox Juggler test remains
 explicitly skipped because of the known harness crash, not as proof of parity.
 Test tenant isolation, preview/replay/concurrent setup, one-link installation,
 automatic pairing without sharing, switching, revocation, and restart.
+Also test existing-tab consent, long waits/cancellation, action approve/decline,
+allow-all, forged page-message rejection, human Done after navigation, and stale
+document execution. Verify actual client/proxy timeouts for human-wait calls.
 
 Physical optional-host permission prompts, notification UX, actual deployed
 OIDC/TLS, client-specific credential injection, and all advertised browser versions

@@ -1,9 +1,9 @@
 import {
-  VERSION, POLICY_ID, LIVENESS_MS, authPayload, enrollmentPayload, extensionOrigin,
+  VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS, authPayload, enrollmentPayload, extensionOrigin,
   connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId,
 } from '../../shared/protocol.js';
 import {
-  COMMAND_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
+  MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
   errorCode, fail, id, originList, protectedUnion, text, validateCommand,
 } from './security.js';
 
@@ -34,7 +34,6 @@ export class Controller {
     this.inventory = [];
     this.failures = [];
     this.approving = new Set();
-    this.approvingClients = new Set();
     this.busyTabs = new Set();
     this.teardowns = new Set();
     this.reconnectAttempts = 0;
@@ -42,22 +41,24 @@ export class Controller {
     this.reconnectTimer = null;
     this.adapter.onTabEvent = (...args) => this.tabEvent(...args);
     this.adapter.onWarning = error => this.report(error);
+    this.adapter.onRequestClosed = requestId => {
+      if (this.pending.has(requestId)) {
+        try { this.deny(requestId); } catch (error) { this.report(error); }
+      }
+    };
   }
 
   report(error) {
-    console.error('DomAgent:', error);
+    console.error('DomAgent:', errorCode(error));
     this.failures = [...this.failures.slice(-4), errorCode(error)];
     this.changed();
   }
 
   async initialize() {
-    const [saved, session] = await Promise.all([
-      this.storage.get(['config', 'savedConnections']), this.inventoryStorage.get(['dedicatedTabs']),
-    ]);
-    // Tab IDs are authoritative only within this browser session. Persisting
-    // them across browser restarts could accidentally adopt an unrelated tab.
-    this.inventory = Array.isArray(session.dedicatedTabs) ? session.dedicatedTabs : [];
-    await this.adapter.initialize(this.inventory);
+    const saved = await this.storage.get(['config', 'savedConnections']);
+    // No inventory survives a background/browser restart; identity is not authority.
+    this.inventory = [];
+    await this.adapter.initialize([]);
     this.savedConnections = (Array.isArray(saved.savedConnections) ? saved.savedConnections : [])
       .filter(pair => {
         try { return parseConnectionUrl(pair.connection_url).tenant_id === pair.tenant_id; } catch { return false; }
@@ -91,16 +92,18 @@ export class Controller {
       pending: [...this.pending.values()].map(request => ({
         request_id: request.request_id, client_id: request.client_id, client_label: request.client_label,
         tenant_id: request.tenant_id,
-        expires_at: request.expires_at, policy_id: request.policy_id,
+        description: request.description, expires_at: request.expires_at, policy_id: request.policy_id,
       })),
-      targets: this.inventory.filter(tab => tab.origin === this.config.service_origin &&
-        tab.tenant_id === this.config.tenant_id && tab.device_id === this.record?.identity?.device_id).map(tab => {
-        const grant = [...this.grants.values()].find(grant => grant.tabId === tab.tabId);
-        return { client_id: tab.client_id, client_label: grant?.client_label || tab.client_label,
-          tabId: tab.tabId, target_id: grant?.target_id,
-          state: grant?.state || 'inactive', end_reason: grant ? null : tab.end_reason,
-          indicator_unavailable: grant?.state === 'active' && grant.indicatorUnavailable === true };
-      }),
+      targets: [...this.grants.values()].map(grant => ({
+        client_id: grant.client_id, client_label: grant.client_label,
+        tabId: grant.tabId, target_id: grant.target_id, state: grant.state,
+        allow_all: grant.allowAll === true,
+        indicator_unavailable: grant.indicatorUnavailable === true,
+        commands: grant.queue.map(queued => ({
+          request_id: queued.message.request_id, operation: queued.message.operation,
+          description: queued.message.description, expires_at: queued.deadline, state: queued.state,
+        })),
+      })),
       failures: this.failures,
     };
   }
@@ -346,9 +349,10 @@ export class Controller {
       id(message.request_id);
       id(message.client_id);
       text(message.client_label);
+      text(message.description, 4096);
       text(message.nonce);
       if (message.policy_id !== POLICY_ID || !Number.isFinite(message.expires_at) ||
-          message.expires_at <= this.now() || message.expires_at > this.now() + 300_000) fail('INVALID_MESSAGE');
+          message.expires_at <= this.now() || message.expires_at > this.now() + HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
       if (this.pending.size >= 32 || this.pending.has(message.request_id)) fail('INVALID_MESSAGE');
       const protectedOrigins = protectedUnion(this.config.service_origin,
         record.protected_origins, message.protected_origins);
@@ -362,11 +366,25 @@ export class Controller {
       if (!this.current(socket, generation)) return;
       this.pending.set(message.request_id, message);
       this.notify('Sharing request', `${message.client_label} would like to use a tab.`);
+      void this.adapter.requestWindow?.(message.request_id).then(() => {
+        if (!this.pending.has(message.request_id)) return this.adapter.closeRequestWindow?.(message.request_id);
+      }).catch(() => this.report(new Error('INDICATOR_UNAVAILABLE')));
+      this.changed();
+    } else if (message.type === 'approval.cancel') {
+      id(message.request_id);
+      this.pending.delete(message.request_id);
+      void this.adapter.closeRequestWindow?.(message.request_id);
+      for (const grant of this.grants.values()) {
+        if (grant.request_id === message.request_id && grant.state === 'awaiting_ack') {
+          void this.end(grant.target_id, 'OWNER_PAUSED');
+        }
+      }
       this.changed();
     } else if (message.type === 'grant.active') {
       const grant = this.grants.get(message.target_id);
-      if (!grant || grant.state !== 'awaiting_ack' || message.client_id !== grant.client_id) fail('NOT_AUTHORIZED');
-      if (grant.ackDeadline <= this.now()) {
+      if (!grant || !['awaiting_ack', 'active'].includes(grant.state) ||
+          message.client_id !== grant.client_id || message.tab_id !== grant.tabId) fail('NOT_AUTHORIZED');
+      if (grant.state === 'awaiting_ack' && grant.ackDeadline <= this.now()) {
         await this.end(grant.target_id, 'OWNER_PAUSED');
         fail('APPROVAL_REQUIRED');
       }
@@ -383,26 +401,28 @@ export class Controller {
     } else if (message.type === 'command') {
       // Commands queue independently; the heartbeat/teardown stream never waits for page work.
       this.enqueue(message);
+    } else if (message.type === 'command.execute') {
+      this.executeReady(message);
+    } else if (message.type === 'command.cancel') {
+      this.cancelCommand(message);
     } else {
       fail('INVALID_MESSAGE');
     }
   }
 
-  async approve(requestId, capabilities) {
+  async approve(requestId, tabId) {
     const request = this.pending.get(requestId);
     if (!request || this.approving.has(requestId)) fail('APPROVAL_REQUIRED');
     checkBinding(request, this.connection);
     if (request.expires_at <= this.now()) fail('APPROVAL_REQUIRED');
-    if (!Array.isArray(capabilities) || !capabilities.length ||
-        new Set(capabilities).size !== capabilities.length ||
-        capabilities.some(value => !this.adapter.capabilities().includes(value))) fail('INVALID_ARGUMENT');
-    if (this.approvingClients.has(request.client_id) ||
-        [...this.grants.values()].some(grant => grant.client_id === request.client_id)) fail('APPROVAL_REQUIRED');
+    if (!Number.isSafeInteger(tabId) || tabId < 0) fail('INVALID_ARGUMENT');
+    if (this.busyTabs.has(tabId)) fail('APPROVAL_REQUIRED');
+    const capabilities = [...this.adapter.capabilities()];
     this.approving.add(requestId);
-    this.approvingClients.add(request.client_id);
+    this.busyTabs.add(tabId);
     const generation = this.generation;
     let grant;
-    let createdTabId;
+    let reused = false;
     const checkApproval = () => {
       if (this.generation !== generation || request.expires_at <= this.now() ||
           !this.pending.has(requestId) || (grant && this.grants.get(grant.target_id) !== grant)) {
@@ -412,42 +432,39 @@ export class Controller {
       checkBinding(request, this.connection);
     };
     try {
-      const previous = this.inventory.find(tab => tab.origin === this.config.service_origin &&
-        tab.tenant_id === this.config.tenant_id &&
-        tab.device_id === this.record.identity.device_id && tab.client_id === request.client_id);
-      const tab = await this.adapter.createTab(this.busyTabs.has(previous?.tabId) ? undefined : previous?.tabId);
-      createdTabId = tab.id;
-      this.busyTabs.add(tab.id);
-      const inventory = { origin: this.config.service_origin, device_id: this.record.identity.device_id,
-        tenant_id: this.config.tenant_id, client_label: request.client_label,
-        client_id: request.client_id, tabId: tab.id };
-      this.inventory = this.inventory.filter(existing => existing !== previous);
-      this.inventory.push(inventory);
-      await this.inventoryStorage.set({ dedicatedTabs: this.inventory });
-      grant = { ...request, target_id: crypto.randomUUID(), tabId: tab.id, state: 'preparing',
+      const tab = await this.adapter.selectedTabById(tabId);
+      checkApproval();
+      await this.adapter.inspect(tab.id, this.protectedOrigins());
+      checkApproval();
+      grant = [...this.grants.values()].find(existing => existing.tabId === tab.id);
+      if (grant && (grant.client_id !== request.client_id || grant.state !== 'active')) fail('APPROVAL_REQUIRED');
+      reused = Boolean(grant);
+      if (!grant) grant = { ...request, target_id: crypto.randomUUID(), tabId: tab.id, state: 'preparing',
         capabilities: [...capabilities], protected_origins: this.protectedOrigins(),
-        blankAllowed: (tab.url || tab.pendingUrl) === 'about:blank',
         documentGeneration: 0, queue: [], running: false, generation };
       this.grants.set(grant.target_id, grant);
       checkApproval();
-      await this.adapter.protect(tab.id, grant.protected_origins);
-      checkApproval();
-      await this.adapter.inspect(tab.id, grant.protected_origins, true);
-      checkApproval();
-      await this.adapter.attach(tab.id);
-      checkApproval();
+      if (!reused) {
+        await this.adapter.protect(tab.id, grant.protected_origins);
+        checkApproval();
+        await this.adapter.inspect(tab.id, grant.protected_origins);
+        checkApproval();
+        await this.adapter.attach(tab.id);
+        checkApproval();
+      }
       const signature = await sign(this.record.privateKey, grantPayload({
-        ...request, origin: this.config.service_origin, target_id: grant.target_id, capabilities,
+        ...request, origin: this.config.service_origin, target_id: grant.target_id, tab_id: tab.id, capabilities,
       }));
       checkApproval();
-      grant.state = 'awaiting_ack';
+      if (!reused) grant.state = 'awaiting_ack';
       grant.ackDeadline = this.now() + 10_000;
       this.send({ type: 'grant.approve', request_id: requestId, client_id: request.client_id,
-        target_id: grant.target_id, policy_id: POLICY_ID, nonce: request.nonce, capabilities, signature });
+        target_id: grant.target_id, tab_id: tab.id, policy_id: POLICY_ID, nonce: request.nonce, capabilities, signature });
       this.pending.delete(requestId);
+      void this.adapter.closeRequestWindow?.(requestId);
       this.changed();
     } catch (error) {
-      if (grant) {
+      if (grant && !reused && grant.client_id === request.client_id) {
         this.grants.delete(grant.target_id);
         try {
           await this.adapter.release(grant.tabId);
@@ -458,15 +475,15 @@ export class Controller {
       throw error;
     } finally {
       this.approving.delete(requestId);
-      this.approvingClients.delete(request.client_id);
-      if (createdTabId !== undefined) this.busyTabs.delete(createdTabId);
+      this.busyTabs.delete(tabId);
     }
   }
 
   deny(requestId) {
-    if (!this.pending.has(requestId) || this.approving.has(requestId)) fail('APPROVAL_REQUIRED');
+    if (!this.pending.has(requestId)) fail('APPROVAL_REQUIRED');
     this.send({ type: 'approval.deny', request_id: requestId });
     this.pending.delete(requestId);
+    void this.adapter.closeRequestWindow?.(requestId);
     this.changed();
   }
 
@@ -477,19 +494,19 @@ export class Controller {
     // Disable authority synchronously, before any browser/API cleanup awaits.
     this.grants.delete(targetId);
     grant.state = 'ended';
-    const tab = this.inventory.find(tab => tab.tabId === grant.tabId &&
-      tab.origin === this.config.service_origin && tab.tenant_id === grant.tenant_id);
-    if (tab) {
-      tab.end_reason = reason;
-      void this.inventoryStorage.set({ dedicatedTabs: this.inventory }).catch(error => this.report(error));
-    }
+    void this.adapter.closeActionWindow?.(targetId);
     const indicatorToken = grant.indicatorCleanupToken || grant.indicatorToken;
     grant.indicatorToken = null;
     this.changed();
-    for (const queued of grant.queue.splice(0)) this.result(queued.message, { code: 'APPROVAL_REQUIRED' });
+    for (const queued of grant.queue.splice(0)) {
+      queued.cancelled = true;
+      queued.abort?.();
+      this.result(queued.message, { code: queued.state === 'executing' ? 'OUTCOME_UNKNOWN' : 'APPROVAL_REQUIRED' });
+    }
     if (announce && this.connection) {
       try {
-        this.send({ type: 'grant.end', target_id: targetId, reason });
+        this.send({ type: 'grant.end', target_id: targetId,
+          reason: LOCAL_END_REASONS.has(reason) ? reason : 'HANDOFF' });
       } catch (error) {
         this.report(error);
       }
@@ -504,23 +521,15 @@ export class Controller {
     } finally {
       this.teardowns.delete(cleanup);
       // An in-progress approval still owns this tab until its own finally block.
-      if (!this.approvingClients.has(grant.client_id)) this.busyTabs.delete(grant.tabId);
+      this.busyTabs.delete(grant.tabId);
     }
     if (reason === 'HANDOFF') this.notify('Human handoff required',
-      'Control stopped. Finish authentication or inspection, then request fresh approval. Prior/scheduled JavaScript is not undone.');
+      'This protected page cannot be shared. Prior/scheduled JavaScript is not undone.');
     else if (['OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'CAPABILITY_UNAVAILABLE'].includes(reason)) {
       this.notify('Browser control ended',
         `${reason}. The tab remains open. Prior/scheduled JavaScript is not undone. Fresh local approval is required.`);
     }
     this.changed();
-  }
-
-  resume(clientId) {
-    id(clientId);
-    if (!this.inventory.some(tab => tab.origin === this.config.service_origin &&
-        tab.tenant_id === this.config.tenant_id &&
-        tab.device_id === this.record.identity.device_id && tab.client_id === clientId)) fail('NOT_AUTHORIZED');
-    this.send({ type: 'access.request', client_id: clientId });
   }
 
   async updateIndicator(grant) {
@@ -532,6 +541,10 @@ export class Controller {
     try {
       const document = await this.adapter.indicator(grant.tabId, {
         target_id: grant.target_id, token, label: grant.client_label,
+        command: grant.queue[0] ? {
+          request_id: grant.queue[0].message.request_id, description: grant.queue[0].message.description,
+          operation: grant.queue[0].message.operation, state: grant.queue[0].state,
+        } : null,
       });
       if (!document) {
         if (grant.indicatorToken === token) {
@@ -558,14 +571,25 @@ export class Controller {
     }
   }
 
-  stopFromPage(message, sender, extensionId) {
+  pageGrant(message, sender, extensionId) {
     const grant = this.grants.get(message?.target_id);
-    if (message?.type !== 'page.stop' || sender?.id !== extensionId || sender.frameId !== 0 ||
+    if (!['page.stop', 'page.decision'].includes(message?.type) || sender?.id !== extensionId || sender.frameId !== 0 ||
         !grant || grant.state !== 'active' || sender.tab?.id !== grant.tabId ||
         !grant.indicatorToken || message.token !== grant.indicatorToken ||
         !grant.indicatorDocument || sender.url !== grant.indicatorDocument.url ||
         (grant.indicatorDocument.documentId && sender.documentId !== grant.indicatorDocument.documentId)) fail('NOT_AUTHORIZED');
-    return this.end(grant.target_id, 'OWNER_PAUSED');
+    return grant;
+  }
+
+  stopFromPage(message, sender, extensionId) {
+    if (message?.type !== 'page.stop') fail('NOT_AUTHORIZED');
+    return this.end(this.pageGrant(message, sender, extensionId).target_id, 'OWNER_PAUSED');
+  }
+
+  decisionFromPage(message, sender, extensionId) {
+    const grant = this.pageGrant(message, sender, extensionId);
+    if (message.type !== 'page.decision') fail('NOT_AUTHORIZED');
+    return this.decide(grant.target_id, message.request_id, message.action);
   }
 
   result(message, error, result) {
@@ -591,77 +615,163 @@ export class Controller {
       grant.seen ||= new Set();
       if (grant.seen.size >= 10_000) fail('QUEUE_FULL');
       grant.seen.add(message.request_id);
-      grant.queue.push({ message, deadline: Math.min(message.expires_at, this.now() + COMMAND_TIMEOUT_MS),
+      grant.queue.push({ message, deadline: message.expires_at, state: 'pending',
         documentGeneration: grant.documentGeneration });
-      void this.drain(grant).catch(error => this.report(error));
+      this.present(grant);
     } catch (error) {
       this.result(message, { code: errorCode(error) });
-      if (errorCode(error) === 'HANDOFF_REQUIRED' && grant) void this.end(grant.target_id, 'HANDOFF');
     }
   }
 
-  async drain(grant) {
-    if (grant.running) return;
-    grant.running = true;
+  present(grant) {
+    const queued = grant.queue[0];
+    if (queued?.state === 'pending' && grant.allowAll && queued.message.operation !== 'request_handoff') {
+      try { this.decide(grant.target_id, queued.message.request_id, 'approve'); }
+      catch (error) { this.report(error); }
+    }
+    if (queued?.state === 'pending' && grant.presentedRequest !== queued.message.request_id) {
+      grant.presentedRequest = queued.message.request_id;
+      void this.adapter.actionWindow?.(grant.target_id).catch(() => this.report(new Error('INDICATOR_UNAVAILABLE')));
+    } else if (!queued) {
+      grant.presentedRequest = null;
+      void this.adapter.closeActionWindow?.(grant.target_id);
+    }
+    void this.updateIndicator(grant);
+    this.changed();
+  }
+
+  decide(targetId, requestId, action) {
+    const grant = this.grants.get(targetId);
+    const queued = grant?.queue[0];
+    if (!grant || grant.state !== 'active' || queued?.message.request_id !== requestId ||
+        queued.state !== 'pending') fail('APPROVAL_REQUIRED');
+    if (!['approve', 'decline', 'allow_all', 'done'].includes(action)) fail('INVALID_ARGUMENT');
+    const human = queued.message.operation === 'request_handoff';
+    if ((human && !['done', 'decline'].includes(action)) ||
+        (!human && action === 'done')) fail('INVALID_ARGUMENT');
+    if (action === 'decline') {
+      this.finishQueued(grant, queued, { code: 'ACTION_DECLINED' });
+      return;
+    }
     try {
-      while (grant.queue.length) {
-        const queued = grant.queue.shift();
-        const { message } = queued;
-        let timer;
-        const checkCurrent = (after = false) => {
-          if (this.grants.get(grant.target_id) !== grant || this.generation !== grant.generation) fail('APPROVAL_REQUIRED');
-          if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-          validateCommand(message, grant, this.connection, this.protectedOrigins(), this.now());
-          if (this.now() >= queued.deadline) fail('OUTCOME_UNKNOWN');
-          // These results acknowledge completed actions, not data from a new document.
-          if ((!after || !['navigate', 'click', 'type_text'].includes(message.operation)) &&
-              grant.documentGeneration !== queued.documentGeneration) fail('TARGET_STALE');
-        };
-        try {
-          checkCurrent();
-          const execution = this.adapter.execute(grant, message.operation, message.args, checkCurrent);
-          const timeout = new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error('OUTCOME_UNKNOWN')), Math.max(1, queued.deadline - this.now()));
-          });
-          const result = await Promise.race([execution, timeout]);
-          checkCurrent(true);
-          this.result(message, null, boundedResult(result));
-        } catch (error) {
-          const code = errorCode(error);
+      validateCommand(queued.message, grant, this.connection, this.protectedOrigins(), this.now());
+      if (!human && queued.documentGeneration !== grant.documentGeneration) fail('TARGET_STALE');
+      if (human) queued.documentGeneration = grant.documentGeneration;
+      if (action === 'allow_all') grant.allowAll = true;
+      queued.state = 'ready';
+      this.send({ type: 'command.ready', request_id: requestId, target_id: targetId });
+      this.present(grant);
+    } catch (error) {
+      this.finishQueued(grant, queued, { code: errorCode(error) });
+    }
+  }
+
+  finishQueued(grant, queued, error, value) {
+    if (queued.cancelled || !grant.queue.includes(queued)) return;
+    grant.queue.splice(grant.queue.indexOf(queued), 1);
+    this.result(queued.message, error, value);
+    this.present(grant);
+  }
+
+  cancelCommand(message) {
+    id(message.request_id);
+    id(message.target_id);
+    const grant = this.grants.get(message.target_id);
+    const queued = grant?.queue.find(item => item.message.request_id === message.request_id);
+    if (!queued) return;
+    if (queued.state === 'executing') {
+      void this.end(grant.target_id, 'OUTCOME_UNKNOWN');
+    } else {
+      queued.cancelled = true;
+      grant.queue.splice(grant.queue.indexOf(queued), 1);
+      this.present(grant);
+    }
+  }
+
+  executeReady(message) {
+    id(message.request_id);
+    id(message.target_id);
+    const grant = this.grants.get(message.target_id);
+    const queued = grant?.queue[0];
+    // Late execute after local cancellation/stop never revives authority.
+    if (!queued || queued.message.request_id !== message.request_id) return;
+    if (queued.state !== 'ready') fail('APPROVAL_REQUIRED');
+    if (!Number.isSafeInteger(message.expires_at) || message.expires_at > this.now() + EXECUTION_MS) fail('INVALID_MESSAGE');
+    if (queued.deadline <= this.now() || message.expires_at <= this.now()) {
+      this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
+      return;
+    }
+    if (queued.message.operation !== 'request_handoff' && queued.documentGeneration !== grant.documentGeneration) {
+      this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
+      return;
+    }
+    queued.executionDeadline = message.expires_at;
+    queued.state = 'executing';
+    this.present(grant);
+    void this.runCommand(grant, queued);
+  }
+
+  async runCommand(grant, queued) {
+    const { message } = queued;
+    let timer;
+    const checkCurrent = (after = false) => {
+      if (queued.cancelled || this.grants.get(grant.target_id) !== grant ||
+          this.generation !== grant.generation) fail('APPROVAL_REQUIRED');
+      if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
+      checkBinding(message, this.connection);
+      if (this.now() >= queued.executionDeadline) fail('OUTCOME_UNKNOWN');
+      if (message.operation !== 'request_handoff' &&
+          (!after || !['navigate', 'click', 'type_text'].includes(message.operation)) &&
+          grant.documentGeneration !== queued.documentGeneration) fail('TARGET_STALE');
+    };
+    try {
+      checkCurrent();
+      if (message.operation === 'request_handoff') {
+        this.finishQueued(grant, queued, null, { state: 'completed', user_confirmed: true });
+        return;
+      }
+      const execution = this.adapter.execute(grant, message.operation, message.args, checkCurrent);
+      const timeout = new Promise((_, reject) => {
+        queued.abort = () => reject(new Error('APPROVAL_REQUIRED'));
+        timer = setTimeout(() => reject(new Error('OUTCOME_UNKNOWN')),
+          Math.max(1, queued.executionDeadline - this.now()));
+      });
+      const value = await Promise.race([execution, timeout]);
+      checkCurrent(true);
+      this.finishQueued(grant, queued, null, boundedResult(value));
+    } catch (error) {
+      const code = errorCode(error);
+      if (!queued.cancelled && this.grants.get(grant.target_id) === grant) {
+        // Invalidate authority before advancing another queued action.
+        if (code === 'OUTCOME_UNKNOWN' || code === 'PAGE_UNAVAILABLE') {
           this.result(message, { code });
-          if (['HANDOFF_REQUIRED', 'OUTCOME_UNKNOWN'].includes(code)) {
-            await this.end(grant.target_id, 'HANDOFF');
-          } else if (code === 'PAGE_UNAVAILABLE') {
-            this.report(error);
-            await this.end(grant.target_id, 'CAPABILITY_UNAVAILABLE');
-          }
-        } finally {
-          clearTimeout(timer);
-        }
+          grant.queue.splice(grant.queue.indexOf(queued), 1);
+          await this.end(grant.target_id, code === 'PAGE_UNAVAILABLE' ? 'CAPABILITY_UNAVAILABLE' : 'OUTCOME_UNKNOWN');
+        } else this.finishQueued(grant, queued, { code });
       }
     } finally {
-      grant.running = false;
+      clearTimeout(timer);
+      queued.abort = null;
     }
   }
 
   tabEvent(tabId, type, url) {
-    if (type === 'closed') {
-      this.inventory = this.inventory.filter(tab => tab.tabId !== tabId);
-      this.inventoryStorage.set({ dedicatedTabs: this.inventory }).catch(error => this.report(error));
-      this.changed();
-    }
     for (const grant of this.grants.values()) {
       if (grant.tabId !== tabId) continue;
       if (type === 'navigation') {
         grant.documentGeneration++;
         grant.indicatorToken = null;
         grant.indicatorDocument = null;
-        if (url && !(url === 'about:blank' && grant.blankAllowed)) {
+        for (const queued of [...grant.queue]) {
+          if (queued.state !== 'executing' && queued.message.operation !== 'request_handoff') {
+            this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
+          }
+        }
+        if (url) {
           let protectedPage = true;
           let protectedOrigin = false;
           try {
             const page = new URL(url);
-            grant.blankAllowed = false;
             protectedOrigin = this.protectedOrigins().includes(page.origin);
             protectedPage = !['http:', 'https:'].includes(page.protocol) || protectedOrigin;
           } catch (error) {
@@ -698,10 +808,16 @@ export class Controller {
     for (const [requestId, request] of this.pending) {
       if (request.expires_at <= this.now()) {
         this.pending.delete(requestId);
+        void this.adapter.closeRequestWindow?.(requestId);
         this.changed();
       }
     }
     for (const grant of this.grants.values()) {
+      for (const queued of [...grant.queue]) {
+        if (queued.state !== 'executing' && queued.deadline <= this.now()) {
+          this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
+        }
+      }
       if (grant.state === 'awaiting_ack' && grant.ackDeadline <= this.now()) {
         void this.end(grant.target_id, 'OWNER_PAUSED');
       }
@@ -715,6 +831,7 @@ export class Controller {
     this.challenge = null;
     this.phase = 'disconnected';
     this.generation++;
+    for (const requestId of this.pending.keys()) void this.adapter.closeRequestWindow?.(requestId);
     this.pending.clear();
     for (const grant of [...this.grants.values()]) void this.end(grant.target_id, 'BROWSER_OFFLINE', false);
     socket.close();
@@ -730,6 +847,7 @@ export class Controller {
     clearTimeout(this.reconnectTimer);
     if (this.socket) this.loseConnection(this.socket, this.generation, false);
     else this.generation++;
+    for (const requestId of this.pending.keys()) void this.adapter.closeRequestWindow?.(requestId);
     this.pending.clear();
     await Promise.all([...this.grants.values()].map(grant => this.end(grant.target_id, 'BROWSER_OFFLINE', false)));
     await Promise.allSettled([...this.teardowns]);

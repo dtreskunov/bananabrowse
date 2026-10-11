@@ -8,9 +8,14 @@ export class BrowserAdapter {
     this.browserName = browserName;
     this.guards = new Map();
     this.attached = new Set();
+    this.contexts = new Map();
     this.nextRule = 1;
     this.onTabEvent = () => {};
-    this.onWarning = error => console.error('DomAgent browser protection:', error);
+    this.onWarning = () => console.error('DomAgent browser protection unavailable');
+    this.requestWindows = new Map();
+    this.actionWindows = new Map();
+    this.selectedWindowId = null;
+    this.onRequestClosed = () => {};
   }
 
   capabilities() {
@@ -25,19 +30,29 @@ export class BrowserAdapter {
         removeRuleIds: rules.map(rule => rule.id),
       });
       const targets = await this.api.debugger.getTargets();
-      for (const tab of inventory) {
-        if (targets.some(target => target.tabId === tab.tabId && target.attached)) {
-          try {
-            await this.api.debugger.detach({ tabId: tab.tabId });
-          } catch (error) {
-            this.onWarning(error);
-            fail('PROTECTION_UNAVAILABLE');
-          }
-        }
+      for (const target of targets.filter(target => target.attached && Number.isInteger(target.tabId))) {
+        // Chrome only permits detaching this extension's own attachment. Never
+        // resume a grant, even if the worker restarted while a tab stayed open.
+        await this.api.debugger.detach({ tabId: target.tabId }).catch(() => {});
       }
       this.api.debugger.onDetach.addListener(source => {
         this.attached.delete(source.tabId);
+        this.contexts.delete(source.tabId);
         this.onTabEvent(source.tabId, 'detached');
+      });
+      this.api.debugger.onEvent.addListener((source, method, params) => {
+        if (!this.attached.has(source.tabId)) return;
+        if (method === 'Runtime.executionContextsCleared') this.contexts.delete(source.tabId);
+        if (method === 'Runtime.executionContextCreated' && params.context.auxData?.isDefault) {
+          const contexts = this.contexts.get(source.tabId) || new Map();
+          contexts.set(params.context.auxData.frameId, params.context);
+          this.contexts.set(source.tabId, contexts);
+        }
+        if (method === 'Runtime.executionContextDestroyed') {
+          for (const [frame, context] of this.contexts.get(source.tabId) || []) {
+            if (context.id === params.executionContextId) this.contexts.get(source.tabId).delete(frame);
+          }
+        }
       });
     } else {
       if (!this.api.webRequest?.onBeforeRequest) fail('PROTECTION_UNAVAILABLE');
@@ -55,6 +70,23 @@ export class BrowserAdapter {
         return { cancel: blocked };
       }, { urls: ['http://*/*', 'https://*/*'] }, ['blocking']);
     }
+    this.api.tabs.onActivated?.addListener(info => {
+      void this.rememberWindow(info.windowId).catch(() => {});
+    });
+    this.api.windows?.onFocusChanged.addListener(windowId => {
+      void this.rememberWindow(windowId).catch(() => {});
+    });
+    this.api.windows?.onRemoved.addListener(windowId => {
+      if (this.selectedWindowId === windowId) this.selectedWindowId = null;
+      for (const [targetId, window] of this.actionWindows) {
+        if (window.id === windowId) this.actionWindows.delete(targetId);
+      }
+      for (const [requestId, id] of this.requestWindows) {
+        if (id !== windowId) continue;
+        this.requestWindows.delete(requestId);
+        this.onRequestClosed(requestId);
+      }
+    });
     this.api.tabs.onUpdated.addListener((tabId, change) => {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
@@ -87,17 +119,71 @@ export class BrowserAdapter {
     }
   }
 
-  async createTab(previousTabId) {
-    if (Number.isInteger(previousTabId)) {
-      try {
-        const previous = await this.api.tabs.get(previousTabId);
-        // A handed-off tab the owner is actively using is never adopted.
-        if (!previous.active && /^https?:\/\//.test(previous.url)) return previous;
-      } catch (error) {
-        this.onWarning(error);
-      }
+  async rememberWindow(windowId) {
+    if (!Number.isInteger(windowId) || windowId < 0) return;
+    const window = await this.api.windows.get(windowId);
+    if (window.type === 'normal') this.selectedWindowId = windowId;
+  }
+
+  async selectedTab() {
+    if (this.selectedWindowId === null) {
+      const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
+      const window = windows.find(window => window.focused) || windows.at(-1);
+      if (!window) return null;
+      this.selectedWindowId = window.id;
     }
-    return this.api.tabs.create({ url: 'about:blank', active: false });
+    const tabs = await this.api.tabs.query({ windowId: this.selectedWindowId, active: true });
+    const tab = tabs[0];
+    return tab && /^https?:\/\//.test(tab.pendingUrl || tab.url) ? tab : null;
+  }
+
+  async selectedTabById(tabId) {
+    if (!Number.isSafeInteger(tabId) || tabId < 0) fail('INVALID_ARGUMENT');
+    const tab = await this.selectedTab();
+    if (tab?.id !== tabId) fail('TARGET_STALE');
+    return tab;
+  }
+
+  async requestWindow(requestId) {
+    // Save the normal window before the extension-owned request window gets focus.
+    await this.selectedTab();
+    const window = await this.api.windows.create({
+      type: 'popup', width: 440, height: 600, focused: true,
+      url: this.api.runtime.getURL(`request.html?request_id=${encodeURIComponent(requestId)}`),
+    });
+    this.requestWindows.set(requestId, window.id);
+  }
+
+  async closeRequestWindow(requestId) {
+    const windowId = this.requestWindows.get(requestId);
+    this.requestWindows.delete(requestId);
+    if (windowId !== undefined) await this.api.windows.remove(windowId).catch(() => {});
+  }
+
+  async actionWindow(targetId) {
+    if (this.actionWindows.has(targetId)) return;
+    const record = { id: null };
+    this.actionWindows.set(targetId, record);
+    try {
+      const window = await this.api.windows.create({
+        type: 'popup', width: 440, height: 600, focused: false,
+        url: this.api.runtime.getURL('popup.html'),
+      });
+      if (this.actionWindows.get(targetId) !== record) {
+        await this.api.windows.remove(window.id).catch(() => {});
+        return;
+      }
+      record.id = window.id;
+    } catch (error) {
+      if (this.actionWindows.get(targetId) === record) this.actionWindows.delete(targetId);
+      throw error;
+    }
+  }
+
+  async closeActionWindow(targetId) {
+    const record = this.actionWindows.get(targetId);
+    this.actionWindows.delete(targetId);
+    if (record?.id !== undefined && record?.id !== null) await this.api.windows.remove(record.id).catch(() => {});
   }
 
   async protect(tabId, origins) {
@@ -127,6 +213,7 @@ export class BrowserAdapter {
     if (this.browserName === 'chrome') {
       await this.api.debugger.attach({ tabId }, '1.3');
       this.attached.add(tabId);
+      await this.api.debugger.sendCommand({ tabId }, 'Runtime.enable');
     }
   }
 
@@ -139,6 +226,7 @@ export class BrowserAdapter {
       try {
         await this.api.debugger.detach({ tabId });
         this.attached.delete(tabId);
+        this.contexts.delete(tabId);
       } catch (error) {
         this.onWarning(error);
         fail('PROTECTION_UNAVAILABLE');
@@ -202,7 +290,8 @@ export class BrowserAdapter {
     }
     if (!response?.result) fail('TARGET_STALE');
     if (response.result.error) fail(response.result.error);
-    return response.result;
+    return { ...response.result,
+      ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}) };
   }
 
   async inspect(tabId, origins, allowBlank = false) {
@@ -220,7 +309,14 @@ export class BrowserAdapter {
 
   async execute(grant, operation, args, checkCurrent) {
     const tabId = grant.tabId;
-    await this.inspect(tabId, grant.protected_origins, operation === 'navigate');
+    let context;
+    if (operation === 'evaluate_script' && this.browserName === 'chrome') {
+      const tree = await this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree');
+      context = this.contexts.get(tabId)?.get(tree.frameTree?.frame.id);
+      if (!context?.uniqueId) fail('TARGET_STALE');
+      checkCurrent();
+    }
+    const document = await this.inspect(tabId, grant.protected_origins, operation === 'navigate');
     checkCurrent();
     if (operation === 'navigate') {
       const url = navigationUrl(args.url, grant.protected_origins);
@@ -233,7 +329,7 @@ export class BrowserAdapter {
         // The remote caller chooses only page source, never a CDP method/target/context.
         const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
           expression: args.script, awaitPromise: true, returnByValue: true,
-          userGesture: false, timeout: 10_000,
+          userGesture: false, timeout: 10_000, uniqueContextId: context.uniqueId,
         });
         if (response.exceptionDetails) fail('CAPABILITY_UNAVAILABLE');
         if (response.result?.subtype === 'error') fail('CAPABILITY_UNAVAILABLE');
@@ -242,7 +338,8 @@ export class BrowserAdapter {
       let responses;
       try {
         responses = await this.api.scripting.executeScript({
-          target: { tabId, frameIds: [0] }, world: 'MAIN', func: pageEvaluate, args: [args.script],
+          target: document.document_id ? { tabId, documentIds: [document.document_id] } : { tabId, frameIds: [0] },
+          world: 'MAIN', func: pageEvaluate, args: [args.script],
         });
       } catch (error) {
         this.onWarning(error);
@@ -273,6 +370,6 @@ export class BrowserAdapter {
       }
       return boundedResult({ mimeType: 'image/png', data: screenshot.split(',')[1] });
     }
-    return this.helper(tabId, operation, args);
+    return this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce });
   }
 }

@@ -12,7 +12,7 @@ import { Fault, requireValue, failureCode, audit } from './errors.js';
 const COOKIE = '__Host-domagent_session';
 const FLOW_COOKIE = '__Host-domagent_flow';
 const SETUP_COOKIE = '__Host-domagent_setup';
-const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v3.0.0-beta.3';
+const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v4.0.0-beta.1';
 const secureCookie = (name, value, age) =>
   `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${age}`;
 const equal = (a, b) => {
@@ -268,11 +268,12 @@ export function createApp(store, config, oidc) {
       if (!client) res.setHeader('WWW-Authenticate', 'Bearer realm="domagent"');
       requireValue(client, 'NOT_AUTHORIZED', 401);
       requireValue(method === 'POST', 'METHOD_NOT_ALLOWED', 405);
+      res.setHeader('X-Accel-Buffering', 'no');
       await handleMcp(req, res, await body(req), client, bridge);
       return;
     }
     if ((path === '/' || path === '/health') && ['GET', 'HEAD'].includes(method)) {
-      json(res, 200, { service: 'domagent', status: 'ok', version: '3.0.0-beta.3', protocol_version: VERSION });
+      json(res, 200, { service: 'domagent', status: 'ok', version: '4.0.0-beta.1', protocol_version: VERSION });
       return;
     }
     if (path === '/style.css' && method === 'GET') {
@@ -435,6 +436,7 @@ export function createApp(store, config, oidc) {
         if (action === 'rotate') {
           const client = store.rotateClient(session.owner_id, data.client_id, tenant);
           for (const [id, grant] of bridge.grants) if (grant.client_id === client.id) bridge.endGrant(id, 'REVOKED');
+          bridge.reconcile();
           html(res, `<h2>Credential shown once</h2><p>Use your application's secure configuration workflow.</p>
             <code>${escape(client.credential)}</code><p><a href="/dashboard/tenants/${tenant}">Back</a></p>`);
         } else {

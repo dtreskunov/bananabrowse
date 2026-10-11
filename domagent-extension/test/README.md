@@ -1,4 +1,4 @@
-# Extension validation (protocol v2)
+# Extension validation (protocol v3, collaborative-tab-v1)
 
 With the pinned service dependencies already installed, from the repository root:
 
@@ -18,7 +18,7 @@ The Chromium and Firefox engines and image must already be available.
 ## Automated coverage
 
 - Real Chromium protocol fixture: signed tenant-bound enrollment and handshake,
-  local sharing approval, dedicated tabs, MAIN-only script execution without
+  local sharing approval of an existing selected tab, MAIN-only script execution without
   extension APIs, page operations, screenshot PNGs, CSP behavior, protected
   requests/redirects, stop/reapproval, and IndexedDB identity after restart.
 - Actual-service Chromium: real `Store` and `createApp`, anonymous setup request,
@@ -29,19 +29,24 @@ The Chromium and Firefox engines and image must already be available.
   Same-origin/different-tenant credentials, devices and targets are isolated.
   Switching kills old grants and preserves independent keys.
 - Native Firefox RDP: real temporary WebExtension and actual service, signed
-  pairing, separate local approval, protected fetch/image/frame/redirects,
-  selector errors, submit/form POST/JSON-viewer regressions, browser-restricted
-  document refusal, optional-operation failures, fresh approval, and full
-  process restart with persisted identity and empty tab provenance.
+  pairing, selected-tab sharing, protected redirects, page controls and text,
+  optional-operation failures, CSP refusal, guarded human completion after
+  navigation, and full process restart with persisted identity and no grants.
 - Unattended Firefox: all extension pages are closed, extension-target debugger
   observation is released, and no extension UI is polled for 65 seconds. The
   same authenticated connection must remain online with no shared tab.
 - Named page indicators, page-local Stop sharing, extraction exclusion,
   `clear_overlays` preserving the indicator, and independent toolbar status.
 - Unit tests cover strict missing-tenant rejection, nonextractable per-pair
-  keys, legacy records, queued/running work on switch, stale documents, stop-only
-  sender/tab/frame/document binding, install-versus-update behavior, and cosmetic
-  failure that warns without blocking command authority or teardown.
+  keys, legacy records, connection binding, old-document queued actions, bounded
+  human waits, staged ready/execute permits, cancellation/stop without retries,
+  sender/tab/frame/document/nonce binding, synthetic positive clicks, and
+  install-versus-update behavior.
+- Actual-service collaboration: immediate request window with description,
+  existing-tab selection and selecting a different normal-window tab afterward,
+  per-action approvals, forged page approval/allow-all/Done rejection, human
+  login/navigation without grant loss, Done/Cancel, grant-scoped allow-all,
+  stale-document rejection and wait-timeout cancellation.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at
@@ -55,7 +60,9 @@ DOMAGENT_FIREFOX_JUGGLER=1 npm run test:browser -- --grep 'real firefox'
 
 The native run uses Firefox's own RDP, not Juggler. Its console cannot synthesize
 a physical permission gesture, so trusted options-page runtime messages drive
-configuration and sharing with fixture hosts pre-granted. Server approval uses
+configuration, sharing and decisions with fixture hosts pre-granted. Synthetic
+page clicks must still fail the actual production `event.isTrusted` guard.
+Server approval uses
 the real Store; Chrome exercises both server browser forms. Both sides still
 perform actual signed enrollment and WSS authentication.
 
@@ -68,7 +75,7 @@ Candidate minimum browser versions still require separate release qualification.
 
 Headless fixture manifests pre-grant HTTP(S) hosts. The Chrome setup test records
 the real UI permission calls: onboarding requests only the connection server;
-broad website permission is requested later by **Share a tab**. This does **not**
+broad website permission is requested later by **Share this tab with …**. This does **not**
 qualify the browser's visible permission/notification prompt UX.
 
 With the released browser build, manually verify in supported Chrome and Firefox:
@@ -77,13 +84,18 @@ With the released browser build, manually verify in supported Chrome and Firefox
    not open it. Decline then accept the server-only permission prompt.
 2. The public link starts focused sign-in/approval and automatically connects.
    No tabs are shared and no general website permission is requested yet.
-3. Decline website permission at **Share a tab**: no target activates. Retry,
-   select intended abilities, and explicitly opt into page scripts if needed.
+3. A request opens an extension window independently of the selected tab. Visit
+   an existing or new normal-window website tab and choose **Share this tab with …**
+   from the toolbar. Decline then accept website permission. There are no
+   capability checkboxes; only the explicitly selected tab gets fixed page APIs.
 4. Confirm the named page border/banner and toolbar, keyboard-accessible
    **Stop sharing**, navigation reinstallation, and removal after stop. A website
    may hide or imitate DOM decoration; the toolbar remains independent.
 5. Switch connections with active sharing, disconnect, suspend/restart, and
    verify fresh local approval is required. No old target works.
+   Approve/Decline/Allow-all apply per tab; human Done/Cancel retain sharing even
+   after normal login navigation. Stop cancels waiting actions immediately and
+   leaves the user-owned tab open.
 6. Qualify Firefox capture availability and CSP-denied evaluation, real
    notifications, and browser-policy refusal on the operator's own browser.
 7. Leave the popup and settings closed for at least two minutes with no shared
@@ -92,7 +104,8 @@ With the released browser build, manually verify in supported Chrome and Firefox
    API traffic or automatically restored control.
 
 Shared tabs use the same website sessions, not a network sandbox or isolated
-profile. Password/CAPTCHA detection is conservative, not complete secret
-protection. Stop cannot undo requests, account changes, or already scheduled
-page JavaScript. Commands retain the server's original absolute `expires_at`
-and never retry after their deadline.
+profile. Password/CAPTCHA presence does not revoke sharing or block ordinary
+inspection. Protected service/IdP origins remain prohibited. Stop cannot undo
+requests, account changes, or already scheduled page JavaScript. Human waiting
+is bounded at 600 seconds; actual execution starts only after the server permit
+and has its own 25-second deadline. Side effects are never retried.

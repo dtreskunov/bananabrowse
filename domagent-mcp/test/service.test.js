@@ -106,14 +106,18 @@ async function connect(ctx, device, { pong = true } = {}) {
   ws.send(JSON.stringify({ type: 'proof', signature: await sign(device.key.privateKey, authPayload(challenge)) }));
   return { ws, next, challenge, authenticated: await next('authenticated') };
 }
-async function activate(ctx, device, connection, client = ctx.client) {
+async function activate(ctx, device, connection, client = ctx.client, tab_id = 100) {
   assert.equal(ctx.app.bridge.requestAccess(client.id, device.device.device_id).state, 'pending');
   const request = await connection.next('approval.request');
-  const grant = { ...request, origin: ORIGIN, target_id: token(), capabilities: [...OPERATIONS] };
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id, capabilities: [...OPERATIONS] };
   connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
     signature: await sign(device.key.privateKey, grantPayload(grant)) }));
   assert.equal((await connection.next('grant.active')).target_id, grant.target_id);
   return grant;
+}
+async function ready(connection, command) {
+  connection.ws.send(JSON.stringify({ type: 'command.ready', request_id: command.request_id, target_id: command.target_id }));
+  return connection.next('command.execute');
 }
 
 test('config and connection link validation reject insecure and ambiguous inputs', () => {
@@ -160,7 +164,7 @@ test('legacy unscoped endpoints explicitly reject use; public metadata has no te
     assert.equal((await ctx.request(path, null, {}, 'GET')).status, 410);
   }
   const metadata = await (await ctx.request('/.well-known/domagent', null, {}, 'GET')).json();
-  assert.deepEqual(metadata, { service: 'domagent', protocol_version: 2, setup_requests: '/api/setup-requests' });
+  assert.deepEqual(metadata, { service: 'domagent', protocol_version: VERSION, setup_requests: '/api/setup-requests' });
 });
 
 test('server approval still needs tenant-bound device-key proof and confirmation is one-time', async t => {
@@ -245,6 +249,7 @@ test('tenant pairing permits requests, not control; targets stay client/tenant b
   const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'get_text', { selector: 'body' });
   const command = await connection.next('command');
   assert.equal(command.tenant_id, ctx.tenant.id);
+  await ready(connection, command);
   connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
     target_id: command.target_id, result: 'visible content' }));
   assert.equal(await work, 'visible content');
@@ -296,7 +301,7 @@ test('protected navigation, pending mutation and live credential revocation fail
   grant = await activate(ctx, d, connection);
   const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' });
   const rejected = assert.rejects(work, /OUTCOME_UNKNOWN/);
-  await connection.next('command');
+  await ready(connection, await connection.next('command'));
   ctx.store.revoke(ctx.ownerId, 'client', ctx.client.id, ctx.tenant.id);
   ctx.app.bridge.reconcile();
   await rejected;
@@ -384,7 +389,8 @@ test('queue/input/deadline limits are exact and uncertain mutations never retry 
   const settled = Promise.allSettled(work);
   const command = await connection.next('command');
   assert.equal(command.args.script.length, 65_536);
-  assert.equal(command.expires_at, Date.now() + 25_000);
+  assert.equal(command.expires_at, Date.now() + 600_000);
+  await ready(connection, command);
   await assert.rejects(bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' }), /QUEUE_FULL/);
   const session = bridge.connections.get(d.device.device_id);
   t.mock.timers.tick(10_000); bridge.refreshLiveness(session);
@@ -393,7 +399,7 @@ test('queue/input/deadline limits are exact and uncertain mutations never retry 
   t.mock.timers.tick(1);
   const outcomes = await settled;
   assert.match(outcomes[0].reason.message, /OUTCOME_UNKNOWN/);
-  for (const outcome of outcomes.slice(1)) assert.match(outcome.reason.message, /COMMAND_EXPIRED/);
+  for (const outcome of outcomes.slice(1)) assert.match(outcome.reason.message, /NOT_AUTHORIZED/);
   assert.equal(bridge.grants.size, 0);
   assert.equal(bridge.calls.size, 0);
   t.mock.timers.reset();
@@ -534,4 +540,258 @@ test('audit retains only allowed metadata and never page contents or credentials
   } finally { process.stdout.write = original; }
   assert.deepEqual(JSON.parse(output), { event: 'operation_finished', code: 'OK', operation: 'evaluate_script', client_id: 'public-id' });
   assert(!output.includes('private-'));
+});
+
+test('sharing waits resolve only after a signed user-selected tab, and concurrent requests coalesce', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const first = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Please select your tab', 600_000, null, ctx.tenant.id);
+  const second = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Another request', 600_000, null, ctx.tenant.id);
+  const request = await connection.next('approval.request');
+  assert.equal(request.description, 'Please select your tab');
+  assert.equal(ctx.app.bridge.requests.size, 1);
+  assert.equal(ctx.app.bridge.grants.size, 0);
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 42, capabilities: [...OPERATIONS] };
+  connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
+    signature: await sign(device.key.privateKey, grantPayload(grant)) }));
+  const results = await Promise.all([first, second]);
+  assert.equal(results[0].tab_handle, grant.target_id);
+  assert.equal(results[1].tab_id, 42);
+  assert.equal(ctx.app.bridge.shareWaiters.size, 0);
+  await connection.next('grant.active');
+  const otherGrant = await activate(ctx, device, connection, ctx.client, 43);
+  assert.equal(ctx.app.bridge.grants.size, 2);
+  assert.equal(ctx.app.bridge.targets(ctx.client.id)[0].shared_tabs.length, 2);
+  ctx.app.bridge.endGrant(grant.target_id, 'OWNER_PAUSED');
+  assert.equal(ctx.app.bridge.targets(ctx.client.id)[0].shared_tabs[0].tab_handle, otherGrant.target_id);
+});
+
+test('cancelled and declined sharing waits clean up without grants', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const controller = new AbortController();
+  const work = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Choose a tab', 60_000, controller.signal, ctx.tenant.id);
+  const rejected = assert.rejects(work, /COMMAND_CANCELLED/);
+  await connection.next('approval.request');
+  controller.abort();
+  await rejected;
+  assert.equal((await connection.next('approval.cancel')).reason, 'COMMAND_CANCELLED');
+  assert.equal(ctx.app.bridge.requests.size, 0);
+  const next = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Choose a tab', 60_000, null, ctx.tenant.id);
+  const denied = assert.rejects(next, /ACTION_DECLINED/);
+  const request = await connection.next('approval.request');
+  connection.ws.send(JSON.stringify({ type: 'approval.deny', request_id: request.request_id }));
+  await denied;
+  assert.equal(ctx.app.bridge.shareWaiters.size, 0);
+  assert.equal(ctx.app.bridge.grants.size, 0);
+});
+
+test('action human waiting exceeds the old execution deadline, then execution gets a fresh short deadline', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: Date.now() });
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device, { pong: false });
+  const grant = await activate(ctx, device, connection);
+  const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' },
+    null, ctx.tenant.id, 'Open settings');
+  const command = await connection.next('command');
+  const session = ctx.app.bridge.connections.get(device.device.device_id);
+  for (let i = 0; i < 6; i++) { t.mock.timers.tick(10_000); ctx.app.bridge.refreshLiveness(session); }
+  assert.equal(ctx.app.bridge.calls.get(command.request_id).phase, 'waiting');
+  assert.equal(ctx.app.bridge.grants.size, 1);
+  const execution = await ready(connection, command);
+  assert.equal(execution.expires_at, Date.now() + 25_000);
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
+    target_id: grant.target_id, result: { clicked: true } }));
+  assert.deepEqual(await work, { clicked: true });
+  t.mock.timers.reset();
+});
+
+test('human Done completes assistance without revoking sharing; declined actions do not execute', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const grant = await activate(ctx, device, connection);
+  const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'request_handoff', {},
+    null, ctx.tenant.id, 'Sign in and click Done');
+  const command = await connection.next('command');
+  assert.equal(command.operation, 'request_handoff');
+  await ready(connection, command);
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
+    target_id: grant.target_id, result: { state: 'completed', user_confirmed: true } }));
+  assert.deepEqual(await work, { state: 'completed', user_confirmed: true });
+  assert.equal(ctx.app.bridge.grants.size, 1);
+  const declined = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' },
+    null, ctx.tenant.id, 'Click submit');
+  const rejected = assert.rejects(declined, /ACTION_DECLINED/);
+  const next = await connection.next('command');
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: next.request_id, target_id: grant.target_id,
+    error: { code: 'ACTION_DECLINED' } }));
+  await rejected;
+  assert.equal(ctx.app.bridge.grants.size, 1);
+});
+
+test('cancelled action before approval and exact sharing expiry retain no pending work', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: Date.now() });
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device, { pong: false });
+  const grant = await activate(ctx, device, connection);
+  const controller = new AbortController();
+  const action = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' },
+    controller.signal, ctx.tenant.id, 'Click it');
+  const aborted = assert.rejects(action, /COMMAND_CANCELLED/);
+  await connection.next('command');
+  controller.abort();
+  await aborted;
+  assert.equal(ctx.app.bridge.calls.size, 0);
+  assert.equal(ctx.app.bridge.grants.size, 1);
+  const sharing = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Share another tab', 1000, null, ctx.tenant.id);
+  const expired = assert.rejects(sharing, /COMMAND_EXPIRED/);
+  await connection.next('approval.request');
+  t.mock.timers.tick(999);
+  assert.equal(ctx.app.bridge.requests.size, 1);
+  t.mock.timers.tick(1);
+  await expired;
+  assert.equal(ctx.app.bridge.requests.size, 0);
+  t.mock.timers.reset();
+});
+
+test('HTTP MCP waits for sharing and action approval with correct descriptions', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const sdk = new Client({ name: 'collaborative-test', version: '1' });
+  t.after(() => sdk.close());
+  await sdk.connect(new StreamableHTTPClientTransport(new URL(`${ctx.base}/mcp/${ctx.tenant.id}`), {
+    requestInit: { headers: { Authorization: `Bearer ${ctx.client.credential}` } },
+  }));
+  const work = sdk.callTool({ name: 'request_browser_access', arguments: {
+    device_id: device.device.device_id, description: 'Choose a Strava tab', wait_timeout_seconds: 60,
+  } });
+  const request = await connection.next('approval.request');
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 80, capabilities: [...OPERATIONS] };
+  connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
+    signature: await sign(device.key.privateKey, grantPayload(grant)) }));
+  const shared = await work;
+  assert.equal(JSON.parse(shared.content[0].text).tab_handle, grant.target_id);
+  const action = sdk.callTool({ name: 'get_text', arguments: {
+    target_id: grant.target_id, selector: 'body', description: 'Read the visible page',
+  } });
+  const command = await connection.next('command');
+  assert.equal(command.description, 'Read the visible page');
+  await ready(connection, command);
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
+    target_id: grant.target_id, result: { text: 'Page contents' } }));
+  assert.equal(JSON.parse((await action).content[0].text).text, 'Page contents');
+});
+
+test('credential rotation cancels a pending sharing wait before a new grant can be created', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const work = ctx.app.bridge.waitAccess(ctx.client.id, device.device.device_id, 'Choose a tab', 60_000, null, ctx.tenant.id);
+  const rejected = assert.rejects(work, /NOT_AUTHORIZED/);
+  await connection.next('approval.request');
+  const response = await ctx.request(`/dashboard/tenants/${ctx.tenant.id}/rotate`,
+    { client_id: ctx.client.id, csrf: ctx.session.csrf }, ownerHeaders(ctx));
+  assert.equal(response.status, 200);
+  await rejected;
+  assert.equal(ctx.app.bridge.requests.size, 0);
+  assert.equal(ctx.app.bridge.requestCredentials.size, 0);
+  assert.equal(ctx.app.bridge.grants.size, 0);
+  assert.equal(ctx.app.bridge.connections.size, 1);
+});
+
+test('HTTP cancellation removes a pending sharing prompt instead of waiting for the human timeout', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const controller = new AbortController();
+  const http = fetch(`${ctx.base}/mcp/${ctx.tenant.id}`, {
+    method: 'POST', signal: controller.signal,
+    headers: { Authorization: `Bearer ${ctx.client.credential}`, 'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: {
+      name: 'request_browser_access', arguments: { device_id: device.device.device_id, description: 'Choose a tab' },
+    } }),
+  });
+  const rejected = assert.rejects(http, error => error.name === 'AbortError');
+  await connection.next('approval.request');
+  controller.abort();
+  await rejected;
+  assert.equal((await connection.next('approval.cancel')).reason, 'COMMAND_CANCELLED');
+  assert.equal(ctx.app.bridge.requests.size, 0);
+  assert.equal(ctx.app.bridge.shareWaiters.size, 0);
+});
+
+test('successful results before execution authorization fail closed', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const grant = await activate(ctx, device, connection);
+  const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'get_text', { selector: 'body' });
+  const rejected = assert.rejects(work, /NOT_AUTHORIZED/);
+  const command = await connection.next('command');
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
+    target_id: grant.target_id, result: 'not approved' }));
+  await rejected;
+  assert.equal(ctx.app.bridge.grants.size, 0);
+});
+
+test('duplicate ready cannot produce duplicate execution authorization', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const grant = await activate(ctx, device, connection);
+  const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' });
+  const command = await connection.next('command');
+  await ready(connection, command);
+  const call = ctx.app.bridge.calls.get(command.request_id);
+  assert.equal(call.phase, 'executing');
+  const original = call.execute;
+  let executions = 0;
+  call.execute = () => { executions++; original(); };
+  connection.ws.send(JSON.stringify({ type: 'command.ready', request_id: command.request_id, target_id: grant.target_id }));
+  connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id, target_id: grant.target_id,
+    result: { clicked: true } }));
+  assert.deepEqual(await work, { clicked: true });
+  assert.equal(executions, 0);
+});
+
+test('streamed human waits send content-free keepalive comments and disconnect cleans up the prompt', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: Date.now() });
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device, { pong: false });
+  const controller = new AbortController();
+  const http = fetch(`${ctx.base}/mcp/${ctx.tenant.id}`, {
+    method: 'POST', signal: controller.signal,
+    headers: { Authorization: `Bearer ${ctx.client.credential}`, 'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: {
+      name: 'request_browser_access', arguments: { device_id: device.device.device_id, description: 'Private task description' },
+    } }),
+  });
+  await connection.next('approval.request');
+  const session = ctx.app.bridge.connections.get(device.device.device_id);
+  t.mock.timers.tick(10_000); ctx.app.bridge.refreshLiveness(session);
+  t.mock.timers.tick(5_000);
+  const response = await http;
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/event-stream/);
+  const reader = response.body.getReader();
+  const chunk = await reader.read();
+  const text = new TextDecoder().decode(chunk.value);
+  assert(text.includes(': waiting for browser interaction'));
+  assert(!text.includes('Private task description'));
+  controller.abort();
+  await reader.cancel().catch(error => {
+    if (error.name !== 'AbortError') throw error;
+  });
+  await connection.next('approval.cancel');
+  assert.equal(ctx.app.bridge.shareWaiters.size, 0);
+  t.mock.timers.reset();
 });

@@ -61,6 +61,14 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     start: async flow => `${issuer}/authorize?state=${flow.state}`,
     finish: async () => ({ issuer, subject: 'owner' }),
   });
+  const send = app.bridge.send.bind(app.bridge);
+  app.bridge.send = (session, message) => {
+    if (['approval.request', 'command', 'command.execute'].includes(message.type)) {
+      // Exercise the real approval/execution flow with a server clock two minutes ahead.
+      message = { ...message, expires_at: message.expires_at + 120_000 };
+    }
+    return send(session, message);
+  };
   const backend = await app.listen();
   const pageServer = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html');
@@ -215,6 +223,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     expect(screenshot.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
     expect(Buffer.from(screenshot.content[0].data, 'base64').subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
     await expect(shared.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
+    await expect(options.locator('#error')).toBeEmpty();
     expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('ON');
     expect(await worker.evaluate(() => chrome.action.getTitle({}))).toContain('Atlas can use');
     expect(JSON.stringify(text)).not.toContain('Stop sharing');

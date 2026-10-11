@@ -48,6 +48,14 @@ export function needsSetup(reason, identity) {
   return reason === 'install' && !identity;
 }
 
+export function localDeadline(message, field, limit, now) {
+  if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= 0) fail('INVALID_MESSAGE');
+  const duration = message[field];
+  if (duration === undefined) return message.expires_at;
+  if (!Number.isSafeInteger(duration) || duration <= 0 || duration > limit) fail('INVALID_MESSAGE');
+  return now + duration;
+}
+
 export function checkBinding(message, connection) {
   if (!connection || message.epoch !== connection.epoch ||
       !connection.tenant_id || message.tenant_id !== connection.tenant_id ||
@@ -94,7 +102,7 @@ export function errorCode(error) {
     'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE',
     'RESULT_TOO_LARGE', 'ENROLLMENT_EXPIRED', 'COMMAND_EXPIRED',
     'PERMISSION_REQUIRED', 'PROTECTION_UNAVAILABLE', 'INVALID_TENANT', 'INVALID_CONNECTION_LINK',
-    'INDICATOR_UNAVAILABLE', 'ACTION_DECLINED',
+    'INDICATOR_UNAVAILABLE', 'ACTION_DECLINED', 'COMMAND_CANCELLED',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

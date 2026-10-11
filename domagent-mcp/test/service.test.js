@@ -682,7 +682,8 @@ test('HTTP MCP waits for sharing and action approval with correct descriptions',
   } });
   const command = await connection.next('command');
   assert.equal(command.description, 'Read the visible page');
-  await ready(connection, command);
+  assert(Number.isSafeInteger(command.wait_timeout_ms) && command.wait_timeout_ms > 0 && command.wait_timeout_ms <= 600_000);
+  assert.equal((await ready(connection, command)).execution_timeout_ms, 25_000);
   connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
     target_id: grant.target_id, result: { text: 'Page contents' } }));
   assert.equal(JSON.parse((await action).content[0].text).text, 'Page contents');

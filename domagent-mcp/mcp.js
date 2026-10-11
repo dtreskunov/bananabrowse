@@ -31,7 +31,7 @@ export async function handleMcp(req, res, body, client, bridge) {
   const disconnected = new AbortController();
   const closed = () => { if (!res.writableFinished) disconnected.abort(); };
   res.on('close', closed);
-  const server = new Server({ name: 'domagent', version: '4.0.0-beta.1' }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'domagent', version: '4.0.0-beta.2' }, { capabilities: { tools: {} } });
   server.onerror = () => audit('mcp_protocol_failure', { client_id: client.id, code: 'PROTOCOL_FAILURE' });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {

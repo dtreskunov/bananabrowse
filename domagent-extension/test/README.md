@@ -1,5 +1,11 @@
 # Extension validation (protocol v3, collaborative-tab-v1)
 
+Actual-service Chrome and native Firefox shift server action timestamps two
+minutes ahead while retaining the bounded relative budgets. Overlay/trusted UI
+approvals, allow-all and human Done must still complete without a socket reset.
+Controller tests also cover a server behind the browser and malformed execution
+budgets. Physical Firefox pointer clicks remain an operator acceptance check. (protocol v3, collaborative-tab-v1)
+
 With the pinned service dependencies already installed, from the repository root:
 
 ```sh

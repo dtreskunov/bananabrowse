@@ -71,6 +71,13 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     start: async flow => `${issuer}/authorize?state=${flow.state}`,
     finish: async () => ({ issuer, subject: 'firefox-owner' }),
   });
+  const send = app.bridge.send.bind(app.bridge);
+  app.bridge.send = (session, message) => {
+    if (['approval.request', 'command', 'command.execute'].includes(message.type)) {
+      message = { ...message, expires_at: message.expires_at + 120_000 };
+    }
+    return send(session, message);
+  };
   const backend = await app.listen();
   const pageServer = http.createServer((req, res) => {
     if (req.url === '/redirect') {

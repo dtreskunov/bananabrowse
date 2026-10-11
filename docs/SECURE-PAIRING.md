@@ -1,6 +1,6 @@
 # Tenant-scoped pairing and deployment
 
-Service 4.0.0-beta.1 uses [collaborative tab sharing](COLLABORATIVE-BROWSING.md).
+The 4.0.0 service uses [collaborative tab sharing](COLLABORATIVE-BROWSING.md).
 It replaces dedicated tabs, capability checklists, and automatic login-page
 revocation. Identity setup remains; live connections now use wire protocol v3.
 

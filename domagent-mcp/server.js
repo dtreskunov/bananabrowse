@@ -236,7 +236,7 @@ export class BridgeServer {
       if (m.error) {
         const code = ['HANDOFF_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'TARGET_STALE',
           'NOT_AUTHORIZED', 'INVALID_ARGUMENTS', 'OPERATION_FAILED', 'OUTCOME_UNKNOWN',
-          'COMMAND_EXPIRED', 'COMMAND_CANCELLED', 'ACTION_DECLINED',
+          'COMMAND_EXPIRED', 'COMMAND_CANCELLED', 'ACTION_DECLINED', 'INVALID_MESSAGE',
           'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
         call.reject(new Fault(code));
@@ -306,6 +306,7 @@ export class BridgeServer {
       client_label: this.store.client(clientId).label, device_id: deviceId,
       epoch: this.epoch, connection_id: session.connection_id, nonce: token(),
       policy_id: POLICY_ID, expires_at: Date.now() + waitMs,
+      wait_timeout_ms: waitMs,
       description: description.trim(),
       protected_origins: this.config.protectedOrigins,
     };
@@ -454,10 +455,13 @@ export class BridgeServer {
             execute: () => {
               const call = this.calls.get(requestId);
               call.phase = 'executing';
+              audit('action_execution_started', { client_id: clientId, target_id: targetId,
+                request_id: requestId, operation, duration_ms: Date.now() - started });
               clearTimeout(timeout);
               timeout = setTimeout(() => cancel('OUTCOME_UNKNOWN'), EXECUTION_MS);
               if (!this.send(session, { type: 'command.execute', request_id: requestId,
-                target_id: targetId, expires_at: Date.now() + EXECUTION_MS })) cancel('BROWSER_OFFLINE');
+                target_id: targetId, expires_at: Date.now() + EXECUTION_MS,
+                execution_timeout_ms: EXECUTION_MS })) cancel('BROWSER_OFFLINE');
             },
           });
           if (signal?.aborted) { abort(); return; }
@@ -465,6 +469,7 @@ export class BridgeServer {
             type: 'command', request_id: requestId, target_id: targetId,
             client_id: clientId, operation, args, epoch: this.epoch, connection_id: grant.connection_id,
             description: description.trim(), expires_at: deadline,
+            wait_timeout_ms: Math.max(1, deadline - Date.now()),
           })) {
             this.endGrant(targetId, 'BROWSER_OFFLINE');
           }

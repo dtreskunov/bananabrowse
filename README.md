@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.0.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.0.0-beta.1)
+[v4.0.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.0.0-beta.2)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -71,6 +71,11 @@ Tool-call responses stream SSE with heartbeat comments during human waits;
 initialization/discovery remain JSON-compatible. Use an MCP-aware client.
 
 See [collaborative protocol details](docs/COLLABORATIVE-BROWSING.md).
+
+Extension `4.0.1` uses bounded local approval/execution budgets instead of requiring
+the laptop's clock to match the server. This fixes a valid Allow/Allow-all action
+being rejected as an invalid future deadline. Update both the server and extension;
+existing tenant identities and credentials are unchanged.
 
 ## Service and development
 

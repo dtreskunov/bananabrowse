@@ -19,6 +19,12 @@ const errors = {
   PAGE_UNAVAILABLE: 'Sharing stopped because the browser could not inspect this page.',
   TARGET_STALE: 'The selected tab or document changed. Review the new request before approving.',
   COMMAND_EXPIRED: 'This action expired. Ask your assistant for a fresh request.',
+  COMMAND_CANCELLED: 'The assistant cancelled this request. No new action will be started.',
+  ACTION_DECLINED: 'This request was declined. No action will be started.',
+  INVALID_MESSAGE: 'The action could not be started safely. Ask your assistant for a fresh request.',
+  INVALID_ARGUMENT: 'The requested action was incomplete or invalid. Ask your assistant to correct it.',
+  OUTCOME_UNKNOWN: 'The connection ended before the action was confirmed. It may already have happened; check the tab before trying again.',
+  CAPABILITY_UNAVAILABLE: 'This action is not supported on the current page or browser.',
   APPROVAL_REQUIRED: 'This sharing request ended. Ask your assistant to try again.',
 };
 

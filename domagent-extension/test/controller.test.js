@@ -89,6 +89,47 @@ test('v3 identity proofs preserve keys and require exact tenant/connection', asy
   assert(await verify(f.record.public_key, authPayload(f.challenge), f.socket.sent[1].signature));
   await assert.rejects(f.receive({ type: 'ping', tenant_id: 'other' }), /NOT_AUTHORIZED/);
 });
+test('approved actions execute with bounded local budgets despite server/browser clock skew', async t => {
+  for (const skew of [200, 120_000, -120_000]) {
+    const f = await fixture(t);
+    f.advance(200_000);
+    const request = { type: 'approval.request', ...binding, request_id: crypto.randomUUID(),
+      client_id: 'client-1', client_label: 'Atlas', description: 'Share a tab',
+      policy_id: POLICY_ID, nonce: 'request-nonce', protected_origins: [],
+      expires_at: f.controller.now() + 600_000 + skew, wait_timeout_ms: 600_000 };
+    await f.receive(request);
+    await f.controller.approve(request.request_id, 100);
+    const grant = [...f.controller.grants.values()][0];
+    await f.receive({ type: 'grant.active', tenant_id, client_id: grant.client_id, tab_id: 100, target_id: grant.target_id });
+    const action = command(f, grant, { expires_at: f.controller.now() + 600_000 + skew,
+      wait_timeout_ms: 600_000, operation: 'navigate', args: { url: 'https://ordinary.example/' } });
+    f.controller.enqueue(action);
+    f.controller.decide(grant.target_id, action.request_id, 'approve');
+    await f.receive({ type: 'command.execute', tenant_id, request_id: action.request_id,
+      target_id: grant.target_id, expires_at: f.controller.now() + 25_000 + skew, execution_timeout_ms: 25_000 });
+    await flush();
+    const result = f.socket.sent.find(message => message.type === 'result' && message.request_id === action.request_id);
+    assert.equal(result.error, undefined);
+    assert.equal(f.controller.phase, 'authenticated');
+    assert.equal(f.controller.grants.size, 1);
+    assert(f.calls.some(call => call[0] === 'execute'));
+  }
+});
+
+test('invalid execution budget rejects only its action without dropping the connection or another shared tab', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  await approve(f, 'client-2', 101);
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000, execution_timeout_ms: 25_001 });
+  assert.equal(f.socket.sent.at(-1).error.code, 'INVALID_MESSAGE');
+  assert.equal(f.controller.phase, 'authenticated');
+  assert.equal(f.controller.grants.size, 2);
+  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
+});
 test('native browser fetch has its global receiver', async t => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });

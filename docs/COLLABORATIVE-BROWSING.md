@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.0.0-beta.1 and extensions 4.0.0 use wire version 3 and policy
+Service 4.0.0-beta.2 and extensions 4.0.1 use wire version 3 and policy
 `collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
 selection, immediate-return sharing requests, and revoking login-page handoff.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -61,6 +61,13 @@ extension -> result (same request/target)
 The server rejects successful results before it issued execution. Late ready/results
 are discarded when cancelled/expired. A duplicate ready cannot execute twice.
 Queues stay bounded; they are not an unlimited approval backlog.
+
+Server `expires_at` is authoritative on the server. Sharing/command messages also
+carry bounded `wait_timeout_ms`, and execution authorization carries
+`execution_timeout_ms`. The extension measures those budgets on receipt using its
+own clock; laptop and server wall clocks need not agree. Delayed messages cannot
+extend server authority or make expired results acceptable. Invalid execution
+budgets fail the individual action, not every shared tab's socket.
 
 HTTP disconnect/MCP cancellation removes waiting work. `command.cancel` tells the
 extension which request ended. Before execution it is a cancelled/expired request;

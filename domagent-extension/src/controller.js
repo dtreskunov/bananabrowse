@@ -4,7 +4,7 @@ import {
 } from '../../shared/protocol.js';
 import {
   MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
-  errorCode, fail, id, originList, protectedUnion, text, validateCommand,
+  errorCode, fail, id, localDeadline, originList, protectedUnion, text, validateCommand,
 } from './security.js';
 
 export const LOCAL_END_REASONS = new Set([
@@ -351,6 +351,7 @@ export class Controller {
       text(message.client_label);
       text(message.description, 4096);
       text(message.nonce);
+      message.expires_at = localDeadline(message, 'wait_timeout_ms', HUMAN_WAIT_MS, this.now());
       if (message.policy_id !== POLICY_ID || !Number.isFinite(message.expires_at) ||
           message.expires_at <= this.now() || message.expires_at > this.now() + HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
       if (this.pending.size >= 32 || this.pending.has(message.request_id)) fail('INVALID_MESSAGE');
@@ -607,6 +608,7 @@ export class Controller {
   enqueue(message) {
     let grant;
     try {
+      message = { ...message, expires_at: localDeadline(message, 'wait_timeout_ms', HUMAN_WAIT_MS, this.now()) };
       grant = this.grants.get(message.target_id);
       if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
       validateCommand(message, grant, this.connection, this.protectedOrigins(), this.now());
@@ -696,8 +698,16 @@ export class Controller {
     // Late execute after local cancellation/stop never revives authority.
     if (!queued || queued.message.request_id !== message.request_id) return;
     if (queued.state !== 'ready') fail('APPROVAL_REQUIRED');
-    if (!Number.isSafeInteger(message.expires_at) || message.expires_at > this.now() + EXECUTION_MS) fail('INVALID_MESSAGE');
-    if (queued.deadline <= this.now() || message.expires_at <= this.now()) {
+    let deadline;
+    try {
+      deadline = localDeadline(message, 'execution_timeout_ms', EXECUTION_MS, this.now());
+      if (deadline > this.now() + EXECUTION_MS) fail('INVALID_MESSAGE');
+    } catch (error) {
+      this.report(error);
+      this.finishQueued(grant, queued, { code: errorCode(error) });
+      return;
+    }
+    if (queued.deadline <= this.now() || deadline <= this.now()) {
       this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
       return;
     }
@@ -705,7 +715,7 @@ export class Controller {
       this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
       return;
     }
-    queued.executionDeadline = message.expires_at;
+    queued.executionDeadline = deadline;
     queued.state = 'executing';
     this.present(grant);
     void this.runCommand(grant, queued);

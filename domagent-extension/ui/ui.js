@@ -26,6 +26,17 @@ const errors = {
   OUTCOME_UNKNOWN: 'The connection ended before the action was confirmed. It may already have happened; check the tab before trying again.',
   CAPABILITY_UNAVAILABLE: 'This action is not supported on the current page or browser.',
   APPROVAL_REQUIRED: 'This sharing request ended. Ask your assistant to try again.',
+  ELEMENT_NOT_FOUND: 'No matching element was found. Ask your assistant to inspect the page again.',
+  ELEMENT_AMBIGUOUS: 'More than one element matched. Ask your assistant to use a specific page reference.',
+  ELEMENT_STALE: 'That element was removed or its snapshot expired. Ask your assistant for a fresh page snapshot.',
+  ELEMENT_DISABLED: 'This control is disabled. Complete any required steps before trying again.',
+  ELEMENT_READONLY: 'This field is read-only.',
+  ELEMENT_NOT_VISIBLE: 'This control is not visible.',
+  ELEMENT_OBSCURED: 'Another element covers this control. Dismiss the covering dialog before trying again.',
+  ELEMENT_NOT_EDITABLE: 'This control does not support the requested operation.',
+  OPTION_NOT_FOUND: 'The requested option is not available in this control.',
+  WAIT_TIMEOUT: 'The page or control did not become ready in time. No waiting action was started.',
+  OPERATION_FAILED: 'The control did not keep the requested state. Check the page before trying again.',
 };
 
 function showError(error) {

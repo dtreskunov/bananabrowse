@@ -83,6 +83,12 @@ invalidates old queues, proofs, and grant authority before connecting the new pa
   `PAGE_UNAVAILABLE` ends unusable authority and requests fresh local approval.
 - Successful click/type acknowledgements can survive the navigation they caused;
   page results and work queued for the previous document stay invalid.
+- Snapshot/reference actions are limited to the top-level page and
+  open shadow roots. New snapshots invalidate old refs; replacement elements
+  never inherit an old ref. DOM input retains the current approval boundary.
+  Readiness waits recheck grant/cancellation/document binding before each
+  attempt, never replaying an executed mutation. `wait_for_page` follows
+  ordinary navigation without changing which tab is shared.
 - Firefox screenshot support requires `tabs.captureTab`; it is absent in the
   tested build, so capture is not advertised. Page CSP can deny supplied scripts.
 

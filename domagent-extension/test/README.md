@@ -53,6 +53,12 @@ The Chromium and Firefox engines and image must already be available.
   per-action approvals, forged page approval/allow-all/Done rejection, human
   login/navigation without grant loss, Done/Cancel, grant-scoped allow-all,
   stale-document rejection and wait-timeout cancellation.
+- Page actions run through actual HTTP MCP and the packaged Chrome
+  and native Firefox extensions: document-scoped snapshots, field-value redaction,
+  open-shadow-root references, ambiguous selectors, disabled/readonly/obscured
+  controls, element replacement, new-snapshot invalidation, navigation expiry,
+  fill/select/check/key/scroll, and explicit loaded-page results. Adapter unit
+  tests mock deadlines and verify cancellation cannot execute a waiting action.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

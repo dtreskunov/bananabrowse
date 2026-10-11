@@ -353,7 +353,9 @@ test('execution timeout never retries or advances another side effect', async t 
 test('selector/handoff errors retain sharing; inspection failure ends unusable grant', async t => {
   const f = await fixture(t);
   const { grant } = await approve(f);
-  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'HANDOFF_REQUIRED']) {
+  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'HANDOFF_REQUIRED',
+    'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
+    'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT', 'OPERATION_FAILED']) {
     f.adapter.execute = async () => { throw new Error(code); };
     assert.equal((await execute(f, grant, command(f, grant))).error.code, code);
     assert.equal(grant.state, 'active');
@@ -361,6 +363,32 @@ test('selector/handoff errors retain sharing; inspection failure ends unusable g
   f.adapter.execute = async () => { throw new Error('PAGE_UNAVAILABLE'); };
   await execute(f, grant, command(f, grant));
   assert.equal(f.controller.grants.size, 0);
+});
+test('page readiness follows ordinary navigation but targeted queued work remains document-bound', async t => {
+  const f = await fixture(t);
+  const oldCapabilities = f.adapter.capabilities();
+  f.adapter.capabilities = () => [...oldCapabilities, 'wait_for_page'];
+  const { grant } = await approve(f);
+  const ready = command(f, grant, { operation: 'wait_for_page' });
+  f.controller.enqueue(ready);
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/new');
+  assert.equal(grant.queue.length, 1);
+  f.adapter.execute = async (_grant, operation, _args, check) => {
+    assert.equal(operation, 'wait_for_page');
+    f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/new');
+    check();
+    return { state: 'loaded', document: 'new-document' };
+  };
+  f.controller.decide(grant.target_id, ready.request_id, 'approve');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: ready.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  await flush();
+  assert.equal(f.socket.sent.find(message => message.type === 'result' && message.request_id === ready.request_id).result.state, 'loaded');
+  const targeted = command(f, grant, { operation: 'click', args: { ref: 'e1', document: 'new-document' } });
+  f.controller.enqueue(targeted);
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/another');
+  assert.equal(f.socket.sent.find(message => message.type === 'result' && message.request_id === targeted.request_id).error.code, 'TARGET_STALE');
+  assert.equal(grant.state, 'active');
 });
 test('protected origins still end authority and retain redirect protection', async t => {
   const f = await fixture(t);

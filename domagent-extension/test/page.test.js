@@ -8,9 +8,10 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
   const originalLocation = globalThis.location;
   globalThis.location = { href: 'https://site.example/login' };
   globalThis.getComputedStyle = () => ({ visibility: 'visible' });
+  const body = { nodeType: 1, tagName: 'BODY', matches: () => false, getRootNode: () => ({}),
+    childNodes: [{ nodeType: 3, textContent: 'Login page' }] };
   globalThis.document = {
-    querySelectorAll: () => [{ getBoundingClientRect() { return { width: 20, height: 20 }; } }],
-    querySelector() { return { innerText: 'Login page', closest: () => null }; },
+    body, querySelectorAll: selector => selector === 'body' ? [body] : [],
   };
   try {
     assert.equal(pageHelper('inspect').url, 'https://site.example/login');
@@ -34,11 +35,10 @@ test('missing elements and invalid CSS selectors are distinct from a stale targe
   const originalDocument = globalThis.document;
   const selectors = [];
   globalThis.document = {
-    querySelectorAll: () => [],
-    querySelector(selector) {
+    querySelectorAll(selector) {
       selectors.push(selector);
       if (selector === 'button[') throw Object.assign(new Error('Invalid selector'), { name: 'SyntaxError' });
-      return null;
+      return [];
     },
   };
   try {

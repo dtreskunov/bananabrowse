@@ -11,6 +11,7 @@ export const LOCAL_END_REASONS = new Set([
   'OWNER_PAUSED', 'HANDOFF', 'REVOKED', 'TARGET_CLOSED', 'CAPABILITY_UNAVAILABLE',
 ]);
 const END_REASONS = new Set([...LOCAL_END_REASONS, 'OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'REPLACED']);
+const followsNavigation = operation => ['request_handoff', 'wait_for_page'].includes(operation);
 
 export class Controller {
   constructor({ adapter, keys, storage, inventoryStorage, extensionUrl,
@@ -657,8 +658,8 @@ export class Controller {
     }
     try {
       validateCommand(queued.message, grant, this.connection, this.protectedOrigins(), this.now());
-      if (!human && queued.documentGeneration !== grant.documentGeneration) fail('TARGET_STALE');
-      if (human) queued.documentGeneration = grant.documentGeneration;
+      if (!followsNavigation(queued.message.operation) && queued.documentGeneration !== grant.documentGeneration) fail('TARGET_STALE');
+      if (followsNavigation(queued.message.operation)) queued.documentGeneration = grant.documentGeneration;
       if (action === 'allow_all') grant.allowAll = true;
       queued.state = 'ready';
       this.send({ type: 'command.ready', request_id: requestId, target_id: targetId });
@@ -711,7 +712,8 @@ export class Controller {
       this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
       return;
     }
-    if (queued.message.operation !== 'request_handoff' && queued.documentGeneration !== grant.documentGeneration) {
+    if (!followsNavigation(queued.message.operation) &&
+        queued.documentGeneration !== grant.documentGeneration) {
       this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
       return;
     }
@@ -730,8 +732,8 @@ export class Controller {
       if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
       checkBinding(message, this.connection);
       if (this.now() >= queued.executionDeadline) fail('OUTCOME_UNKNOWN');
-      if (message.operation !== 'request_handoff' &&
-          (!after || !['navigate', 'click', 'type_text'].includes(message.operation)) &&
+      if (!followsNavigation(message.operation) &&
+          (!after || !['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'].includes(message.operation)) &&
           grant.documentGeneration !== queued.documentGeneration) fail('TARGET_STALE');
     };
     try {
@@ -773,7 +775,7 @@ export class Controller {
         grant.indicatorToken = null;
         grant.indicatorDocument = null;
         for (const queued of [...grant.queue]) {
-          if (queued.state !== 'executing' && queued.message.operation !== 'request_handoff') {
+          if (queued.state !== 'executing' && !followsNavigation(queued.message.operation)) {
             this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
           }
         }

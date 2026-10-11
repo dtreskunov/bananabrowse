@@ -13,6 +13,7 @@ const localRequire = createRequire(path.join(root, 'domagent-mcp/package.json'))
 const { test, expect, firefox } = localRequire('@playwright/test');
 const { Client } = localRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
+const { actionHtml, exerciseActions } = require('./action-fixtures.cjs');
 
 test('native Firefox: collaborative sharing, guarded decisions, persistent restart and no-UI heartbeat', async () => {
   test.setTimeout(180_000);
@@ -86,7 +87,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     if (req.url === '/csp') res.setHeader('Content-Security-Policy', "script-src 'self'");
     res.setHeader('Content-Type', 'text/html');
     res.end('<!doctype html><title>Native Firefox page</title><h1>Native owned page</h1>' +
-      '<input type="password"><div data-sitekey="fixture"></div><button id="explicit">Page control</button>');
+      '<input type="password"><div data-sitekey="fixture"></div><button id="explicit">Page control</button>' + actionHtml);
   });
   pageServer.listen(0, '127.0.0.1');
   await once(pageServer, 'listening');
@@ -188,7 +189,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     expect(advertised).toContain('evaluate_script');
     expect(advertised.includes('get_screenshot')).toBe(await evaluate('typeof browser.tabs.captureTab === "function"'));
     async function call(name, args = {}, decision = 'approve') {
-      if (name === 'get_text') args = { selector: 'body', ...args };
+      if (name === 'get_text' && !args.selector && !args.ref) args = { selector: 'body', ...args };
       const waiting = client.callTool({ name, arguments: {
         target_id: grant.target_id, description: `Native fixture ${name}`, ...args,
       } });
@@ -203,6 +204,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       return waiting;
     }
     expect(JSON.stringify(await call('get_text'))).toContain('Native owned page');
+    await exerciseActions(call);
     expect(JSON.parse((await call('evaluate_script', {
       script: '[typeof globalThis.browser?.runtime, typeof globalThis.chrome?.runtime]',
     })).content[0].text)).toEqual({ value: ['undefined', 'undefined'] });

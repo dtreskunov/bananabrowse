@@ -3,85 +3,216 @@ export function pageHelper(operation, args = {}) {
   const documentKey = '__domagentDocumentNonce';
   if (!globalThis[documentKey]) globalThis[documentKey] = crypto.randomUUID();
   if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
+  if (args.document && args.document !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
+  if (operation === 'inspect') return { url: location.href, document_nonce: globalThis[documentKey] };
+  const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1 };
   const marker = '[data-domagent-sharing]';
+  const parent = node => node.parentElement || node.getRootNode()?.host;
+  const ignored = element => {
+    for (let node = element; node; node = parent(node)) {
+      if (node.matches(marker)) return true;
+    }
+    return false;
+  };
   const visible = element => {
     const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
+    const style = getComputedStyle(element);
+    if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') return false;
+    for (let node = element; node; node = parent(node)) {
+      if (getComputedStyle(node).opacity === '0') return false;
+    }
+    return true;
   };
-  if (operation === 'inspect') return { url: location.href, document_nonce: globalThis[documentKey] };
-  const selector = args.selector;
+  const textOf = (element, limit = 10_000, redactEditable = false) => {
+    let remaining = limit;
+    const read = node => {
+      if (remaining <= 0) return '';
+      if (node.nodeType === 3) {
+        const value = node.textContent.slice(0, remaining);
+        remaining -= value.length;
+        return value;
+      }
+      if (node.nodeType !== 1 || ignored(node) || (redactEditable && node.isContentEditable) ||
+          node.matches('script,style,noscript,input,textarea,select')) return '';
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return '';
+      const assigned = node.assignedNodes?.({ flatten: true });
+      const children = assigned?.length ? assigned : (node.shadowRoot || node).childNodes;
+      return [...children].map(read).join('') +
+        (style.display === 'block' || node.tagName === 'BR' ? '\n' : '');
+    };
+    return read(element).trim().slice(0, limit);
+  };
+  const roots = [document];
+  const all = [];
+  const needsTree = !args.ref && (args.selector ||
+    ['get_page_snapshot', 'get_interactive_elements', 'clear_overlays'].includes(operation));
+  for (let index = 0; needsTree && index < roots.length; index++) {
+    const elements = roots[index].querySelectorAll('*');
+    if (all.length + elements.length > 20_000 || roots.length > 1000) return { error: 'RESULT_TOO_LARGE' };
+    for (const element of elements) {
+      if (ignored(element)) continue;
+      all.push(element);
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+    }
+  }
+  const roleOf = element => element.getAttribute('role')?.trim().split(/\s+/)[0] || ({
+    A: element.hasAttribute('href') ? 'link' : null, BUTTON: 'button',
+    TEXTAREA: 'textbox', SELECT: element.multiple ? 'listbox' : 'combobox',
+    INPUT: { checkbox: 'checkbox', radio: 'radio', range: 'slider', button: 'button',
+      submit: 'button', reset: 'button' }[element.type] || 'textbox',
+    H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading',
+  })[element.tagName] || (element.isContentEditable ? 'textbox' : null);
+  const nameOf = element => {
+    const labelled = element.getAttribute('aria-labelledby')?.split(/\s+/)
+      .map(id => element.getRootNode().getElementById(id)).filter(Boolean).map(label => textOf(label)).join(' ');
+    return (labelled || element.getAttribute('aria-label') ||
+      [...(element.labels || [])].map(label => textOf(label)).join(' ') ||
+      element.getAttribute('alt') || element.getAttribute('title') ||
+      (element.matches('input,textarea,select') || element.isContentEditable
+        ? element.getAttribute('placeholder') : textOf(element)) || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  };
+  const disabled = element => element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
+  const readonly = element => element.readOnly || element.getAttribute('aria-readonly') === 'true';
+  const editable = element => element.isContentEditable ||
+    element.matches('textarea,input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="hidden"])');
+  if (operation === 'get_page_snapshot') {
+    state.entries.clear();
+    const candidates = all.filter(element => roleOf(element) && visible(element));
+    const elements = candidates.slice(0, 500).map(element => {
+      const ref = `e${state.next++}`;
+      state.entries.set(ref, element);
+      const rect = element.getBoundingClientRect();
+      const row = {
+        ref, tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
+        disabled: disabled(element), readonly: Boolean(readonly(element)),
+        editable: editable(element) && !readonly(element) && !disabled(element),
+        in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
+      };
+      if (element.matches('input[type="checkbox"],input[type="radio"]')) row.checked = element.checked;
+      if (element.hasAttribute('aria-checked')) row.checked = element.getAttribute('aria-checked') === 'true';
+      if (element.matches('input,textarea,select') || element.isContentEditable) row.value_redacted = true;
+      return row;
+    });
+    return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
+      text: textOf(document.body, 10_000, true), elements, truncated: candidates.length > 500,
+      scope: 'top-level-and-open-shadow-roots', input_mode: 'dom' };
+  }
+  if (operation === 'get_interactive_elements') {
+    return { elements: all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') &&
+      visible(element)).slice(0, 500).map(element => {
+      const rect = element.getBoundingClientRect();
+      return { tag: element.tagName.toLowerCase(), id: element.id, type: element.getAttribute('type'),
+        text: nameOf(element), x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    }) };
+  }
+  if (operation === 'clear_overlays') {
+    all.filter(element => element.matches('[data-domagent-overlay]') && !element.querySelector(marker))
+      .forEach(element => element.remove());
+    return { cleared: true };
+  }
   let element;
-  try {
-    element = selector ? document.querySelector(selector) : document.body;
-  } catch (error) {
-    if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
-    throw error;
+  if (args.ref) {
+    element = state.entries.get(args.ref);
+    if (!element?.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+      return { error: 'ELEMENT_STALE' };
+    }
+  } else if (args.selector) {
+    let matches;
+    try {
+      matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
+    } catch (error) {
+      if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+      throw error;
+    }
+    if (matches.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+    element = matches[0];
+  } else element = operation === 'scroll' ? document.scrollingElement : document.body;
+  if (!element) return { error: 'ELEMENT_NOT_FOUND' };
+  if (operation === 'get_text') {
+    return { text: textOf(element, 200_000) };
   }
-  if (['click', 'type_text', 'get_text'].includes(operation) && !element) {
-    return { error: 'ELEMENT_NOT_FOUND' };
+  if (!visible(element)) return { error: 'ELEMENT_NOT_VISIBLE' };
+  if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
+  if (operation === 'type_text' && (!editable(element) || element.matches('input[type="file"]'))) {
+    return { error: 'ELEMENT_NOT_EDITABLE' };
   }
-  if (element?.closest(marker)) return { error: 'ELEMENT_NOT_FOUND' };
+  if (operation === 'type_text' && readonly(element)) return { error: 'ELEMENT_READONLY' };
+  if (operation === 'select_option' && !element.matches('select')) return { error: 'ELEMENT_NOT_EDITABLE' };
+  if (operation === 'set_checked' && !element.matches('input[type="checkbox"],input[type="radio"]')) {
+    return { error: 'ELEMENT_NOT_EDITABLE' };
+  }
+  if (operation === 'set_checked' && element.type === 'radio' && !args.checked) return { error: 'HANDOFF_REQUIRED' };
+  if (operation === 'scroll') {
+    element.scrollBy({ left: args.delta_x || 0, top: args.delta_y, behavior: 'instant' });
+    return { x: element.scrollLeft, y: element.scrollTop };
+  }
+  const link = element.closest('a[href]');
+  const labelControl = element.closest('label')?.control;
+  if (element.matches('input[type="file"]') || labelControl?.matches('input[type="file"]') ||
+      (link && (link.hasAttribute('download') || link.target === '_blank'))) return { error: 'HANDOFF_REQUIRED' };
+  element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+  const rect = element.getBoundingClientRect();
+  const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+  const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+  if (right <= left || bottom <= top) return { error: 'ELEMENT_NOT_VISIBLE' };
+  const x = (left + right) / 2, y = (top + bottom) / 2;
+  let hit = document.elementFromPoint(x, y);
+  while (hit?.shadowRoot) {
+    const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
+    if (!deeper || deeper === hit) break;
+    hit = deeper;
+  }
+  let reached = false;
+  for (let node = hit; node; node = parent(node)) {
+    if (node === element) { reached = true; break; }
+  }
+  if (!reached) return { error: 'ELEMENT_OBSCURED' };
   if (operation === 'click') {
-    const labelControl = element.closest('label')?.control;
-    if (!visible(element) || element.matches('input[type="file"]') ||
-        labelControl?.matches('input[type="file"]')) {
-      return { error: 'HANDOFF_REQUIRED' };
-    }
-    const target = element.closest('a[href]');
-    if (target && (target.hasAttribute('download') || target.target === '_blank')) {
-      return { error: 'HANDOFF_REQUIRED' };
-    }
-    element.scrollIntoView({ block: 'center' });
     element.click();
-    return { clicked: true };
+    return { clicked: true, input_mode: 'dom' };
+  }
+  if (operation === 'set_checked') {
+    if (element.checked !== args.checked) element.click();
+    if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
+    return { checked: element.checked, input_mode: 'dom' };
+  }
+  if (operation === 'select_option') {
+    const options = [...element.options].filter(option => option.value === args.value);
+    if (!options.length) return { error: 'OPTION_NOT_FOUND' };
+    if (options.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+    if (options[0].disabled || options[0].parentElement?.matches('optgroup:disabled')) {
+      return { error: 'ELEMENT_DISABLED' };
+    }
+    if (element.multiple) return { error: 'HANDOFF_REQUIRED' };
+    element.value = args.value;
+    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+    if (element.value !== args.value) return { error: 'OPERATION_FAILED' };
+    return { selected: args.value, input_mode: 'dom' };
+  }
+  if (operation === 'press_key') {
+    element.focus();
+    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: args.key, bubbles: true, composed: true, cancelable: true }));
+    element.dispatchEvent(new KeyboardEvent('keyup', { key: args.key, bubbles: true, composed: true, cancelable: true }));
+    return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
   }
   if (operation === 'type_text') {
-    if (!visible(element) || !element.matches('input,textarea,[contenteditable="true"]') ||
-        element.matches('input[type="file"]')) {
-      return { error: 'HANDOFF_REQUIRED' };
-    }
     element.focus();
+    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
     if (element.isContentEditable) element.textContent = args.text;
     else {
       const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, args.text);
     }
-    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
-    return { typed: true };
-  }
-  if (operation === 'get_text') {
-    // Read rendered text in place: detached clones fall back to textContent
-    // and expose scripts/hidden text that innerText would omit.
-    if (element.querySelector?.(marker)) {
-      const read = node => {
-        if (node.nodeType === 3) return node.textContent;
-        if (node.nodeType !== 1 || node.matches(marker)) return '';
-        const style = getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden' ||
-            ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(node.tagName)) return '';
-        return [...node.childNodes].map(read).join('') +
-          (style.display === 'block' || node.tagName === 'BR' ? '\n' : '');
-      };
-      return { text: read(element).slice(0, 200_000) };
+    if ((element.isContentEditable ? element.textContent : element.value) !== args.text) {
+      return { error: 'OPERATION_FAILED' };
     }
-    return { text: (element.innerText || element.textContent || '').slice(0, 200_000) };
-  }
-  if (operation === 'get_interactive_elements') {
-    return { elements: [...document.querySelectorAll('a,button,input,textarea,select,[role="button"]')]
-      .filter(element => !element.closest(marker) && visible(element)).slice(0, 500).map(element => {
-        const rect = element.getBoundingClientRect();
-        return { tag: element.tagName.toLowerCase(), id: element.id, type: element.getAttribute('type'),
-          text: (element.innerText || element.getAttribute('aria-label') || '').slice(0, 500),
-          x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-      }) };
-  }
-  // Remove only DomAgent's own markers; never guess which site UI is safe to remove.
-  if (operation === 'clear_overlays') {
-    document.querySelectorAll('[data-domagent-overlay]').forEach(element => {
-      if (!element.closest(marker) && !element.querySelector(marker)) element.remove();
-    });
-    return { cleared: true };
+    return { typed: true, input_mode: 'dom' };
   }
   return { error: 'CAPABILITY_UNAVAILABLE' };
 }

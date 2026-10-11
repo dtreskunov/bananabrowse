@@ -1,4 +1,4 @@
-import { OPERATIONS, navigationUrl } from '../../shared/protocol.js';
+import { OPERATIONS, PAGE_WAIT_MS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
 import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
 
@@ -308,7 +308,24 @@ export class BrowserAdapter {
   }
 
   async execute(grant, operation, args, checkCurrent) {
+    if (!validOperationArgs(operation, args)) fail('INVALID_ARGUMENT');
     const tabId = grant.tabId;
+    if (operation === 'wait_for_page') {
+      const deadline = Date.now() + (args.timeout_ms ?? PAGE_WAIT_MS);
+      while (true) {
+        checkCurrent();
+        const tab = await this.api.tabs.get(tabId);
+        navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
+        checkCurrent();
+        if (tab.status === 'complete' && !tab.pendingUrl) {
+          const page = await this.inspect(tabId, grant.protected_origins);
+          checkCurrent();
+          return { state: 'loaded', url: page.url, document: page.document_nonce };
+        }
+        if (Date.now() >= deadline) fail('WAIT_TIMEOUT');
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+      }
+    }
     let context;
     if (operation === 'evaluate_script' && this.browserName === 'chrome') {
       const tree = await this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree');
@@ -370,6 +387,19 @@ export class BrowserAdapter {
       }
       return boundedResult({ mimeType: 'image/png', data: screenshot.split(',')[1] });
     }
-    return this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce });
+    const waitable = ['click', 'type_text', 'get_text', 'select_option', 'set_checked', 'press_key', 'scroll'].includes(operation);
+    const deadline = Date.now() + (args.timeout_ms ?? (waitable ? 3000 : 0));
+    while (true) {
+      checkCurrent();
+      try {
+        return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce });
+      } catch (error) {
+        const retryable = ['ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
+          'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'OPTION_NOT_FOUND'].includes(error.code);
+        if (!waitable || !retryable || args.timeout_ms === 0) throw error;
+        if (Date.now() >= deadline) fail('WAIT_TIMEOUT');
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+      }
+    }
   }
 }

@@ -223,3 +223,76 @@ test('failed document inspection is not an optional-operation capability failure
   f.api.scripting.executeScript = async () => [{ error: new Error('Document execution failed') }];
   await assert.rejects(f.adapter.inspect(100, grant.protected_origins), /PAGE_UNAVAILABLE/);
 });
+
+test('actionability waits use the configured deadline and never retry a mutation after execution', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, protected_origins: [] };
+  let attempts = 0;
+  f.api.scripting.executeScript = async ({ args }) => {
+    if (args[0] === 'inspect') return [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
+    attempts++;
+    return [{ result: attempts < 3 ? { error: 'ELEMENT_DISABLED' } : { clicked: true } }];
+  };
+  const work = f.adapter.execute(grant, 'click', { selector: 'button', timeout_ms: 100 }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 1);
+  t.mock.timers.tick(50);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 2);
+  t.mock.timers.tick(50);
+  assert.deepEqual(await work, { clicked: true });
+  assert.equal(attempts, 3);
+
+  f.api.scripting.executeScript = async ({ args }) => [{ result: args[0] === 'inspect'
+    ? { url: 'https://site.example/', document_nonce: 'document-1' } : { error: 'OPERATION_FAILED' } }];
+  await assert.rejects(f.adapter.execute(grant, 'click', { selector: 'button' }, () => {}), /OPERATION_FAILED/);
+});
+
+test('readiness deadlines and cancellation during waits are enforced without executing later work', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, protected_origins: [] };
+  let attempts = 0;
+  f.api.scripting.executeScript = async ({ args }) => {
+    if (args[0] === 'inspect') return [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
+    attempts++;
+    return [{ result: { error: 'ELEMENT_NOT_FOUND' } }];
+  };
+  const expired = f.adapter.execute(grant, 'click', { selector: '#missing', timeout_ms: 50 }, () => {});
+  const rejected = assert.rejects(expired, /WAIT_TIMEOUT/);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(50);
+  await rejected;
+  assert.equal(attempts, 2);
+
+  let cancelled = false;
+  const waiting = f.adapter.execute(grant, 'type_text', { selector: '#missing', text: 'not typed' }, () => {
+    if (cancelled) throw new Error('APPROVAL_REQUIRED');
+  });
+  const stopped = assert.rejects(waiting, /APPROVAL_REQUIRED/);
+  await new Promise(resolve => setImmediate(resolve));
+  const before = attempts;
+  cancelled = true;
+  t.mock.timers.tick(50);
+  await stopped;
+  assert.equal(attempts, before);
+});
+
+test('wait_for_page distinguishes loaded state from navigation started and blocks protected destinations', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  let loading = true;
+  f.api.tabs.get = async () => ({ url: 'https://site.example/', status: loading ? 'loading' : 'complete' });
+  f.api.scripting.executeScript = async () => [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
+  const waiting = f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 100 }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  loading = false;
+  t.mock.timers.tick(50);
+  assert.deepEqual(await waiting, { state: 'loaded', url: 'https://site.example/', document: 'document-1' });
+  loading = true;
+  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}), /WAIT_TIMEOUT/);
+  f.api.tabs.get = async () => ({ pendingUrl: 'https://control.example/login', status: 'loading' });
+  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', {}, () => {}), /HANDOFF_REQUIRED/);
+});

@@ -11,6 +11,7 @@ const localRequire = createRequire(path.join(root, 'domagent-mcp/package.json'))
 const { test, expect, chromium } = localRequire('@playwright/test');
 const { Client } = localRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
+const { actionHtml, exerciseActions } = require('./action-fixtures.cjs');
 
 test('real Chrome extension and actual service: guided setup, automatic pairing, sharing and tenant switching', async () => {
   const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/store.js')).href);
@@ -73,6 +74,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
   const pageServer = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html');
     res.end('<!doctype html><title>Actual service page</title><h1>Real MCP owned page</h1>' +
+      actionHtml +
       (req.url === '/login' ? '<input type="password" id="password"><p>Login page with CAPTCHA</p><div data-sitekey="fixture"></div>' : ''));
   });
   pageServer.listen(0, '127.0.0.1');
@@ -195,7 +197,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
       .some(tab => tab.id === target.tabId && tab.url.startsWith(pageOrigin))).toBe(true);
     let testedSyntheticApproval = false;
     async function approved(name, args = {}, decision = 'Approve') {
-      if (name === 'get_text') args = { selector: 'body', ...args };
+      if (name === 'get_text' && !args.selector && !args.ref) args = { selector: 'body', ...args };
       const call = client.callTool({ name, arguments: { target_id: target.target_id,
         description: `Please ${name} on my selected website`, ...args } });
       await expect(options.locator('#targets')).toContainText(`Please ${name}`);
@@ -218,6 +220,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     const text = await approved('get_text', { selector: 'body' });
     expect(text.isError).not.toBe(true);
     expect(JSON.stringify(text)).toContain('Real MCP owned page');
+    await exerciseActions(approved);
     const screenshot = await approved('get_screenshot');
     expect(screenshot.isError).not.toBe(true);
     expect(screenshot.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });

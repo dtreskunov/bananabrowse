@@ -276,7 +276,9 @@ test('selector errors remain specific and failed inspection does not disrupt ano
   const otherDevice = await enroll(other);
   const otherConnection = await connect(other, otherDevice);
   const otherGrant = await activate(other, otherDevice, otherConnection);
-  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'CAPABILITY_UNAVAILABLE', 'COMMAND_EXPIRED', 'PAGE_UNAVAILABLE']) {
+  for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'CAPABILITY_UNAVAILABLE', 'COMMAND_EXPIRED',
+    'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE',
+    'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT', 'RESULT_TOO_LARGE', 'PAGE_UNAVAILABLE']) {
     const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' });
     const rejected = assert.rejects(work, error => error.code === code);
     const command = await connection.next('command');
@@ -321,6 +323,16 @@ test('real HTTP MCP authenticates every request and rejects credentials on anoth
   await sdk.connect(new StreamableHTTPClientTransport(new URL(`${ctx.base}/mcp/${ctx.tenant.id}`), {
     requestInit: { headers: { Authorization: `Bearer ${ctx.client.credential}` } },
   }));
+  const catalogue = await sdk.listTools();
+  for (const name of ['get_page_snapshot', 'select_option', 'set_checked', 'press_key', 'scroll', 'wait_for_page']) {
+    assert(catalogue.tools.some(tool => tool.name === name));
+  }
+  const invalid = await sdk.callTool({ name: 'set_checked', arguments: {
+    target_id: 'unused-target', selector: '#check', checked: 'false', description: 'Invalid boolean',
+  } });
+  assert.equal(invalid.isError, true);
+  assert.equal(JSON.parse(invalid.content[0].text).error, 'INVALID_ARGUMENTS');
+  assert.equal(ctx.app.bridge.calls.size, 0);
   const list = await sdk.listTools();
   assert(list.tools.some(tool => tool.name === 'evaluate_script'));
   assert(!list.tools.some(tool => tool.name === 'use_current_tab'));

@@ -1,4 +1,4 @@
-import { EXECUTION_MS, HUMAN_WAIT_MS, OPERATIONS, navigationUrl, serviceOrigin } from '../../shared/protocol.js';
+import { EXECUTION_MS, HUMAN_WAIT_MS, OPERATIONS, navigationUrl, serviceOrigin, validOperationArgs } from '../../shared/protocol.js';
 
 export const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
@@ -78,18 +78,7 @@ export function validateCommand(message, grant, connection, protectedOrigins, no
   if (message.operation !== 'request_handoff' && (!OPERATIONS.includes(message.operation) ||
       !grant.capabilities.includes(message.operation))) fail('CAPABILITY_UNAVAILABLE');
   const args = message.args;
-  if (!args || typeof args !== 'object' || Array.isArray(args)) fail('INVALID_ARGUMENT');
-  const fields = {
-    navigate: ['url'], click: ['selector'], type_text: ['selector', 'text'],
-    get_text: ['selector'], evaluate_script: ['script'], get_screenshot: [],
-    get_interactive_elements: [], clear_overlays: [], request_handoff: [],
-  }[message.operation];
-  if (Object.keys(args).some(key => !fields.includes(key))) fail('INVALID_ARGUMENT');
-  if ('selector' in args) text(args.selector, 4096);
-  if (['click', 'type_text'].includes(message.operation) && !args.selector) fail('INVALID_ARGUMENT');
-  if (message.operation === 'type_text' &&
-      (typeof args.text !== 'string' || args.text.length > 65_536)) fail('INVALID_ARGUMENT');
-  if (message.operation === 'evaluate_script') text(args.script, 65_536);
+  if (!validOperationArgs(message.operation, args)) fail('INVALID_ARGUMENT');
   if (message.operation === 'navigate') navigationUrl(text(args.url, 8192), protectedOrigins);
   return args;
 }
@@ -103,6 +92,9 @@ export function errorCode(error) {
     'RESULT_TOO_LARGE', 'ENROLLMENT_EXPIRED', 'COMMAND_EXPIRED',
     'PERMISSION_REQUIRED', 'PROTECTION_UNAVAILABLE', 'INVALID_TENANT', 'INVALID_CONNECTION_LINK',
     'INDICATOR_UNAVAILABLE', 'ACTION_DECLINED', 'COMMAND_CANCELLED',
+    'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
+    'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT',
+    'OPERATION_FAILED',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

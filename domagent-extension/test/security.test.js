@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   authPayload, connectionUrl, enrollmentPayload, grantPayload, parseConnectionUrl, sign, verify,
+  validOperationArgs, OPERATIONS,
 } from '../../shared/protocol.js';
 import {
   MAX_RESULT_BYTES, boundedResult, errorCode, isUiSender, needsSetup, protectedRegex, protectedUnion, validateCommand,
@@ -97,6 +98,32 @@ test('results are data-only and bounded', () => {
   assert.deepEqual(boundedResult({ value: '<script>chrome.runtime.sendMessage()</script>' }),
     { value: '<script>chrome.runtime.sendMessage()</script>' });
   assert.throws(() => boundedResult({ value: 'x'.repeat(MAX_RESULT_BYTES + 1) }), /RESULT_TOO_LARGE/);
+});
+
+test('operation schemas accept ref/document targets and typed actions without broadening authority', () => {
+  for (const operation of ['click', 'type_text', 'select_option', 'set_checked', 'press_key']) {
+    const fields = { type_text: { text: '' }, select_option: { value: '' },
+      set_checked: { checked: false }, press_key: { key: 'Enter' } }[operation] || {};
+    assert(validOperationArgs(operation, { selector: 'button', ...fields }));
+    assert(validOperationArgs(operation, { ref: 'e1', document: 'document-1', ...fields }));
+    for (const invalid of [
+      fields, { ref: 'e1', ...fields }, { document: 'document-1', ...fields },
+      { selector: 'button', ref: 'e1', document: 'document-1', ...fields },
+      { ref: 'invalid', document: 'document-1', ...fields },
+      { selector: 'button', ...fields, timeout_ms: 10_001 },
+      { selector: 'button', ...fields, tabId: 12 },
+    ]) assert.equal(validOperationArgs(operation, invalid), false);
+  }
+  assert.equal(validOperationArgs('set_checked', { selector: 'input', checked: 'false' }), false);
+  assert.equal(validOperationArgs('press_key', { selector: 'input', key: 'Control+L' }), false);
+  assert.equal(validOperationArgs('scroll', { delta_y: 50 }), true);
+  assert.equal(validOperationArgs('scroll', { delta_y: Infinity }), false);
+  assert.equal(validOperationArgs('wait_for_page', { timeout_ms: 0 }), true);
+  assert.equal(validOperationArgs('get_page_snapshot', { frameId: 1 }), false);
+  const snapshot = { ...command, operation: 'get_page_snapshot', args: {} };
+  assert.throws(() => validateCommand(snapshot, grant, binding, [origin]), /CAPABILITY_UNAVAILABLE/);
+  const extended = { ...grant, capabilities: [...OPERATIONS] };
+  assert.deepEqual(validateCommand(snapshot, extended, binding, [origin]), {});
 });
 
 function memoryStore() {

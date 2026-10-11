@@ -2,6 +2,26 @@
 
 This document describes how to cut a versioned release of DOMAgent and what happens automatically as a result.
 
+## Secure-pairing fork releases
+
+The `dtreskunov/domagent` secure-pairing branch currently publishes tested private
+betas manually. These releases contain compiled Chrome and Firefox ZIPs, a
+tracked-source service ZIP, and `SHA256SUMS`. Asset filenames use the service
+release version; the manifests carry the browser extension version (for example,
+service `4.1.0-beta.1`, extension `4.1.0`).
+
+Run the unit/MCP tests, build both extensions, run the real-browser suite, and
+check JavaScript before committing and tagging the exact tested revision.
+Package only the built extension directories and `git archive` source; never
+include runtime state, credentials, browser test profiles, or `node_modules`.
+Publish all assets together, download them again, and verify their hashes.
+Firefox ZIPs are unsigned temporary add-ons, not signed production XPIs.
+
+Manual beta checksums verify asset integrity, not SLSA build provenance. The
+upstream automated pipeline described below does not attest these manual builds.
+Do not claim a provenance level unless its actual attestation was produced and
+verified. Never force-update an existing release tag.
+
 ---
 
 ## What Gets Released

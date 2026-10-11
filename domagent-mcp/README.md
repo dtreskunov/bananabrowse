@@ -35,6 +35,12 @@ the shared session. Human waits default to five minutes (max ten), followed by a
 25-second execution budget. Configure client/proxy timeouts with headroom.
 See [collaborative protocol](../docs/COLLABORATIVE-BROWSING.md).
 
+Version 4.1.0-beta.1 adds document-bound snapshots, strict selector/reference targets,
+actionability waits, select/check/key/scroll operations, and explicit navigation
+completion. Install extension 4.1.0 to use these tools; older extensions do not
+advertise the new operations. DOM input, approval and tenant
+boundaries are unchanged.
+
 Run `npm test`, `npm run build`, and `npm run check`. See
 [browser tests](../domagent-extension/test/README.md) for real-browser validation
 and unsupported capability/physical-prompt qualification limits.

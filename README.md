@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.0.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.0.0-beta.2)
+[v4.1.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.1)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -71,6 +71,21 @@ Tool-call responses stream SSE with heartbeat comments during human waits;
 initialization/discovery remain JSON-compatible. Use an MCP-aware client.
 
 See [collaborative protocol details](docs/COLLABORATIVE-BROWSING.md).
+
+### Structured snapshots and reliable browser actions
+
+Service 4.1.0-beta.1 and extension 4.1.0 add `get_page_snapshot` with document-scoped element
+references and redacted field values. Actions support unique CSS selectors or
+snapshot references, readiness waits, and explicit stale/disabled/obscured errors.
+New tools include `select_option`, `set_checked`, `press_key`, `scroll`, and
+`wait_for_page`. Top-level pages and open shadow roots are supported; iframe and
+closed-shadow-root control remain out of scope.
+
+Input remains DOM-based in both browsers. `press_key` dispatches page keyboard
+events, not native keystrokes or browser default actions. The approval model and
+wire protocol remain unchanged. Install the updated extension ZIP linked above
+and explicitly share a tab again; existing pairing identities are retained.
+See [operation semantics and examples](docs/COLLABORATIVE-BROWSING.md#structured-snapshots-and-reliable-page-actions).
 
 Extension `4.0.1` uses bounded local approval/execution budgets instead of requiring
 the laptop's clock to match the server. This fixes a valid Allow/Allow-all action

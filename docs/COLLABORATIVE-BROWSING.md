@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.0.0-beta.2 and extensions 4.0.1 use wire version 3 and policy
+Service 4.1.0-beta.1 and extensions 4.1.0 use wire version 3 and policy
 `collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
 selection, immediate-return sharing requests, and revoking login-page handoff.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -105,6 +105,78 @@ No password/CAPTCHA heuristic automatically ends an otherwise accessible shared
 session. The agent should ask the user to enter credentials; unrestricted ordinary
 page scripts can still see DOM-visible secrets. This is disclosed behavior, not
 universal secret filtering.
+
+## Structured snapshots and reliable page actions
+
+Install extensions 4.1.0 from the 4.1.0-beta.1 release to use these additions.
+Existing device identities and credentials need no reset; share tabs again
+after updating. Older releases remain available for coordinated rollback.
+
+`get_page_snapshot({target_id, description})` returns a bounded DOM-derived
+snapshot: `document`, `url`, `title`, visible `text`, and up to 500 `elements`.
+Elements have an opaque `ref`, `role`, accessible-name approximation, tag,
+disabled/readonly/editable state, viewport membership and checked state where
+applicable. Snapshot text is capped at 10,000 characters; excessive DOM size
+returns `RESULT_TOO_LARGE`. Field values, including contenteditable values, are
+redacted from snapshots. This is not a native accessibility tree or a general
+secret-filtering guarantee for page text/scripts.
+
+The scope is the top-level document and open shadow roots only. Closed shadow
+roots and iframe documents are not exposed. References belong to the exact DOM
+element in that document. Navigation returns `TARGET_STALE`; a removed element
+or reference from an earlier snapshot returns `ELEMENT_STALE`. A new snapshot
+invalidates the previous reference set and never reuses its reference numbers.
+
+Targeted actions accept either `selector`, or both `ref` and `document`:
+
+```json
+{
+  "target_id": "<shared tab handle>",
+  "ref": "e3",
+  "document": "<document from snapshot>",
+  "description": "Fill the account nickname",
+  "text": "My nickname",
+  "timeout_ms": 3000
+}
+```
+
+CSS selectors search the top-level document and open shadow roots. Multiple
+matches fail with `ELEMENT_AMBIGUOUS`, never selecting the first arbitrarily.
+`get_text` can omit a target to read page text. Input actions require a target.
+`click`, `type_text`, `select_option`, `set_checked`, `press_key`, `get_text` and
+`scroll` default to a 3-second actionability wait, bounded by `timeout_ms`
+(0..10,000). Zero returns immediate readiness errors. A positive exhausted
+wait returns `WAIT_TIMEOUT`. Waiting for absent, disabled, readonly, invisible
+or obstructed controls never repeats an executed mutation. Invalid selectors,
+ambiguous/stale targets and unsupported operations fail immediately.
+
+Actions inspect and scroll the target into view, check the hit-test point and
+reject covered controls. No browser-wide input or raw CDP surface is added:
+
+- `type_text`: replace the field value and dispatch input/change events.
+- `select_option({value})`: select a unique enabled option in a single-select.
+- `set_checked({checked})`: set a native checkbox, or select a native radio.
+  Clearing a radio and multi-select operations require human assistance.
+- `press_key({key})`: dispatch synthetic DOM keydown/keyup for the documented
+  key enum. Browser defaults (form submission, Tab traversal, editing) and
+  browser shortcuts are not synthesized. Results explicitly report
+  `native_input:false` and `default_action_performed:false`. Prefer the semantic
+  click/fill/select/check actions when modifying native controls.
+- `scroll({delta_y, delta_x?})`: scroll the document or targeted element by a
+  bounded pixel delta.
+
+`navigate` retains its existing `navigation_started:true` acknowledgement.
+Call `wait_for_page({timeout_ms?})` to observe `state:"loaded"` with the current
+URL and document. It follows ordinary navigation under the same tab grant;
+protected destinations and cancellation still stop access. Its default wait
+is 10 seconds. Neither navigation completion nor a successful click implies
+that a website completed the business transaction.
+
+These operations use the same human approval and separate execution budget as
+existing tools. The shared operation definitions drive MCP schemas and both
+relay/extension argument validation. Old extensions advertise only their
+supported operations; new tools require installing the updated extension.
+Wire version 3 and tenant/device identities remain unchanged.
 
 ## Lifecycle and tests
 

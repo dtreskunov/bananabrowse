@@ -2,18 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
   VERSION, POLICY_ID, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
-  authPayload, grantPayload, verify, navigationUrl,
+  authPayload, grantPayload, verify, navigationUrl, validOperationArgs,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
 
 const ID = /^[a-zA-Z0-9_-]{8,128}$/;
 const END_REASONS = new Set(['OWNER_PAUSED', 'HANDOFF', 'REVOKED', 'TARGET_CLOSED', 'CAPABILITY_UNAVAILABLE']);
-const INPUTS = {
-  navigate: ['url'], click: ['selector'], type_text: ['selector', 'text'],
-  get_text: ['selector'], evaluate_script: ['script'],
-  get_screenshot: [], get_interactive_elements: [], clear_overlays: [], request_handoff: [],
-};
 
 export class BridgeServer {
   constructor(store, config) {
@@ -237,7 +232,10 @@ export class BridgeServer {
         const code = ['HANDOFF_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'TARGET_STALE',
           'NOT_AUTHORIZED', 'INVALID_ARGUMENTS', 'OPERATION_FAILED', 'OUTCOME_UNKNOWN',
           'COMMAND_EXPIRED', 'COMMAND_CANCELLED', 'ACTION_DECLINED', 'INVALID_MESSAGE',
-          'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE'].includes(m.error.code)
+          'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE', 'ELEMENT_AMBIGUOUS',
+          'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE',
+          'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT',
+          'RESULT_TOO_LARGE'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
         call.reject(new Fault(code));
         if (code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
@@ -386,10 +384,7 @@ export class BridgeServer {
     requireValue((OPERATIONS.includes(operation) || operation === 'request_handoff') &&
       args && typeof args === 'object' && !Array.isArray(args),
       'INVALID_ARGUMENTS');
-    const allowed = INPUTS[operation];
-    requireValue(Object.keys(args).every(key => allowed.includes(key)) &&
-      allowed.every(key => typeof args[key] === 'string' && args[key].length <= 65536),
-      'INVALID_ARGUMENTS');
+    requireValue(validOperationArgs(operation, args), 'INVALID_ARGUMENTS');
     const grant = this.grants.get(targetId);
     requireValue(grant && grant.client_id === clientId && (!tenant || grant.tenant_id === tenant) &&
       this.store.linked(clientId, grant.device_id, grant.tenant_id),

@@ -4,10 +4,62 @@ export const HEARTBEAT_MS = 5_000;
 export const LIVENESS_MS = 15_000;
 export const HUMAN_WAIT_MS = 600_000;
 export const EXECUTION_MS = 25_000;
-export const OPERATIONS = Object.freeze([
-  'navigate', 'click', 'type_text', 'get_text', 'evaluate_script',
-  'get_screenshot', 'get_interactive_elements', 'clear_overlays',
-]);
+export const PAGE_WAIT_MS = 10_000;
+const target = {
+  selector: { type: 'string', minLength: 1, maxLength: 4096 },
+  ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}$' },
+  document: { type: 'string', minLength: 8, maxLength: 128 },
+};
+const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS } };
+const targeted = { ...target, ...timeout };
+const text = { type: 'string', maxLength: 65_536 };
+const operation = (properties, required = [], needsTarget = false) => ({
+  properties, required, ...(needsTarget ? {
+    anyOf: [{ required: ['selector'] }, { required: ['ref', 'document'] }],
+  } : {}),
+});
+export const OPERATION_SCHEMAS = Object.freeze({
+  navigate: operation({ url: { type: 'string', minLength: 1, maxLength: 8192 } }, ['url']),
+  click: operation(targeted, [], true),
+  type_text: operation({ ...targeted, text }, ['text'], true),
+  get_text: operation(targeted),
+  evaluate_script: operation({ script: { ...text, minLength: 1 } }, ['script']),
+  get_screenshot: operation({}),
+  get_interactive_elements: operation({}),
+  get_page_snapshot: operation({}),
+  select_option: operation({ ...targeted, value: text }, ['value'], true),
+  set_checked: operation({ ...targeted, checked: { type: 'boolean' } }, ['checked'], true),
+  press_key: operation({ ...targeted, key: { type: 'string', enum: [
+    'Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'Backspace', 'Delete', ' ',
+  ] } }, ['key'], true),
+  scroll: operation({ ...targeted,
+    delta_x: { type: 'integer', minimum: -10_000, maximum: 10_000 },
+    delta_y: { type: 'integer', minimum: -10_000, maximum: 10_000 },
+  }, ['delta_y']),
+  wait_for_page: operation(timeout),
+  clear_overlays: operation({}),
+});
+export const OPERATIONS = Object.freeze(Object.keys(OPERATION_SCHEMAS));
+
+export function validOperationArgs(name, args) {
+  const spec = name === 'request_handoff' ? operation({}) : OPERATION_SCHEMAS[name];
+  if (!spec || !args || typeof args !== 'object' || Array.isArray(args)) return false;
+  if (Object.keys(args).some(key => !Object.hasOwn(spec.properties, key)) ||
+      spec.required.some(key => !Object.hasOwn(args, key))) return false;
+  if (args.ref !== undefined && (args.document === undefined || args.selector !== undefined)) return false;
+  if (args.document !== undefined && args.ref === undefined && args.selector === undefined) return false;
+  if (spec.anyOf && !spec.anyOf.some(choice => choice.required.every(key => Object.hasOwn(args, key)))) return false;
+  return Object.entries(args).every(([key, value]) => {
+    const field = spec.properties[key];
+    if (field.type === 'integer') return Number.isSafeInteger(value) && value >= field.minimum && value <= field.maximum;
+    if (typeof value !== field.type) return false;
+    if (typeof value === 'string' && (
+      value.length < (field.minLength || 0) || value.length > (field.maxLength || 4096) ||
+      (field.pattern && !new RegExp(field.pattern).test(value)))) return false;
+    return !field.enum || field.enum.includes(value);
+  });
+}
 
 export function tenantId(value) {
   if (typeof value !== 'string' || !/^t_[A-Za-z0-9_-]{22}$/.test(value)) {

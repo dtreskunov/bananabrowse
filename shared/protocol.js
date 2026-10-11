@@ -5,6 +5,18 @@ export const LIVENESS_MS = 15_000;
 export const HUMAN_WAIT_MS = 600_000;
 export const EXECUTION_MS = 25_000;
 export const PAGE_WAIT_MS = 10_000;
+export const DEFAULT_OUTPUT_BYTES = 16 * 1024;
+export const MAX_OUTPUT_BYTES = 64 * 1024;
+export const DEFAULT_TEXT_CHARS = 4000;
+export const MAX_TEXT_CHARS = 16_000;
+export const DEFAULT_ELEMENTS = 50;
+export const MAX_ELEMENTS = 100;
+const output = { max_output_bytes: { type: 'integer', minimum: 1024, maximum: MAX_OUTPUT_BYTES,
+  default: DEFAULT_OUTPUT_BYTES, description: 'Maximum UTF-8 bytes for the serialized MCP result, including its text-content wrapper. Default 16 KiB; hard maximum 64 KiB. Narrow the request before increasing.' } };
+const readText = { max_text_chars: { type: 'integer', minimum: 0, maximum: MAX_TEXT_CHARS,
+  default: DEFAULT_TEXT_CHARS, description: 'Maximum returned text characters; default 4000. Truncation is explicit. Prefer a focused selector.' } };
+const readElements = { max_elements: { type: 'integer', minimum: 1, maximum: MAX_ELEMENTS,
+  default: DEFAULT_ELEMENTS, description: 'Maximum returned elements; default 50. Truncation is explicit.' } };
 const target = {
   selector: { type: 'string', minLength: 1, maxLength: 4096 },
   ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}$' },
@@ -22,11 +34,12 @@ export const OPERATION_SCHEMAS = Object.freeze({
   navigate: operation({ url: { type: 'string', minLength: 1, maxLength: 8192 } }, ['url']),
   click: operation(targeted, [], true),
   type_text: operation({ ...targeted, text }, ['text'], true),
-  get_text: operation(targeted),
-  evaluate_script: operation({ script: { ...text, minLength: 1 } }, ['script']),
+  get_text: operation({ ...targeted, ...readText, ...output }),
+  evaluate_script: operation({ script: { ...text, minLength: 1,
+    description: 'JavaScript source/expression evaluated in the page, not a function body. Use document.title or (() => document.title)(); top-level return is invalid. Return only focused JSON data; page CSP may refuse evaluation.' }, ...output }, ['script']),
   get_screenshot: operation({}),
-  get_interactive_elements: operation({}),
-  get_page_snapshot: operation({}),
+  get_interactive_elements: operation({ ...readElements, ...output }),
+  get_page_snapshot: operation({ selector: target.selector, ...readText, ...readElements, ...output }),
   select_option: operation({ ...targeted, value: text }, ['value'], true),
   set_checked: operation({ ...targeted, checked: { type: 'boolean' } }, ['checked'], true),
   press_key: operation({ ...targeted, key: { type: 'string', enum: [

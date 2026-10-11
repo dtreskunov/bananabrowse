@@ -354,7 +354,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await command('navigate', { url: `${pageOrigin}/csp` });
     await waitForTab(state.targets[0].tabId);
     const cspEvaluation = await command('evaluate_script', { script: '41 + 1' });
-    if (browserName === 'firefox') expect(cspEvaluation.error.code).toBe('CAPABILITY_UNAVAILABLE');
+    if (browserName === 'firefox') expect(cspEvaluation.error.code).toBe('SCRIPT_POLICY_BLOCKED');
     else expect(cspEvaluation.result.value).toBe(42);
     expect((await command('get_text')).result.text).toContain('Owned page');
     await options.getByRole('button', { name: 'Stop sharing', exact: true }).click();

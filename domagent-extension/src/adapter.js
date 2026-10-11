@@ -1,5 +1,6 @@
-import { OPERATIONS, PAGE_WAIT_MS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
+import { OPERATIONS, PAGE_WAIT_MS, DEFAULT_OUTPUT_BYTES, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
+import { compactResult } from '../../shared/results.js';
 import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
 
 export class BrowserAdapter {
@@ -290,7 +291,8 @@ export class BrowserAdapter {
     }
     if (!response?.result) fail('TARGET_STALE');
     if (response.result.error) fail(response.result.error);
-    return { ...response.result,
+    return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements'].includes(operation)
+      ? compactResult(operation, response.result, args) : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}) };
   }
 
@@ -348,23 +350,33 @@ export class BrowserAdapter {
           expression: args.script, awaitPromise: true, returnByValue: true,
           userGesture: false, timeout: 10_000, uniqueContextId: context.uniqueId,
         });
-        if (response.exceptionDetails) fail('CAPABILITY_UNAVAILABLE');
-        if (response.result?.subtype === 'error') fail('CAPABILITY_UNAVAILABLE');
-        return boundedResult({ value: response.result?.value ?? null });
+        if (response.exceptionDetails || response.result?.subtype === 'error') {
+          const exception = response.exceptionDetails?.exception || response.result;
+          fail(exception?.className === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR');
+        }
+        if (response.result?.unserializableValue !== undefined || response.result?.type === 'function') {
+          fail('SCRIPT_SERIALIZATION_ERROR');
+        }
+        try {
+          return compactResult(operation, { value: response.result?.value ?? null }, args);
+        } catch (error) {
+          if (error.code === 'RESULT_TOO_LARGE') throw error;
+          fail('SCRIPT_SERIALIZATION_ERROR');
+        }
       }
       let responses;
       try {
         responses = await this.api.scripting.executeScript({
           target: document.document_id ? { tabId, documentIds: [document.document_id] } : { tabId, frameIds: [0] },
-          world: 'MAIN', func: pageEvaluate, args: [args.script],
+          world: 'MAIN', func: pageEvaluate, args: [args.script, args.max_output_bytes ?? DEFAULT_OUTPUT_BYTES],
         });
       } catch (error) {
         this.onWarning(error);
-        fail('CAPABILITY_UNAVAILABLE');
+        fail('SCRIPT_EXECUTION_UNAVAILABLE');
       }
-      if (!responses?.[0]?.result || responses[0].error) fail('CAPABILITY_UNAVAILABLE');
+      if (!responses?.[0]?.result || responses[0].error) fail('SCRIPT_EXECUTION_UNAVAILABLE');
       if (responses[0].result.error) fail(responses[0].result.error);
-      return boundedResult(responses[0].result);
+      return compactResult(operation, responses[0].result, args);
     }
     if (operation === 'get_screenshot') {
       if (this.browserName === 'chrome') {

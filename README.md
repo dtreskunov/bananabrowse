@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.1.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.1)
+[v4.1.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.2)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -86,6 +86,15 @@ events, not native keystrokes or browser default actions. The approval model and
 wire protocol remain unchanged. Install the updated extension ZIP linked above
 and explicitly share a tab again; existing pairing identities are retained.
 See [operation semantics and examples](docs/COLLABORATIVE-BROWSING.md#structured-snapshots-and-reliable-page-actions).
+
+Service 4.1.0-beta.2 and extension 4.1.1 make reads compact by default: 4000 text characters, 50
+elements, and a 16 KiB serialized text-result budget with a 64 KiB hard maximum.
+Explicit truncation flags prevent partial results being mistaken for complete
+pages. Focused snapshots/selectors and bounded opt-in limits replace repeated
+whole-page dumps. Script syntax, runtime, serialization and policy failures are
+reported separately. Install the updated release ZIP above to use focused
+snapshot arguments and the specific script errors. The server enforces output
+budgets even with an older extension.
 
 Extension `4.0.1` uses bounded local approval/execution budgets instead of requiring
 the laptop's clock to match the server. This fixes a valid Allow/Allow-all action

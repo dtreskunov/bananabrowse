@@ -14,6 +14,7 @@ const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sd
 const { actionHtml, exerciseActions } = require('./action-fixtures.cjs');
 
 test('real Chrome extension and actual service: guided setup, automatic pairing, sharing and tenant switching', async () => {
+  test.setTimeout(180_000);
   const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/store.js')).href);
   const { createApp } = await import(pathToFileURL(path.join(root, 'domagent-mcp/app.js')).href);
   const artifacts = path.join(root, 'domagent-extension/.browser-artifacts/service');

@@ -15,7 +15,7 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
   };
   try {
     assert.equal(pageHelper('inspect').url, 'https://site.example/login');
-    assert.deepEqual(pageHelper('get_text', { selector: 'body' }), { text: 'Login page' });
+    assert.deepEqual(pageHelper('get_text', { selector: 'body' }), { text: 'Login page', text_truncated: false, truncated: false });
   } finally {
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalComputed;
@@ -23,10 +23,17 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
   }
 });
 
-test('page eval returns structured data or an explicit unavailable result without privileged fallback', async () => {
+test('page eval distinguishes syntax/runtime/serialization errors and bounds encoded output', async () => {
   assert.deepEqual(await pageEvaluate('1 + 1'), { value: 2 });
   assert.deepEqual(await pageEvaluate('undefined'), { value: null });
-  assert.deepEqual(await pageEvaluate('throw new Error("CSP or runtime failure")'), { error: 'CAPABILITY_UNAVAILABLE' });
+  assert.deepEqual(await pageEvaluate('throw new Error("runtime failure")'), { error: 'SCRIPT_RUNTIME_ERROR' });
+  assert.deepEqual(await pageEvaluate('return document.title;'), { error: 'SCRIPT_SYNTAX_ERROR' });
+  assert.deepEqual(await pageEvaluate('1n'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
+  assert.deepEqual(await pageEvaluate('(() => { const x = {}; x.self = x; return x; })()'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
+  assert.deepEqual(await pageEvaluate('throw new EvalError("call to eval() blocked by CSP")'), { error: 'SCRIPT_POLICY_BLOCKED' });
+  assert.deepEqual(await pageEvaluate('"x".repeat(20000)'), { error: 'RESULT_TOO_LARGE' });
+  assert.deepEqual(await pageEvaluate('"😀".repeat(5000)'), { error: 'RESULT_TOO_LARGE' });
+  assert.deepEqual(await pageEvaluate('() => 1'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
   assert.deepEqual(await pageEvaluate('({ data: "<script>not markup</script>" })'),
     { value: { data: '<script>not markup</script>' } });
 });

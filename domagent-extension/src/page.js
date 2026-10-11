@@ -43,6 +43,11 @@ export function pageHelper(operation, args = {}) {
     };
     return read(element).trim().slice(0, limit);
   };
+  const textData = (element, redactEditable = false) => {
+    const limit = args.max_text_chars ?? 4000;
+    const sample = textOf(element, limit + 1, redactEditable);
+    return { text: sample.slice(0, limit), text_truncated: sample.length > limit };
+  };
   const roots = [document];
   const all = [];
   const needsTree = !args.ref && (args.selector ||
@@ -77,9 +82,26 @@ export function pageHelper(operation, args = {}) {
   const editable = element => element.isContentEditable ||
     element.matches('textarea,input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="hidden"])');
   if (operation === 'get_page_snapshot') {
+    let scope = document.body;
+    if (args.selector) {
+      let matches;
+      try {
+        matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
+      } catch (error) {
+        if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+        throw error;
+      }
+      if (matches.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+      if (!matches.length) return { error: 'ELEMENT_NOT_FOUND' };
+      [scope] = matches;
+    }
+    const inScope = element => {
+      for (let node = element; node; node = parent(node)) if (node === scope) return true;
+      return false;
+    };
     state.entries.clear();
-    const candidates = all.filter(element => roleOf(element) && visible(element));
-    const elements = candidates.slice(0, 500).map(element => {
+    const candidates = all.filter(element => inScope(element) && roleOf(element) && visible(element));
+    const elements = candidates.slice(0, args.max_elements ?? 50).map(element => {
       const ref = `e${state.next++}`;
       state.entries.set(ref, element);
       const rect = element.getBoundingClientRect();
@@ -94,17 +116,20 @@ export function pageHelper(operation, args = {}) {
       if (element.matches('input,textarea,select') || element.isContentEditable) row.value_redacted = true;
       return row;
     });
+    const text = textData(scope, true);
+    const elementsTruncated = candidates.length > elements.length;
     return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
-      text: textOf(document.body, 10_000, true), elements, truncated: candidates.length > 500,
+      ...text, elements, elements_truncated: elementsTruncated, truncated: elementsTruncated || text.text_truncated,
       scope: 'top-level-and-open-shadow-roots', input_mode: 'dom' };
   }
   if (operation === 'get_interactive_elements') {
-    return { elements: all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') &&
-      visible(element)).slice(0, 500).map(element => {
+    const candidates = all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') && visible(element));
+    const elements = candidates.slice(0, args.max_elements ?? 50).map(element => {
       const rect = element.getBoundingClientRect();
       return { tag: element.tagName.toLowerCase(), id: element.id, type: element.getAttribute('type'),
         text: nameOf(element), x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-    }) };
+    });
+    return { elements, truncated: candidates.length > elements.length, elements_truncated: candidates.length > elements.length };
   }
   if (operation === 'clear_overlays') {
     all.filter(element => element.matches('[data-domagent-overlay]') && !element.querySelector(marker))
@@ -130,7 +155,8 @@ export function pageHelper(operation, args = {}) {
   } else element = operation === 'scroll' ? document.scrollingElement : document.body;
   if (!element) return { error: 'ELEMENT_NOT_FOUND' };
   if (operation === 'get_text') {
-    return { text: textOf(element, 200_000) };
+    const text = textData(element);
+    return { ...text, truncated: text.text_truncated };
   }
   if (!visible(element)) return { error: 'ELEMENT_NOT_VISIBLE' };
   if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
@@ -282,13 +308,23 @@ export function sharingIndicator(details) {
 
 // Only injected into MAIN. A CSP denying page eval is an unsupported capability,
 // not a reason to fall back to the extension or content-script realm.
-export async function pageEvaluate(script) {
+export async function pageEvaluate(script, maxOutputBytes = 16 * 1024) {
+  let result;
   try {
-    const result = await (0, eval)(script);
-    const json = JSON.stringify(result === undefined ? null : result);
-    if (json.length > 4_000_000) return { error: 'RESULT_TOO_LARGE' };
-    return { value: JSON.parse(json) };
+    result = await (0, eval)(script);
+  } catch (error) {
+    if (error?.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(error.message || '')) {
+      return { error: 'SCRIPT_POLICY_BLOCKED' };
+    }
+    return { error: error?.name === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR' };
+  }
+  try {
+    if (typeof result === 'function' || typeof result === 'symbol') return { error: 'SCRIPT_SERIALIZATION_ERROR' };
+    const json = JSON.stringify({ value: result === undefined ? null : result });
+    const wrapped = JSON.stringify({ content: [{ type: 'text', text: json }] });
+    if (new TextEncoder().encode(wrapped).length > maxOutputBytes) return { error: 'RESULT_TOO_LARGE' };
+    return JSON.parse(json);
   } catch {
-    return { error: 'CAPABILITY_UNAVAILABLE' };
+    return { error: 'SCRIPT_SERIALIZATION_ERROR' };
   }
 }

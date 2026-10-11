@@ -59,6 +59,12 @@ The Chromium and Firefox engines and image must already be available.
   controls, element replacement, new-snapshot invalidation, navigation expiry,
   fill/select/check/key/scroll, and explicit loaded-page results. Adapter unit
   tests mock deadlines and verify cancellation cannot execute a waiting action.
+- Compact-output coverage checks default/maximum UTF-8 budgets including MCP
+  wrapper escaping, multibyte/control-character text, surrogate boundaries,
+  full-row truncation, oversized script rejection, focused snapshots and
+  server-side enforcement against oversized older-extension responses.
+  Chrome/native Firefox qualify specific script syntax/runtime errors; native
+  Firefox verifies page CSP refusal is distinct from unsupported capability.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

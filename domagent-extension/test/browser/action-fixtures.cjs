@@ -81,6 +81,40 @@ async function exerciseActions(call) {
   assert.equal(next.elements.some(element => element.ref === shadow.ref), false);
   await error('click', { ref: shadow.ref, document: snapshot.document }, 'ELEMENT_STALE');
   assert.equal((await result('wait_for_page')).state, 'loaded');
+  await result('evaluate_script', { script: `(() => {
+    const bulk = document.createElement('section');
+    bulk.id = 'bulk-fixture';
+    const text = document.createElement('p');
+    text.id = 'bulk-text'; text.textContent = '界😀\\\\\\n'.repeat(20000);
+    bulk.append(text);
+    for (let i = 0; i < 150; i++) {
+      const button = document.createElement('button');
+      button.textContent = 'Bulk button ' + i; bulk.append(button);
+    }
+    document.body.append(bulk);
+    return true;
+  })()` });
+  for (const name of ['get_page_snapshot', 'get_interactive_elements', 'get_text']) {
+    const response = await call(name, name === 'get_text' ? { selector: '#bulk-text' } : {});
+    assert.notEqual(response.isError, true);
+    assert(Buffer.byteLength(JSON.stringify(response)) <= 16384);
+    const data = JSON.parse(response.content[0].text);
+    assert.equal(data.truncated, true);
+    if (data.elements) assert(data.elements.length <= 50);
+    if (data.text) assert(data.text.length <= 4000);
+  }
+  const focused = await result('get_page_snapshot', { selector: '#scrollable', max_text_chars: 0 });
+  assert.equal(focused.text, '');
+  assert.equal(focused.elements.some(element => element.name.startsWith('Bulk button')), false);
+  const large = await call('evaluate_script', { script: '"x".repeat(100000)' });
+  assert.equal(large.isError, true);
+  assert.equal(JSON.parse(large.content[0].text).error, 'RESULT_TOO_LARGE');
+  const syntax = await call('evaluate_script', { script: 'return document.title;' });
+  assert.equal(syntax.isError, true);
+  assert.equal(JSON.parse(syntax.content[0].text).error, 'SCRIPT_SYNTAX_ERROR');
+  const runtime = await call('evaluate_script', { script: 'throw new Error("fixture runtime error")' });
+  assert.equal(runtime.isError, true);
+  assert.equal(JSON.parse(runtime.content[0].text).error, 'SCRIPT_RUNTIME_ERROR');
   await result('navigate', { url: `${snapshot.url}?document-change=1` });
   const loaded = await result('wait_for_page');
   assert.notEqual(loaded.document, snapshot.document);

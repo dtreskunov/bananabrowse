@@ -235,7 +235,8 @@ export class BridgeServer {
           'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE', 'ELEMENT_AMBIGUOUS',
           'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE',
           'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT',
-          'RESULT_TOO_LARGE'].includes(m.error.code)
+          'RESULT_TOO_LARGE', 'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
+          'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
         call.reject(new Fault(code));
         if (code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
@@ -362,16 +363,21 @@ export class BridgeServer {
       const grants = [...this.grants.values()].filter(g =>
         g.client_id === clientId && g.device_id === device.id);
       const grant = grants[0];
-      const pending = [...this.requests.values()].some(r =>
+      const pending = [...this.requests.values()].find(r =>
         r.client_id === clientId && r.device_id === device.id && r.expires_at > Date.now());
+      const connection = this.connections.get(device.id);
+      const connected = Boolean(connection && this.current(connection));
       let state = 'approval_required';
       if (grant) state = 'active';
-      else if (!this.connections.has(device.id)) state = 'offline';
+      else if (!connected) state = 'offline';
       else if (pending) state = 'pending';
       return {
         device_id: device.id, label: device.label,
         tenant_id: device.tenant_id,
         state,
+        connection_state: connected ? 'connected' : 'offline',
+        sharing_state: grant ? 'active' : 'none',
+        pending_request_id: pending?.request_id ?? null,
         target_id: grant?.target_id ?? null, capabilities: grant?.capabilities ?? [],
         shared_tabs: grants.map(g => ({ target_id: g.target_id, tab_handle: g.target_id,
           tab_id: g.tab_id, capabilities: g.capabilities })),

@@ -185,13 +185,39 @@ test('Firefox remote script is passed as data to MAIN only, not a content-messag
   const scripts = f.calls.filter(call => call[0] === 'script').map(call => call[1]);
   assert.equal(scripts[0].world, 'ISOLATED');
   assert.equal(scripts[1].world, 'MAIN');
-  assert.deepEqual(scripts[1].args, [script]);
+  assert.deepEqual(scripts[1].args, [script, 16384]);
   assert.deepEqual(scripts[1].target, { tabId: 100, frameIds: [0] });
   f.api.scripting.executeScript = async args => {
-    if (args.world === 'MAIN') return [{ result: { error: 'CAPABILITY_UNAVAILABLE' } }];
+    if (args.world === 'MAIN') return [{ result: { error: 'SCRIPT_POLICY_BLOCKED' } }];
     return [{ result: { url: 'https://site.example/' } }];
   };
-  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script }, () => {}), /CAPABILITY_UNAVAILABLE/);
+  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script }, () => {}), /SCRIPT_POLICY_BLOCKED/);
+});
+
+test('Firefox injection failures remain distinct from script and policy failures', async () => {
+  const f = fixture('firefox');
+  const grant = { tabId: 100, protected_origins: [] };
+  f.adapter.onWarning = () => {};
+  f.api.scripting.executeScript = async args => {
+    if (args.world === 'MAIN') throw new Error('Injection refused');
+    return [{ result: { url: 'https://site.example/' } }];
+  };
+  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: '1+1' }, () => {}), /SCRIPT_EXECUTION_UNAVAILABLE/);
+});
+
+test('Chrome distinguishes JavaScript errors and enforces the same output budget', async () => {
+  const f = fixture();
+  const grant = { tabId: 100, protected_origins: [] };
+  const original = f.api.debugger.sendCommand;
+  for (const name of ['SyntaxError', 'Error']) {
+    f.api.debugger.sendCommand = async (target, method, args) => method === 'Runtime.evaluate'
+      ? { exceptionDetails: { exception: { className: name } } } : original(target, method, args);
+    await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'invalid' }, () => {}),
+      name === 'SyntaxError' ? /SCRIPT_SYNTAX_ERROR/ : /SCRIPT_RUNTIME_ERROR/);
+  }
+  f.api.debugger.sendCommand = async (target, method, args) => method === 'Runtime.evaluate'
+    ? { result: { value: 'x'.repeat(20_000) } } : original(target, method, args);
+  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'big' }, () => {}), /RESULT_TOO_LARGE/);
 });
 
 test('Firefox screenshots capture the target tab or advertise unavailable; never the visible tab', async () => {

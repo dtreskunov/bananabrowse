@@ -238,7 +238,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     expect(capture.isError === true).toBe(!advertised.includes('get_screenshot'));
     expect((await call('navigate', { url: `${pageOrigin}/csp` })).isError).not.toBe(true);
     await expect.poll(() => evaluate(`browser.tabs.get(${grant.tabId}).then(tab => tab.status)`)).toBe('complete');
-    expect(JSON.parse((await call('evaluate_script', { script: '41 + 1' })).content[0].text)).toEqual({ error: 'CAPABILITY_UNAVAILABLE' });
+    expect(JSON.parse((await call('evaluate_script', { script: '41 + 1' })).content[0].text)).toEqual({ error: 'SCRIPT_POLICY_BLOCKED' });
     expect((await call('get_text')).isError).not.toBe(true);
     await call('navigate', { url: `${pageOrigin}/redirect` });
     await expect.poll(async () => (await state()).targets.length).toBe(0);

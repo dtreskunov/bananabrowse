@@ -37,6 +37,12 @@ const errors = {
   OPTION_NOT_FOUND: 'The requested option is not available in this control.',
   WAIT_TIMEOUT: 'The page or control did not become ready in time. No waiting action was started.',
   OPERATION_FAILED: 'The control did not keep the requested state. Check the page before trying again.',
+  RESULT_TOO_LARGE: 'The response exceeds its output budget. Ask your assistant to request a smaller, focused result.',
+  SCRIPT_POLICY_BLOCKED: 'This page blocks JavaScript evaluation. Your assistant can use snapshots or targeted text instead.',
+  SCRIPT_SYNTAX_ERROR: 'The supplied JavaScript is invalid. It must be an expression or script, not a function body.',
+  SCRIPT_RUNTIME_ERROR: 'The supplied JavaScript failed on this page.',
+  SCRIPT_SERIALIZATION_ERROR: 'The script result cannot be returned as JSON. Ask for plain JSON data.',
+  SCRIPT_EXECUTION_UNAVAILABLE: 'The browser could not run page JavaScript. Snapshots and targeted text may still work.',
 };
 
 function showError(error) {

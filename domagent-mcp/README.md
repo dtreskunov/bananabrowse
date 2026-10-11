@@ -41,6 +41,16 @@ completion. Install extension 4.1.0 to use these tools; older extensions do not
 advertise the new operations. DOM input, approval and tenant
 boundaries are unchanged.
 
+Version 4.1.0-beta.2 advertises compact-output guidance through MCP initialization
+instructions and tool schemas. Text results default to 16 KiB and never exceed
+64 KiB, including the serialized MCP content wrapper. Reads default to 4000
+characters/50 elements with explicit truncation. Prefer focused selectors before
+requesting larger limits. The server enforces output budgets independently of
+the extension. Explicit screenshots remain image content with separate limits.
+Install extension 4.1.1 for focused snapshot arguments and specific script errors.
+Device results separate connection, sharing, and pending-request state without
+removing legacy status fields. Existing identities and credentials need no reset.
+
 Run `npm test`, `npm run build`, and `npm run check`. See
 [browser tests](../domagent-extension/test/README.md) for real-browser validation
 and unsupported capability/physical-prompt qualification limits.

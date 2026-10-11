@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.1.0-beta.1 and extensions 4.1.0 use wire version 3 and policy
+Service 4.1.0-beta.2 and extensions 4.1.1 use wire version 3 and policy
 `collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
 selection, immediate-return sharing requests, and revoking login-page handoff.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -24,6 +24,16 @@ and supported capabilities. Every operation still uses an explicit `target_id`.
 `list_browser_targets` lists eligible devices and their `shared_tabs`, not unrelated
 tabs; compatibility fields `target_id/capabilities` describe the first shared tab.
 Sharing another tab is an explicit action and yields a distinct handle.
+
+Device results also separate `connection_state` (`connected`/`offline`),
+`sharing_state` (`active`/`none`), and `pending_request_id` (null without an
+outstanding sharing request). The legacy `state` remains available for existing
+clients: `approval_required` means connected but not sharing, not that a prompt
+is currently displayed. Sharing and connection are independent; a connected
+idle device needs a new explicit request before asking the user to approve.
+Grant capabilities enumerate page operations, not management/handoff tools.
+An advertised operation is browser-supported but may fail page policy checks.
+No additional unshared tab information is exposed by these fields.
 
 ## Actions
 
@@ -108,18 +118,60 @@ universal secret filtering.
 
 ## Structured snapshots and reliable page actions
 
-Install extensions 4.1.0 from the 4.1.0-beta.1 release to use these additions.
+Install extensions 4.1.1 from the 4.1.0-beta.2 release to use these additions.
 Existing device identities and credentials need no reset; share tabs again
 after updating. Older releases remain available for coordinated rollback.
 
-`get_page_snapshot({target_id, description})` returns a bounded DOM-derived
-snapshot: `document`, `url`, `title`, visible `text`, and up to 500 `elements`.
+`get_page_snapshot({target_id, description})` returns a compact DOM-derived
+snapshot: `document`, `url`, `title`, visible `text`, and element references.
 Elements have an opaque `ref`, `role`, accessible-name approximation, tag,
 disabled/readonly/editable state, viewport membership and checked state where
-applicable. Snapshot text is capped at 10,000 characters; excessive DOM size
-returns `RESULT_TOO_LARGE`. Field values, including contenteditable values, are
+applicable. Excessive DOM size returns `RESULT_TOO_LARGE`. Field values, including contenteditable values, are
 redacted from snapshots. This is not a native accessibility tree or a general
 secret-filtering guarantee for page text/scripts.
+
+### Compact output budgets (4.1.0-beta.2)
+
+Service 4.1.0-beta.2 and extensions 4.1.1 default to 4000 text characters and 50 elements rather than
+whole-page dumps. Textual MCP results have a default 16 KiB budget and a hard
+64 KiB maximum, measured as UTF-8 bytes of the serialized MCP result including
+its text-content wrapper and JSON escaping. JSON-RPC/SSE framing adds a small
+amount of transport overhead. Neither many calls in aggregate nor explicit
+image results are covered by the textual budget.
+
+Read tools accept `max_output_bytes` (1024..65536). `get_text` and
+`get_page_snapshot` accept `max_text_chars` (0..16000); snapshot and legacy
+element enumeration accept `max_elements` (1..100). The byte budget may reduce
+these requested counts further, particularly for multibyte/escaped text.
+Truncation is explicit in `truncated`, `text_truncated`, and
+`elements_truncated`. Text is clipped at a valid string boundary; rows are
+returned whole. Do not interpret a partial result as a full page or tree.
+
+Focus `get_page_snapshot` with a unique `selector` to inspect a relevant
+section instead of repeatedly requesting the entire page. Its refs still
+belong to that document, and every new snapshot invalidates the previous refs.
+`get_text` should normally target a specific selector/ref. Prefer these tools
+over scripts that return full DOM/HTML, whole-page text, or large arrays.
+Arbitrary script values, mutation receipts, and device lists cannot be safely
+truncated: oversized results return `RESULT_TOO_LARGE`, never partial JSON.
+The extension bounds reads before reporting them; the MCP server enforces
+the same budgets even when an older extension returns a larger result.
+New sizing/scoping arguments and specific script errors require the new
+extension; older extensions retain their existing argument/capability rules.
+Screenshots remain separate explicitly requested image content under their
+existing size bounds, not a text-output-budget exception for other operations.
+
+`evaluate_script` takes JavaScript source/expression, not a function body.
+`document.title` and `(() => document.title)()` are valid; a top-level
+`return document.title;` is invalid. Return only small, focused JSON data.
+New extensions distinguish `SCRIPT_SYNTAX_ERROR`, `SCRIPT_RUNTIME_ERROR`,
+`SCRIPT_SERIALIZATION_ERROR`, `SCRIPT_POLICY_BLOCKED`, and
+`SCRIPT_EXECUTION_UNAVAILABLE`. Error codes do not include page/source/exception
+contents. A recognizable Firefox eval-policy refusal is `SCRIPT_POLICY_BLOCKED`;
+generic browser injection failure is not presumed to be CSP. Browser support
+does not guarantee every page permits eval. Use snapshots/text instead of
+retrying or bypassing a policy refusal. Chrome runtime evaluation keeps its
+existing narrow page-context boundary.
 
 The scope is the top-level document and open shadow roots only. Closed shadow
 roots and iframe documents are not exposed. References belong to the exact DOM

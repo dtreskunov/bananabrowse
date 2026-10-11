@@ -239,9 +239,21 @@ test('tenant pairing permits requests, not control; targets stay client/tenant b
   const ctx = await setup(t);
   const other = another(ctx);
   const d = await enroll(ctx);
+  const offline = ctx.app.bridge.targets(ctx.client.id)[0];
+  assert.equal(offline.connection_state, 'offline');
+  assert.equal(offline.sharing_state, 'none');
+  assert.equal(offline.pending_request_id, null);
   const connection = await connect(ctx, d);
-  assert.equal(ctx.app.bridge.targets(ctx.client.id)[0].state, 'approval_required');
+  const idle = ctx.app.bridge.targets(ctx.client.id)[0];
+  assert.equal(idle.state, 'approval_required');
+  assert.equal(idle.connection_state, 'connected');
+  assert.equal(idle.sharing_state, 'none');
+  assert.equal(idle.pending_request_id, null);
   const grant = await activate(ctx, d, connection);
+  const active = ctx.app.bridge.targets(ctx.client.id)[0];
+  assert.equal(active.connection_state, 'connected');
+  assert.equal(active.sharing_state, 'active');
+  assert.equal(active.pending_request_id, null);
   assert.deepEqual(ctx.app.bridge.targets(other.client.id), []);
   await assert.rejects(ctx.app.bridge.operate(other.client.id, grant.target_id, 'click', { selector: 'button' }), /NOT_AUTHORIZED/);
   await assert.rejects(ctx.app.bridge.operate(ctx.client.id, undefined, 'get_text', {}), /INVALID_ARGUMENTS/);
@@ -267,6 +279,26 @@ test('connection replacement never inherits grants and an old close cannot remov
   assert.equal(ctx.app.bridge.connections.get(d.device.device_id).connection_id, second.authenticated.connection_id);
 });
 
+test('active sharing and an additional sharing prompt have independent status', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const connection = await connect(ctx, device);
+  const grant = await activate(ctx, device, connection);
+  const pending = ctx.app.bridge.requestAccess(ctx.client.id, device.device.device_id, true, ctx.tenant.id);
+  await connection.next('approval.request');
+  const status = ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0];
+  assert.equal(status.state, 'active');
+  assert.equal(status.connection_state, 'connected');
+  assert.equal(status.sharing_state, 'active');
+  assert.equal(status.pending_request_id, pending.request_id);
+  assert.equal(status.target_id, grant.target_id);
+  connection.ws.send(JSON.stringify({ type: 'approval.deny', request_id: pending.request_id }));
+  await connection.next('approval.cancel');
+  const after = ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0];
+  assert.equal(after.pending_request_id, null);
+  assert.equal(after.sharing_state, 'active');
+});
+
 test('selector errors remain specific and failed inspection does not disrupt another tenant', async t => {
   const ctx = await setup(t);
   const other = another(ctx);
@@ -278,7 +310,9 @@ test('selector errors remain specific and failed inspection does not disrupt ano
   const otherGrant = await activate(other, otherDevice, otherConnection);
   for (const code of ['ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'CAPABILITY_UNAVAILABLE', 'COMMAND_EXPIRED',
     'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE',
-    'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT', 'RESULT_TOO_LARGE', 'PAGE_UNAVAILABLE']) {
+    'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT', 'RESULT_TOO_LARGE',
+    'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR', 'SCRIPT_SERIALIZATION_ERROR',
+    'SCRIPT_EXECUTION_UNAVAILABLE', 'PAGE_UNAVAILABLE']) {
     const work = ctx.app.bridge.operate(ctx.client.id, grant.target_id, 'click', { selector: 'button' });
     const rejected = assert.rejects(work, error => error.code === code);
     const command = await connection.next('command');
@@ -324,9 +358,16 @@ test('real HTTP MCP authenticates every request and rejects credentials on anoth
     requestInit: { headers: { Authorization: `Bearer ${ctx.client.credential}` } },
   }));
   const catalogue = await sdk.listTools();
+  assert(sdk.getInstructions().includes('16 KiB'));
+  assert(sdk.getInstructions().includes('64 KiB'));
+  assert(sdk.getInstructions().includes('pending_request_id'));
+  assert(sdk.getInstructions().includes('not every MCP tool'));
   for (const name of ['get_page_snapshot', 'select_option', 'set_checked', 'press_key', 'scroll', 'wait_for_page']) {
     assert(catalogue.tools.some(tool => tool.name === name));
   }
+  assert(catalogue.tools.find(tool => tool.name === 'evaluate_script').description.includes('top-level'));
+  assert(catalogue.tools.find(tool => tool.name === 'get_text').inputSchema.properties.max_output_bytes.maximum === 65536);
+  assert(catalogue.tools.find(tool => tool.name === 'navigate').description.includes('retains sharing'));
   const invalid = await sdk.callTool({ name: 'set_checked', arguments: {
     target_id: 'unused-target', selector: '#check', checked: 'false', description: 'Invalid boolean',
   } });
@@ -564,6 +605,10 @@ test('sharing waits resolve only after a signed user-selected tab, and concurren
   assert.equal(request.description, 'Please select your tab');
   assert.equal(ctx.app.bridge.requests.size, 1);
   assert.equal(ctx.app.bridge.grants.size, 0);
+  const waiting = ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0];
+  assert.equal(waiting.connection_state, 'connected');
+  assert.equal(waiting.sharing_state, 'none');
+  assert.equal(waiting.pending_request_id, request.request_id);
   const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 42, capabilities: [...OPERATIONS] };
   connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
     signature: await sign(device.key.privateKey, grantPayload(grant)) }));
@@ -571,6 +616,7 @@ test('sharing waits resolve only after a signed user-selected tab, and concurren
   assert.equal(results[0].tab_handle, grant.target_id);
   assert.equal(results[1].tab_id, 42);
   assert.equal(ctx.app.bridge.shareWaiters.size, 0);
+  assert.equal(ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0].pending_request_id, null);
   await connection.next('grant.active');
   const otherGrant = await activate(ctx, device, connection, ctx.client, 43);
   assert.equal(ctx.app.bridge.grants.size, 2);
@@ -699,6 +745,40 @@ test('HTTP MCP waits for sharing and action approval with correct descriptions',
   connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
     target_id: grant.target_id, result: { text: 'Page contents' } }));
   assert.equal(JSON.parse((await action).content[0].text).text, 'Page contents');
+  for (const [name, result] of [
+    ['get_text', { text: '😀'.repeat(200_000) }],
+    ['get_page_snapshot', { document: 'document-one', text: 'x'.repeat(200_000),
+      elements: Array.from({ length: 500 }, (_, i) => ({ ref: `e${i + 1}`, name: 'x'.repeat(500) })) }],
+    ['evaluate_script', { value: 'x'.repeat(200_000) }],
+  ]) {
+    const work = sdk.callTool({ name, arguments: {
+      target_id: grant.target_id, description: 'Bounded output regression',
+      ...(name === 'evaluate_script' ? { script: '"large fixture"' } : {}),
+    } });
+    const pending = await connection.next('command');
+    await ready(connection, pending);
+    connection.ws.send(JSON.stringify({ type: 'result', request_id: pending.request_id,
+      target_id: grant.target_id, result }));
+    const response = await work;
+    assert(Buffer.byteLength(JSON.stringify(response)) <= 16384);
+    const returned = JSON.parse(response.content[0].text);
+    if (name === 'evaluate_script') {
+      assert.equal(response.isError, true);
+      assert.equal(returned.error, 'RESULT_TOO_LARGE');
+    } else {
+      assert.equal(response.isError, undefined);
+      assert.equal(returned.truncated, true);
+      if (returned.elements) assert(returned.elements.length <= 50);
+      assert(returned.text.length <= 4000);
+    }
+  }
+  for (const max_output_bytes of [0, 65537, '16384']) {
+    const response = await sdk.callTool({ name: 'get_text', arguments: {
+      target_id: grant.target_id, description: 'Reject invalid output limits', max_output_bytes,
+    } });
+    assert.equal(response.isError, true);
+    assert.equal(JSON.parse(response.content[0].text).error, 'INVALID_ARGUMENTS');
+  }
 });
 
 test('credential rotation cancels a pending sharing wait before a new grant can be created', async t => {

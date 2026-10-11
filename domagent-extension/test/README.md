@@ -65,6 +65,14 @@ The Chromium and Firefox engines and image must already be available.
   server-side enforcement against oversized older-extension responses.
   Chrome/native Firefox qualify specific script syntax/runtime errors; native
   Firefox verifies page CSP refusal is distinct from unsupported capability.
+- Latest feedback regressions reproduce the sharing banner covering text input
+  on a narrow page in Chrome and Firefox, then verify text/tel/email/search
+  actions while preserving a site's obstruction checks. Actual extensions fill
+  and submit a local form, verify the HTML POST echo under the same grant,
+  inspect title/non-rendered metadata and viewport/control flags, and preserve
+  detailed readiness timeout causes. Native Firefox also checks JSON POST
+  navigation: a supported document remains readable, or a browser-refused
+  document ends sharing without changing the response URL or repeating POST.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

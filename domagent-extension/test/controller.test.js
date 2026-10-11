@@ -364,6 +364,19 @@ test('selector/handoff errors retain sharing; inspection failure ends unusable g
   await execute(f, grant, command(f, grant));
   assert.equal(f.controller.grants.size, 0);
 });
+test('wait errors retain only fixed readiness diagnostics, not exception contents', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  f.adapter.execute = async () => {
+    throw Object.assign(new Error('private source or page detail'), {
+      code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_OBSCURED', timeout_ms: 100,
+    });
+  };
+  const result = await execute(f, grant, command(f, grant));
+  assert.deepEqual(result.error, { code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_OBSCURED', timeout_ms: 100 });
+  assert.equal(JSON.stringify(result).includes('private source'), false);
+  assert.equal(grant.state, 'active');
+});
 test('page readiness follows ordinary navigation but targeted queued work remains document-bound', async t => {
   const f = await fixture(t);
   const oldCapabilities = f.adapter.capabilities();

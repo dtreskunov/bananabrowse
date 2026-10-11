@@ -11,7 +11,7 @@ const localRequire = createRequire(path.join(root, 'domagent-mcp/package.json'))
 const { test, expect, chromium } = localRequire('@playwright/test');
 const { Client } = localRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
-const { actionHtml, exerciseActions } = require('./action-fixtures.cjs');
+const { actionHtml, exerciseActions, respondToForm } = require('./action-fixtures.cjs');
 
 test('real Chrome extension and actual service: guided setup, automatic pairing, sharing and tenant switching', async () => {
   test.setTimeout(180_000);
@@ -72,7 +72,8 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     return send(session, message);
   };
   const backend = await app.listen();
-  const pageServer = http.createServer((req, res) => {
+  const pageServer = http.createServer(async (req, res) => {
+    if (await respondToForm(req, res)) return;
     res.setHeader('Content-Type', 'text/html');
     res.end('<!doctype html><title>Actual service page</title><h1>Real MCP owned page</h1>' +
       actionHtml +

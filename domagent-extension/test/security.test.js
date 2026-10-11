@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   authPayload, connectionUrl, enrollmentPayload, grantPayload, parseConnectionUrl, sign, verify,
-  validOperationArgs, OPERATIONS,
+  validOperationArgs, OPERATIONS, validTargetId, waitErrorDetails,
 } from '../../shared/protocol.js';
 import {
   MAX_RESULT_BYTES, boundedResult, errorCode, isUiSender, needsSetup, protectedRegex, protectedUnion, validateCommand,
@@ -128,6 +128,21 @@ test('operation schemas accept ref/document targets and typed actions without br
   assert.throws(() => validateCommand(snapshot, grant, binding, [origin]), /CAPABILITY_UNAVAILABLE/);
   const extended = { ...grant, capabilities: [...OPERATIONS] };
   assert.deepEqual(validateCommand(snapshot, extended, binding, [origin]), {});
+});
+
+test('target shapes and timeout diagnostics are bounded and preserve legacy opaque tokens', () => {
+  assert.equal(validTargetId('not-a-uuid'), false);
+  assert.equal(validTargetId(crypto.randomUUID()), true);
+  assert.equal(validTargetId('a'.repeat(43)), true);
+  for (const invalid of [null, 12, 'a'.repeat(42), 'a'.repeat(44), 'a'.repeat(43) + '\n',
+    crypto.randomUUID() + '\n', 'https://site.example/']) {
+    assert.equal(validTargetId(invalid), false);
+  }
+  assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 3000 }),
+    { last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 3000 });
+  assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', last_error: 'private exception text', timeout_ms: 3000 }), {});
+  assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 10_001 }), {});
+  assert.deepEqual(waitErrorDetails({ code: 'OTHER', last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 3000 }), {});
 });
 
 function memoryStore() {

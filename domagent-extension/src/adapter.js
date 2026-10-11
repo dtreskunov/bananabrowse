@@ -1,4 +1,4 @@
-import { OPERATIONS, PAGE_WAIT_MS, DEFAULT_OUTPUT_BYTES, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
+import { OPERATIONS, PAGE_WAIT_MS, DEFAULT_OUTPUT_BYTES, READINESS_ERRORS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
 import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
@@ -400,16 +400,18 @@ export class BrowserAdapter {
       return boundedResult({ mimeType: 'image/png', data: screenshot.split(',')[1] });
     }
     const waitable = ['click', 'type_text', 'get_text', 'select_option', 'set_checked', 'press_key', 'scroll'].includes(operation);
-    const deadline = Date.now() + (args.timeout_ms ?? (waitable ? 3000 : 0));
+    const timeoutMs = args.timeout_ms ?? (waitable ? 3000 : 0);
+    const deadline = Date.now() + timeoutMs;
     while (true) {
       checkCurrent();
       try {
         return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce });
       } catch (error) {
-        const retryable = ['ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
-          'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'OPTION_NOT_FOUND'].includes(error.code);
+        const retryable = READINESS_ERRORS.includes(error.code);
         if (!waitable || !retryable || args.timeout_ms === 0) throw error;
-        if (Date.now() >= deadline) fail('WAIT_TIMEOUT');
+        if (Date.now() >= deadline) {
+          throw Object.assign(new Error('WAIT_TIMEOUT'), { code: 'WAIT_TIMEOUT', last_error: error.code, timeout_ms: timeoutMs });
+        }
         await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
       }
     }

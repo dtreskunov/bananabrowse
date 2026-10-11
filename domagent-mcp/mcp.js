@@ -1,14 +1,14 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, validOperationArgs } from '../shared/protocol.js';
+import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TARGET_ID_SCHEMA, validOperationArgs, waitErrorDetails } from '../shared/protocol.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
 import { compactResult, textResult } from '../shared/results.js';
 
 const NOTES = {
   get_page_snapshot: 'Preferred first read. Returns a compact DOM summary, not a full tree: 4000 text characters and 50 elements by default, within 16 KiB. Use selector to focus a section. Read truncated/text_truncated/elements_truncated before assuming completeness. Field values are redacted.',
-  get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters within 16 KiB. Truncation is explicit; larger requests are opt-in and cannot exceed 64 KiB.',
-  get_interactive_elements: 'Legacy geometry list; prefer get_page_snapshot for actionable refs. Default 50 elements within 16 KiB. Check truncation.',
+  get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters within 16 KiB. Truncation is explicit. HTML head > title returns bounded title metadata; other non-rendered/script/style content is not exposed and has rendered:false/empty_reason. Use timeout_ms:0 to probe an absent selector immediately; positive waits return WAIT_TIMEOUT with last_error.',
+  get_interactive_elements: 'Legacy geometry list; prefer get_page_snapshot for actionable refs. Default 50 elements within 16 KiB. Coordinates are viewport-relative (negative y is off-screen); use in_viewport and disabled/readonly/editable flags. A listed element is rendered, not necessarily on-screen or actionable. Hidden inputs are excluded. Check truncation.',
   click: 'Exactly one selector match or a snapshot ref/document. DOM input only, not native mouse events.',
   type_text: 'Replace an editable field value; dispatches DOM input/change events, not native keystrokes.',
   press_key: 'Dispatch DOM keydown/keyup to the target. Browser default actions and shortcuts are not synthesized; use click/type_text/select_option/set_checked for native control state.',
@@ -24,11 +24,11 @@ const schema = (properties, required = Object.keys(properties).filter(key => key
 const tools = [
   { name: 'list_browser_targets', description: 'List eligible devices and shared tabs only. Use connection_state (connected/offline), sharing_state (active/none) and pending_request_id (null when no prompt exists). Legacy state approval_required means connected but unshared, not that a prompt is currently showing. Grant capabilities list page operations only, not every MCP tool; a listed operation can still be restricted by page policy. No unshared tab enumeration.', inputSchema: schema({}) },
   { name: 'request_browser_access', description: 'Ask the user to choose an existing/new tab. Waits for explicit sharing and returns its handle. Cancelled/expired waits create no sharing; do not repeat prompts.', inputSchema: schema({ device_id: { type: 'string' }, description, wait_timeout_seconds: wait }) },
-  { name: 'request_handoff', description: 'Ask the user to sign in, solve a challenge or confirm a human action, and wait for Done. Keeps the tab shared; never reads credentials. Allow-all does not bypass this confirmation.', inputSchema: schema({ target_id: { type: 'string' }, description, wait_timeout_seconds: wait }) },
+  { name: 'request_handoff', description: 'Ask the user to sign in, solve a challenge or confirm a human action, and wait for Done. Keeps the tab shared; never reads credentials. Allow-all does not bypass this confirmation.', inputSchema: schema({ target_id: TARGET_ID_SCHEMA, description, wait_timeout_seconds: wait }) },
   ...OPERATIONS.map(name => ({
     name, description: `${name} in an explicitly user-shared tab. Waits for local action approval or allow-all. ${NOTES[name] || ''}`,
     inputSchema: {
-      ...schema({ target_id: { type: 'string' }, ...OPERATION_SCHEMAS[name].properties, description, wait_timeout_seconds: wait },
+      ...schema({ target_id: TARGET_ID_SCHEMA, ...OPERATION_SCHEMAS[name].properties, description, wait_timeout_seconds: wait },
         ['target_id', 'description', ...OPERATION_SCHEMAS[name].required]),
       ...(OPERATION_SCHEMAS[name].anyOf ? { anyOf: OPERATION_SCHEMAS[name].anyOf } : {}),
     },
@@ -39,7 +39,7 @@ export async function handleMcp(req, res, body, client, bridge) {
   const disconnected = new AbortController();
   const closed = () => { if (!res.writableFinished) disconnected.abort(); };
   res.on('close', closed);
-  const server = new Server({ name: 'domagent', version: '4.1.0-beta.2' }, {
+  const server = new Server({ name: 'domagent', version: '4.1.0-beta.3' }, {
     capabilities: { tools: {} },
     instructions: 'Start with get_page_snapshot, then read only relevant selectors/refs. Text results default to 16 KiB and cannot exceed 64 KiB including their serialized MCP content wrapper. Snapshots/text default to 4000 characters, lists to 50 elements. Check explicit truncation flags; narrow selectors before raising limits. Screenshots are separate explicit image requests, not page-text dumps. Use connection_state/sharing_state/pending_request_id: legacy approval_required does not mean a prompt exists. Reuse an intended active shared handle. Capabilities list browser-supported page operations, not every MCP tool or guaranteed page-policy availability. evaluate_script expects source/expression (no top-level return); do not retry SCRIPT_POLICY_BLOCKED or bypass CSP. Ordinary HTTP(S) navigation retains sharing; protected destinations do not. Do not mutate a logged-in account merely for a smoke test. Never repeat an uncertain mutation or automate credentials.',
   });
@@ -89,7 +89,7 @@ export async function handleMcp(req, res, body, client, bridge) {
     } catch (error) {
       const code = failureCode(error);
       audit('mcp_tool_failure', { client_id: client.id, code });
-      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: code }) }] };
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: code, ...waitErrorDetails(error) }) }] };
     }
   });
   const streaming = body?.method === 'tools/call';

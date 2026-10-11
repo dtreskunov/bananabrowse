@@ -11,6 +11,24 @@ export const DEFAULT_TEXT_CHARS = 4000;
 export const MAX_TEXT_CHARS = 16_000;
 export const DEFAULT_ELEMENTS = 50;
 export const MAX_ELEMENTS = 100;
+export const TARGET_ID_SCHEMA = Object.freeze({
+  type: 'string',
+  pattern: '^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9_-]{43})(?![\\s\\S])',
+  description: 'Opaque shared-tab handle returned by request_browser_access; pass it unchanged. UUID handles and legacy 43-character tokens are accepted. Shape alone does not authorize access.',
+});
+export function validTargetId(value) {
+  return typeof value === 'string' && new RegExp(TARGET_ID_SCHEMA.pattern).test(value);
+}
+
+export const READINESS_ERRORS = Object.freeze([
+  'ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
+  'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'OPTION_NOT_FOUND',
+]);
+export function waitErrorDetails(error) {
+  if (error?.code !== 'WAIT_TIMEOUT' || !READINESS_ERRORS.includes(error.last_error) ||
+      !Number.isSafeInteger(error.timeout_ms) || error.timeout_ms <= 0 || error.timeout_ms > PAGE_WAIT_MS) return {};
+  return { last_error: error.last_error, timeout_ms: error.timeout_ms };
+}
 const output = { max_output_bytes: { type: 'integer', minimum: 1024, maximum: MAX_OUTPUT_BYTES,
   default: DEFAULT_OUTPUT_BYTES, description: 'Maximum UTF-8 bytes for the serialized MCP result, including its text-content wrapper. Default 16 KiB; hard maximum 64 KiB. Narrow the request before increasing.' } };
 const readText = { max_text_chars: { type: 'integer', minimum: 0, maximum: MAX_TEXT_CHARS,
@@ -22,7 +40,8 @@ const target = {
   ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}$' },
   document: { type: 'string', minLength: 8, maxLength: 128 },
 };
-const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS } };
+const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS,
+  description: 'Page/element readiness wait after approval, not the human wait. Element actions default to 3000 ms; wait_for_page defaults to 10000 ms. Use 0 for immediate selector probes. An exhausted positive wait returns WAIT_TIMEOUT; last_error identifies the last element-readiness cause.' } };
 const targeted = { ...target, ...timeout };
 const text = { type: 'string', maxLength: 65_536 };
 const operation = (properties, required = [], needsTarget = false) => ({

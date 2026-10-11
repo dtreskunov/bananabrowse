@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.1.0-beta.2 and extensions 4.1.1 use wire version 3 and policy
+Service 4.1.0-beta.3 and extensions 4.1.2 use wire version 3 and policy
 `collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
 selection, immediate-return sharing requests, and revoking login-page handoff.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -118,7 +118,7 @@ universal secret filtering.
 
 ## Structured snapshots and reliable page actions
 
-Install extensions 4.1.1 from the 4.1.0-beta.2 release to use these additions.
+Install extensions 4.1.2 from the 4.1.0-beta.3 release to use these additions.
 Existing device identities and credentials need no reset; share tabs again
 after updating. Older releases remain available for coordinated rollback.
 
@@ -229,6 +229,47 @@ existing tools. The shared operation definitions drive MCP schemas and both
 relay/extension argument validation. Old extensions advertise only their
 supported operations; new tools require installing the updated extension.
 Wire version 3 and tenant/device identities remain unchanged.
+
+### Latest retest and mutation fixes (4.1.0-beta.3)
+
+Service 4.1.0-beta.3 and extensions 4.1.2 are available in the release ZIPs.
+This build validates target-handle shape before authorization. UUID handles
+and legacy 43-character tokens remain opaque and accepted; a malformed value such
+as `not-a-uuid` returns `INVALID_ARGUMENTS`. Valid-shaped unknown/ended/foreign
+handles return `NOT_AUTHORIZED` without revealing which other client owns one.
+
+Positive element readiness waits still return `WAIT_TIMEOUT` when exhausted.
+They now include a fixed `last_error` and bounded `timeout_ms`, for example
+`{"error":"WAIT_TIMEOUT","last_error":"ELEMENT_NOT_FOUND","timeout_ms":3000}`.
+Use zero for an immediate selector probe. The default element wait is 3 seconds,
+not the separate human approval deadline. No exception text or page contents
+are included in these diagnostics, and no executed mutation is retried.
+
+Legacy geometry lists explicitly identify `coordinate_system:"viewport"` and
+include control state and `in_viewport`. Off-screen, narrow controls are not
+necessarily CSS-hidden; truly hidden inputs remain excluded. The action still
+scrolls and checks the actual target before mutating it.
+
+HTML `head > title` extraction returns bounded document-title metadata. Other
+non-rendered text targets explicitly return `rendered:false` with
+`empty_reason:"NOT_RENDERED"`; scripts/styles are not exposed by falling back to
+raw text content. Normal text uses `text_source:"rendered"`.
+
+A sharing banner can cover text inputs on a narrow page. The packaged helper
+now temporarily excludes only its own isolated-world-tracked decoration from
+the hit test, restoring it synchronously before the approved DOM action.
+The banner stays available and site overlays still cause `ELEMENT_OBSCURED`.
+Approved DOM clicks explicitly focus focusable controls before dispatching the
+click, but never retarget a replaced or newly disabled control.
+No native/trusted automation input or new approval surface is introduced.
+
+Disposable Chrome/native Firefox tests fill text/tel/email/search controls,
+assert values and radio/checkbox state, submit to a local POST echo, and inspect
+the loaded HTML response under the same grant. Supported HTML form navigation
+is not inherently a grant-ending event. Browser-refused response documents
+(including some JSON-viewer cases) must still fail closed. The retained tab
+must remain at the response URL, never silently revert or repeat the POST.
+`PAGE_UNAVAILABLE` is not an invitation to bypass document inspection.
 
 ## Lifecycle and tests
 

@@ -19,6 +19,17 @@ const actionHtml = `
 <div id="shadow"></div>
 <iframe srcdoc="<button>Unshared iframe control</button>"></iframe>
 <p hidden>fixture-hidden-secret</p>
+<input id="truly-hidden" type="hidden" value="fixture-hidden-value">
+<input id="offscreen" aria-label="Off-screen control" style="position:absolute;top:2200px;left:5px;width:3px">
+<form action="/submitted" method="post" id="echo-form">
+  <label>Customer<input name="custname" type="text"></label>
+  <label>Phone<input name="custtel" type="tel"></label>
+  <label>Email<input name="custemail" type="email"></label>
+  <label>Search<input name="search" type="search"></label>
+  <label><input name="size" value="large" type="radio">Large</label>
+  <label><input name="topping" value="bacon" type="checkbox">Bacon</label>
+  <button id="submit-fixture" type="submit">Submit fixture</button>
+</form>
 <script>
 document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML =
   '<button id="shadow-action">Shadow action</button><span id="shadow-result"></span>';
@@ -53,6 +64,18 @@ async function exerciseActions(call) {
   assert.equal(edit.editable, true);
   assert.equal(edit.value_redacted, true);
   assert.equal(snapshot.elements.find(element => element.name === 'Disabled action').disabled, true);
+  const title = await result('get_text', { selector: 'head > title' });
+  assert.equal(title.text, snapshot.title);
+  assert.equal(title.text_source, 'document_title');
+  const hidden = await result('get_text', { selector: 'p[hidden]' });
+  assert.equal(hidden.rendered, false);
+  assert.equal(hidden.empty_reason, 'NOT_RENDERED');
+  assert.equal(hidden.text, '');
+  const geometry = await result('get_interactive_elements');
+  assert.equal(geometry.coordinate_system, 'viewport');
+  assert.equal(geometry.elements.some(element => element.id === 'truly-hidden'), false);
+  assert.equal(geometry.elements.find(element => element.id === 'offscreen').in_viewport, false);
+  assert.equal(geometry.elements.find(element => element.id === 'disabled').disabled, true);
   const target = { ref: edit.ref, document: snapshot.document };
   await result('type_text', { ...target, text: 'Updated nickname' });
   assert.equal((await result('evaluate_script', { script: 'document.querySelector("#edit").value' })).value, 'Updated nickname');
@@ -61,6 +84,9 @@ async function exerciseActions(call) {
   await error('type_text', { selector: '#readonly', text: 'No change' }, 'ELEMENT_READONLY');
   await error('click', { selector: '#obstructed' }, 'ELEMENT_OBSCURED');
   await error('click', { selector: '#missing', timeout_ms: 100 }, 'WAIT_TIMEOUT');
+  const missing = await call('get_text', { selector: '#missing', timeout_ms: 100 });
+  assert.equal(JSON.parse(missing.content[0].text).last_error, 'ELEMENT_NOT_FOUND');
+  assert.equal(JSON.parse(missing.content[0].text).timeout_ms, 100);
   await result('select_option', { selector: '#select', value: 'blue' });
   assert.equal((await result('evaluate_script', { script: 'document.querySelector("#select").value' })).value, 'blue');
   await result('set_checked', { selector: '#check', checked: true });
@@ -119,7 +145,51 @@ async function exerciseActions(call) {
   const loaded = await result('wait_for_page');
   assert.notEqual(loaded.document, snapshot.document);
   await error('type_text', { ...target, text: 'Must not cross documents' }, 'TARGET_STALE');
+  for (const [name, text] of [
+    ['custname', 'Fixture user'], ['custtel', '12345'], ['custemail', 'fixture@example.org'], ['search', 'fixture search'],
+  ]) {
+    await result('click', { selector: `input[name="${name}"]` });
+    assert.equal((await result('evaluate_script', {
+      script: `document.activeElement.name`,
+    })).value, name);
+    await result('type_text', { selector: `input[name="${name}"]`, text });
+    assert.equal((await result('evaluate_script', {
+      script: `document.querySelector('input[name="${name}"]').value`,
+    })).value, text);
+  }
+  await error('select_option', { selector: 'input[name="size"][value="large"]', value: 'large' }, 'ELEMENT_NOT_EDITABLE');
+  await result('click', { selector: 'input[name="size"][value="large"]' });
+  await result('set_checked', { selector: 'input[name="topping"][value="bacon"]', checked: true });
+  await result('click', { selector: '#submit-fixture' });
+  assert.equal((await result('wait_for_page')).state, 'loaded');
+  const echo = JSON.parse((await result('get_text', { selector: '#post-result' })).text);
+  assert.equal(echo.custname, 'Fixture user');
+  assert.equal(echo.custtel, '12345');
+  assert.equal(echo.custemail, 'fixture@example.org');
+  assert.equal(echo.search, 'fixture search');
+  assert.equal(echo.size, 'large');
+  assert.equal(echo.topping, 'bacon');
+  assert.equal((await result('get_page_snapshot')).title, 'Submitted fixture');
   return snapshot;
 }
 
-module.exports = { actionHtml, exerciseActions };
+async function respondToForm(req, res) {
+  if (req.method !== 'POST' || !['/submitted', '/submitted-json'].includes(req.url)) return false;
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk.toString();
+    assert(body.length <= 8192, 'Unexpected fixture form size');
+  }
+  const json = JSON.stringify(Object.fromEntries(new URLSearchParams(body)));
+  if (req.url === '/submitted-json') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(json);
+    return true;
+  }
+  const escaped = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  res.setHeader('Content-Type', 'text/html');
+  res.end(`<!doctype html><title>Submitted fixture</title><h1>Submitted</h1><pre id="post-result">${escaped}</pre>`);
+  return true;
+}
+
+module.exports = { actionHtml, exerciseActions, respondToForm };

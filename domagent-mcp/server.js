@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
   VERSION, POLICY_ID, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
-  authPayload, grantPayload, verify, navigationUrl, validOperationArgs,
+  authPayload, grantPayload, verify, navigationUrl, validOperationArgs, validTargetId, waitErrorDetails,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
@@ -238,7 +238,7 @@ export class BridgeServer {
           'RESULT_TOO_LARGE', 'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
           'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
-        call.reject(new Fault(code));
+        call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error)));
         if (code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
         else if (code === 'PAGE_UNAVAILABLE') this.endGrant(m.target_id, 'CAPABILITY_UNAVAILABLE');
       } else {
@@ -386,7 +386,7 @@ export class BridgeServer {
   }
   async operate(clientId, targetId, operation, args, signal, tenant,
     description = 'Use the shared page', waitMs = HUMAN_WAIT_MS) {
-    requireValue(typeof targetId === 'string' && ID.test(targetId), 'INVALID_ARGUMENTS');
+    requireValue(validTargetId(targetId), 'INVALID_ARGUMENTS');
     requireValue((OPERATIONS.includes(operation) || operation === 'request_handoff') &&
       args && typeof args === 'object' && !Array.isArray(args),
       'INVALID_ARGUMENTS');

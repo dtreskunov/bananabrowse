@@ -9,13 +9,16 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
   globalThis.location = { href: 'https://site.example/login' };
   globalThis.getComputedStyle = () => ({ visibility: 'visible' });
   const body = { nodeType: 1, tagName: 'BODY', matches: () => false, getRootNode: () => ({}),
+    getBoundingClientRect: () => ({ width: 100, height: 100 }),
     childNodes: [{ nodeType: 3, textContent: 'Login page' }] };
   globalThis.document = {
     body, querySelectorAll: selector => selector === 'body' ? [body] : [],
   };
   try {
     assert.equal(pageHelper('inspect').url, 'https://site.example/login');
-    assert.deepEqual(pageHelper('get_text', { selector: 'body' }), { text: 'Login page', text_truncated: false, truncated: false });
+    assert.deepEqual(pageHelper('get_text', { selector: 'body' }), {
+      text: 'Login page', text_truncated: false, truncated: false, rendered: true, text_source: 'rendered',
+    });
   } finally {
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalComputed;
@@ -61,12 +64,13 @@ test('missing elements and invalid CSS selectors are distinct from a stale targe
 });
 
 test('packaged positive decision handlers reject synthetic page clicks', async t => {
-  const saved = { document: globalThis.document, location: globalThis.location, chrome: globalThis.chrome };
+  const saved = { document: globalThis.document, location: globalThis.location, chrome: globalThis.chrome,
+    __domagentSharingHost: globalThis.__domagentSharingHost };
   t.after(() => Object.assign(globalThis, saved));
   const elements = [];
   const messages = [];
   const element = () => {
-    const node = { style: {}, handlers: {}, setAttribute() {}, append() {},
+    const node = { style: {}, handlers: {}, setAttribute() {}, append() {}, remove() {},
       addEventListener(type, handler) { this.handlers[type] = handler; },
       attachShadow() { return element(); } };
     elements.push(node);

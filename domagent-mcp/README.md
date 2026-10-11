@@ -51,6 +51,12 @@ Install extension 4.1.1 for focused snapshot arguments and specific script error
 Device results separate connection, sharing, and pending-request state without
 removing legacy status fields. Existing identities and credentials need no reset.
 
+Version 4.1.0-beta.3 and extension 4.1.2 fix own-banner obstruction of text-like
+inputs, focus approved clicks, expose safe timeout causes and viewport/control
+metadata, return bounded HTML-title metadata and reject malformed target handles
+while preserving legacy tokens. Real Chrome/native Firefox form POST echo tests
+verify mutations and readable response pages without widening browser authority.
+
 Run `npm test`, `npm run build`, and `npm run check`. See
 [browser tests](../domagent-extension/test/README.md) for real-browser validation
 and unsupported capability/physical-prompt qualification limits.

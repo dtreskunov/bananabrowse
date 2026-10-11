@@ -286,7 +286,8 @@ test('readiness deadlines and cancellation during waits are enforced without exe
     return [{ result: { error: 'ELEMENT_NOT_FOUND' } }];
   };
   const expired = f.adapter.execute(grant, 'click', { selector: '#missing', timeout_ms: 50 }, () => {});
-  const rejected = assert.rejects(expired, /WAIT_TIMEOUT/);
+  const rejected = assert.rejects(expired, error => error.code === 'WAIT_TIMEOUT' &&
+    error.last_error === 'ELEMENT_NOT_FOUND' && error.timeout_ms === 50);
   await new Promise(resolve => setImmediate(resolve));
   t.mock.timers.tick(50);
   await rejected;

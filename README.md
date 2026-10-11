@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.1.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.2)
+[v4.1.0-beta.3](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.3)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -95,6 +95,14 @@ whole-page dumps. Script syntax, runtime, serialization and policy failures are
 reported separately. Install the updated release ZIP above to use focused
 snapshot arguments and the specific script errors. The server enforces output
 budgets even with an older extension.
+
+Service 4.1.0-beta.3 and extensions 4.1.2 fix sharing-banner
+obstruction of text inputs, add viewport/control-state metadata and bounded
+HTML title extraction, reject malformed target handles, and include safe
+last-readiness causes in timeout errors. Local form POST echo tests verify
+values and retained sharing on supported response pages. Install the updated
+ZIP above in the existing extension installation, reload it and explicitly
+share a tab again; no identity or credential reset is needed.
 
 Extension `4.0.1` uses bounded local approval/execution budgets instead of requiring
 the laptop's clock to match the server. This fixes a valid Allow/Allow-all action

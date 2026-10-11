@@ -13,7 +13,7 @@ const localRequire = createRequire(path.join(root, 'domagent-mcp/package.json'))
 const { test, expect, firefox } = localRequire('@playwright/test');
 const { Client } = localRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
-const { actionHtml, exerciseActions } = require('./action-fixtures.cjs');
+const { actionHtml, exerciseActions, respondToForm } = require('./action-fixtures.cjs');
 
 test('native Firefox: collaborative sharing, guarded decisions, persistent restart and no-UI heartbeat', async () => {
   test.setTimeout(180_000);
@@ -80,7 +80,8 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     return send(session, message);
   };
   const backend = await app.listen();
-  const pageServer = http.createServer((req, res) => {
+  const pageServer = http.createServer(async (req, res) => {
+    if (await respondToForm(req, res)) return;
     if (req.url === '/redirect') {
       res.writeHead(302, { Location: `${origin}/protected-hit` }); res.end(); return;
     }
@@ -208,6 +209,28 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     expect(JSON.parse((await call('evaluate_script', {
       script: '[typeof globalThis.browser?.runtime, typeof globalThis.chrome?.runtime]',
     })).content[0].text)).toEqual({ value: ['undefined', 'undefined'] });
+    await call('navigate', { url: pageOrigin });
+    expect((await call('wait_for_page')).isError).not.toBe(true);
+    await call('evaluate_script', { script: 'document.querySelector("#echo-form").action = "/submitted-json"; true' });
+    await call('type_text', { selector: 'input[name="custname"]', text: 'JSON fixture' });
+    const submittedJson = await call('click', { selector: '#submit-fixture' });
+    expect(submittedJson.isError).not.toBe(true);
+    const jsonPage = await call('wait_for_page');
+    expect(await evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.url)`)).toBe(`${pageOrigin}/submitted-json`);
+    if (jsonPage.isError) {
+      expect(JSON.parse(jsonPage.content[0].text).error).toBe('PAGE_UNAVAILABLE');
+      expect((await state()).targets).toEqual([]);
+    } else {
+      expect(JSON.parse(jsonPage.content[0].text).state).toBe('loaded');
+      expect((await state()).targets[0].state).toBe('active');
+      const jsonText = await call('get_text');
+      expect(jsonText.isError).not.toBe(true);
+      expect(JSON.stringify(jsonText)).toContain('JSON fixture');
+      await request({ type: 'ui.end', target_id: grant.target_id, reason: 'OWNER_PAUSED' });
+    }
+    await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
+    await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
+    grant = await share();
     const pendingHuman = client.callTool({ name: 'request_handoff', arguments: {
       target_id: grant.target_id, description: 'Complete login in the shared tab',
     } });

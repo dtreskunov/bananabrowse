@@ -1,6 +1,6 @@
 import {
   VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS, authPayload, enrollmentPayload, extensionOrigin,
-  connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId,
+  connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId, waitErrorDetails,
 } from '../../shared/protocol.js';
 import {
   MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
@@ -759,7 +759,7 @@ export class Controller {
           this.result(message, { code });
           grant.queue.splice(grant.queue.indexOf(queued), 1);
           await this.end(grant.target_id, code === 'PAGE_UNAVAILABLE' ? 'CAPABILITY_UNAVAILABLE' : 'OUTCOME_UNKNOWN');
-        } else this.finishQueued(grant, queued, { code });
+        } else this.finishQueued(grant, queued, { code, ...waitErrorDetails(error) });
       }
     } finally {
       clearTimeout(timer);

@@ -81,6 +81,11 @@ export function pageHelper(operation, args = {}) {
   const readonly = element => element.readOnly || element.getAttribute('aria-readonly') === 'true';
   const editable = element => element.isContentEditable ||
     element.matches('textarea,input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="hidden"])');
+  const elementState = (element, rect) => ({
+    disabled: disabled(element), readonly: Boolean(readonly(element)),
+    editable: editable(element) && !readonly(element) && !disabled(element),
+    in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
+  });
   if (operation === 'get_page_snapshot') {
     let scope = document.body;
     if (args.selector) {
@@ -107,9 +112,7 @@ export function pageHelper(operation, args = {}) {
       const rect = element.getBoundingClientRect();
       const row = {
         ref, tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
-        disabled: disabled(element), readonly: Boolean(readonly(element)),
-        editable: editable(element) && !readonly(element) && !disabled(element),
-        in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
+        ...elementState(element, rect),
       };
       if (element.matches('input[type="checkbox"],input[type="radio"]')) row.checked = element.checked;
       if (element.hasAttribute('aria-checked')) row.checked = element.getAttribute('aria-checked') === 'true';
@@ -123,13 +126,16 @@ export function pageHelper(operation, args = {}) {
       scope: 'top-level-and-open-shadow-roots', input_mode: 'dom' };
   }
   if (operation === 'get_interactive_elements') {
-    const candidates = all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') && visible(element));
+    const candidates = all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') &&
+      !element.matches('input[type="hidden"]') && visible(element));
     const elements = candidates.slice(0, args.max_elements ?? 50).map(element => {
       const rect = element.getBoundingClientRect();
       return { tag: element.tagName.toLowerCase(), id: element.id, type: element.getAttribute('type'),
-        text: nameOf(element), x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        text: nameOf(element), x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        ...elementState(element, rect) };
     });
-    return { elements, truncated: candidates.length > elements.length, elements_truncated: candidates.length > elements.length };
+    return { coordinate_system: 'viewport', elements,
+      truncated: candidates.length > elements.length, elements_truncated: candidates.length > elements.length };
   }
   if (operation === 'clear_overlays') {
     all.filter(element => element.matches('[data-domagent-overlay]') && !element.querySelector(marker))
@@ -155,8 +161,18 @@ export function pageHelper(operation, args = {}) {
   } else element = operation === 'scroll' ? document.scrollingElement : document.body;
   if (!element) return { error: 'ELEMENT_NOT_FOUND' };
   if (operation === 'get_text') {
+    if (element.tagName === 'TITLE' && element.parentElement?.tagName === 'HEAD') {
+      const limit = args.max_text_chars ?? 4000;
+      const value = document.title;
+      return { text: value.slice(0, limit), truncated: value.length > limit,
+        text_truncated: value.length > limit, rendered: false, text_source: 'document_title' };
+    }
+    if (!visible(element)) {
+      return { text: '', truncated: false, text_truncated: false,
+        rendered: false, text_source: 'rendered', empty_reason: 'NOT_RENDERED' };
+    }
     const text = textData(element);
-    return { ...text, truncated: text.text_truncated };
+    return { ...text, truncated: text.text_truncated, rendered: true, text_source: 'rendered' };
   }
   if (!visible(element)) return { error: 'ELEMENT_NOT_VISIBLE' };
   if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
@@ -184,11 +200,28 @@ export function pageHelper(operation, args = {}) {
   const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
   if (right <= left || bottom <= top) return { error: 'ELEMENT_NOT_VISIBLE' };
   const x = (left + right) / 2, y = (top + bottom) / 2;
-  let hit = document.elementFromPoint(x, y);
-  while (hit?.shadowRoot) {
-    const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
-    if (!deeper || deeper === hit) break;
-    hit = deeper;
+  const hitAtPoint = () => {
+    let hit = document.elementFromPoint(x, y);
+    while (hit?.shadowRoot) {
+      const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
+      if (!deeper || deeper === hit) break;
+      hit = deeper;
+    }
+    return hit;
+  };
+  let hit = hitAtPoint();
+  const indicator = globalThis.__domagentSharingHost;
+  if (indicator?.isConnected && ignored(hit)) {
+    // Ignore only our own cosmetic banner, never a site's blocking overlay.
+    const display = indicator.style.getPropertyValue('display');
+    const priority = indicator.style.getPropertyPriority('display');
+    try {
+      indicator.style.setProperty('display', 'none', 'important');
+      hit = hitAtPoint();
+    } finally {
+      if (display) indicator.style.setProperty('display', display, priority);
+      else indicator.style.removeProperty('display');
+    }
   }
   let reached = false;
   for (let node = hit; node; node = parent(node)) {
@@ -196,6 +229,11 @@ export function pageHelper(operation, args = {}) {
   }
   if (!reached) return { error: 'ELEMENT_OBSCURED' };
   if (operation === 'click') {
+    if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
+      element.focus({ preventScroll: true });
+      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+      if (disabled(element)) return { error: 'OPERATION_FAILED' };
+    }
     element.click();
     return { clicked: true, input_mode: 'dom' };
   }
@@ -244,10 +282,17 @@ export function pageHelper(operation, args = {}) {
 }
 
 export function sharingIndicator(details) {
-  const old = document.querySelector('[data-domagent-sharing]');
-  if (!details) { old?.remove(); return { url: location.href }; }
+  const old = globalThis.__domagentSharingHost || document.querySelector('[data-domagent-sharing]');
+  if (!details) {
+    old?.remove();
+    globalThis.__domagentSharingHost = null;
+    return { url: location.href };
+  }
   if (details.remove) {
-    if (old?.getAttribute('data-domagent-sharing') === details.token) old.remove();
+    if (old?.getAttribute('data-domagent-sharing') === details.token) {
+      old.remove();
+      globalThis.__domagentSharingHost = null;
+    }
     return { url: location.href };
   }
   old?.remove();
@@ -303,6 +348,7 @@ export function sharingIndicator(details) {
   add('Stop sharing', 'stop');
   root.append(style, banner);
   document.documentElement.append(host);
+  globalThis.__domagentSharingHost = host;
   return { url: location.href };
 }
 

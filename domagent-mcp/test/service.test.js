@@ -380,6 +380,14 @@ test('real HTTP MCP authenticates every request and rejects credentials on anoth
   assert(list.tools.find(tool => tool.name === 'click').inputSchema.required.includes('target_id'));
   assert.equal((await sdk.callTool({ name: 'list_browser_targets', arguments: {} })).content[0].text, '[]');
   assert.equal((await sdk.callTool({ name: 'click', arguments: { selector: 'button' } })).isError, true);
+  for (const target_id of ['not-a-uuid', '']) {
+    const invalidTarget = await sdk.callTool({ name: 'get_text', arguments: { target_id, description: 'Malformed target test' } });
+    assert.equal(JSON.parse(invalidTarget.content[0].text).error, 'INVALID_ARGUMENTS');
+  }
+  for (const target_id of [crypto.randomUUID(), token()]) {
+    const unknownTarget = await sdk.callTool({ name: 'get_text', arguments: { target_id, description: 'Unknown target test' } });
+    assert.equal(JSON.parse(unknownTarget.content[0].text).error, 'NOT_AUTHORIZED');
+  }
   ctx.store.revoke(ctx.ownerId, 'client', ctx.client.id, ctx.tenant.id);
   await assert.rejects(sdk.listTools());
 });
@@ -745,6 +753,24 @@ test('HTTP MCP waits for sharing and action approval with correct descriptions',
   connection.ws.send(JSON.stringify({ type: 'result', request_id: command.request_id,
     target_id: grant.target_id, result: { text: 'Page contents' } }));
   assert.equal(JSON.parse((await action).content[0].text).text, 'Page contents');
+  for (const last_error of ['ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'private untrusted detail']) {
+    const waiting = sdk.callTool({ name: 'get_text', arguments: {
+      target_id: grant.target_id, selector: '#missing', description: 'Readiness error detail test',
+    } });
+    const pending = await connection.next('command');
+    await ready(connection, pending);
+    connection.ws.send(JSON.stringify({ type: 'result', request_id: pending.request_id,
+      target_id: grant.target_id, error: { code: 'WAIT_TIMEOUT', last_error, timeout_ms: 100 } }));
+    const returned = JSON.parse((await waiting).content[0].text);
+    assert.equal(returned.error, 'WAIT_TIMEOUT');
+    if (last_error.startsWith('ELEMENT_')) {
+      assert.equal(returned.last_error, last_error);
+      assert.equal(returned.timeout_ms, 100);
+    } else {
+      assert.equal(returned.last_error, undefined);
+      assert.equal(JSON.stringify(returned).includes('private'), false);
+    }
+  }
   for (const [name, result] of [
     ['get_text', { text: '😀'.repeat(200_000) }],
     ['get_page_snapshot', { document: 'document-one', text: 'x'.repeat(200_000),

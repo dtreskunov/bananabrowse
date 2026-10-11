@@ -55,6 +55,14 @@ async function exerciseActions(call) {
   const snapshot = await result('get_page_snapshot');
   assert.equal(snapshot.scope, 'top-level-and-open-shadow-roots');
   assert.equal(snapshot.input_mode, 'dom');
+  assert(snapshot.viewport.width > 0 && snapshot.viewport.height > 0);
+  const inspected = await result('inspect_element', { selector: '#readonly' });
+  assert.equal(inspected.reason, 'READONLY');
+  assert.equal(inspected.value_redacted, true);
+  assert.equal(JSON.stringify(inspected).includes('fixture-readonly-secret'), false);
+  assert.equal((await result('inspect_element', { selector: '#offscreen' })).reason, 'OFF_SCREEN');
+  assert.equal((await result('inspect_element', { selector: '#absent-control' })).state, 'missing');
+  assert.equal((await result('inspect_element', { selector: '.duplicate' })).state, 'ambiguous');
   for (const secret of ['fixture-password-secret', 'fixture-textarea-secret', 'fixture-editable-secret',
     'fixture-readonly-secret', 'fixture-hidden-secret', 'Stop sharing', 'Unshared iframe control']) {
     assert.equal(JSON.stringify(snapshot).includes(secret), false, secret);

@@ -2,6 +2,7 @@ import { OPERATIONS, PAGE_WAIT_MS, DEFAULT_OUTPUT_BYTES, READINESS_ERRORS, navig
 import { boundedResult, fail, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
 import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
+import { actionSummary } from './approval-summary.js';
 
 export class BrowserAdapter {
   constructor(api, browserName) {
@@ -291,7 +292,7 @@ export class BrowserAdapter {
     }
     if (!response?.result) fail('TARGET_STALE');
     if (response.result.error) fail(response.result.error);
-    return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements'].includes(operation)
+    return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
       ? compactResult(operation, response.result, args) : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}) };
   }
@@ -309,7 +310,30 @@ export class BrowserAdapter {
     return page;
   }
 
-  async execute(grant, operation, args, checkCurrent) {
+  async prepareAction(grant, operation, args) {
+    if (['wait_for_page', 'request_handoff'].includes(operation)) {
+      const tab = await this.api.tabs.get(grant.tabId);
+      navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
+      return { summary: actionSummary(operation, args, { title: tab.title, url: tab.pendingUrl || tab.url }) };
+    }
+    const page = await this.inspect(grant.tabId, grant.protected_origins, operation === 'navigate');
+    let target;
+    if (operation !== 'inspect_element' && (args.selector || args.ref)) {
+      target = await this.helper(grant.tabId, 'prepare_action', {
+        ...args, action: operation, document_nonce: page.document_nonce,
+      });
+    }
+    return { summary: actionSummary(operation, args, page, target?.matches === 1 ? target : null),
+      document_nonce: page.document_nonce, approval_token: target?.approval_token };
+  }
+
+  async releaseAction(grant, preview) {
+    if (preview?.approval_token) {
+      await this.helper(grant.tabId, 'release_action', { approval_token: preview.approval_token });
+    }
+  }
+
+  async execute(grant, operation, args, checkCurrent, preview) {
     if (!validOperationArgs(operation, args)) fail('INVALID_ARGUMENT');
     const tabId = grant.tabId;
     if (operation === 'wait_for_page') {
@@ -322,7 +346,8 @@ export class BrowserAdapter {
         if (tab.status === 'complete' && !tab.pendingUrl) {
           const page = await this.inspect(tabId, grant.protected_origins);
           checkCurrent();
-          return { state: 'loaded', url: page.url, document: page.document_nonce };
+          return { state: 'loaded', url: page.url, document: page.document_nonce,
+            ...(page.content_type ? { content_type: page.content_type } : {}) };
         }
         if (Date.now() >= deadline) fail('WAIT_TIMEOUT');
         await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
@@ -337,6 +362,7 @@ export class BrowserAdapter {
     }
     const document = await this.inspect(tabId, grant.protected_origins, operation === 'navigate');
     checkCurrent();
+    if (preview?.document_nonce && preview.document_nonce !== document.document_nonce) fail('TARGET_STALE');
     if (operation === 'navigate') {
       const url = navigationUrl(args.url, grant.protected_origins);
       grant.blankAllowed = false;
@@ -405,7 +431,8 @@ export class BrowserAdapter {
     while (true) {
       checkCurrent();
       try {
-        return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce });
+        return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce,
+          ...(preview?.approval_token ? { approval_token: preview.approval_token } : {}) });
       } catch (error) {
         const retryable = READINESS_ERRORS.includes(error.code);
         if (!waitable || !retryable || args.timeout_ms === 0) throw error;

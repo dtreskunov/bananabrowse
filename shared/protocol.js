@@ -52,6 +52,10 @@ const operation = (properties, required = [], needsTarget = false) => ({
 export const OPERATION_SCHEMAS = Object.freeze({
   navigate: operation({ url: { type: 'string', minLength: 1, maxLength: 8192 } }, ['url']),
   click: operation(targeted, [], true),
+  inspect_element: operation({ ...target,
+    max_output_bytes: { ...output.max_output_bytes, default: 4096, maximum: 4096,
+      description: 'Inspector JSON result budget; default and hard maximum 4096 UTF-8 bytes.' },
+  }, [], true),
   type_text: operation({ ...targeted, text }, ['text'], true),
   get_text: operation({ ...targeted, ...readText, ...output }),
   evaluate_script: operation({ script: { ...text, minLength: 1,

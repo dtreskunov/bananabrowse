@@ -371,11 +371,52 @@ test('wait errors retain only fixed readiness diagnostics, not exception content
     throw Object.assign(new Error('private source or page detail'), {
       code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_OBSCURED', timeout_ms: 100,
     });
+
   };
   const result = await execute(f, grant, command(f, grant));
   assert.deepEqual(result.error, { code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_OBSCURED', timeout_ms: 100 });
   assert.equal(JSON.stringify(result).includes('private source'), false);
   assert.equal(grant.state, 'active');
+});
+test('positive approval waits for target preparation and executes only the captured preview', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  let resolve;
+  f.adapter.prepareAction = () => new Promise(done => { resolve = done; });
+  const message = command(f, grant, { operation: 'click', args: { selector: '#button' }, description: 'x' });
+  f.controller.enqueue(message);
+  assert.throws(() => f.controller.decide(grant.target_id, message.request_id, 'approve'), /APPROVAL_REQUIRED/);
+  const preview = { summary: ['Operation: click', 'Selector: #button'], approval_token: 'bound-element' };
+  resolve(preview);
+  await flush();
+  assert.deepEqual(f.controller.snapshot().targets[0].commands[0].summary, preview.summary);
+  let usedPreview;
+  f.adapter.execute = async (_grant, _operation, _args, check, bound) => {
+    check();
+    usedPreview = bound;
+    return { clicked: true };
+  };
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  await f.receive({ type: 'command.execute', tenant_id, request_id: message.request_id,
+    target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
+  await flush();
+  assert.equal(usedPreview, preview);
+});
+test('late action preparation after cancellation never restores an approval or executes', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  let resolve;
+  let released = 0;
+  f.adapter.prepareAction = () => new Promise(done => { resolve = done; });
+  f.adapter.releaseAction = async () => { released++; };
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.cancelCommand({ request_id: message.request_id, target_id: grant.target_id });
+  resolve({ summary: ['Read'], approval_token: 'cancelled-binding' });
+  await flush();
+  assert.equal(grant.queue.length, 0);
+  assert.equal(f.socket.sent.some(frame => frame.type === 'command.ready'), false);
+  assert(released >= 1);
 });
 test('page readiness follows ordinary navigation but targeted queued work remains document-bound', async t => {
   const f = await fixture(t);

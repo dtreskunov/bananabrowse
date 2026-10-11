@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.1.0-beta.3 and extensions 4.1.2 use wire version 3 and policy
+Service 4.2.0-beta.1 and extensions 4.2.0 use wire version 3 and policy
 `collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
 selection, immediate-return sharing requests, and revoking login-page handoff.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -41,6 +41,17 @@ Every page call includes a nonempty, bounded `description`. Treat it as unverifi
 requester text; pair it with operation-derived details. Render as text, never HTML.
 One approved click/script may itself cause arbitrary ordinary-page side effects.
 Descriptions are not a security proof and logs must not retain them or arguments.
+
+The extension prepares operation-derived summaries before positive action
+approval: tab title/origin, operation, selector/ref, resolved control and
+navigation destination. Typed values and script source are hidden. The agent's
+explanation is displayed separately as unverified text; neither one character
+nor forty characters proves informed consent. When a target resolves, the
+extension privately binds execution to that exact element/document. Replacing
+the control fails stale checks, even if the same selector would match a new one.
+Positive approvals wait for preparation; Decline/Stop remain available. Missing
+controls may be approved as explicitly unresolved selectors under the existing
+bounded readiness wait. Allow-all retains the same private binding checks.
 
 The server dispatches a pending `command` with the human deadline. The extension
 queues it independently of heartbeat traffic and displays:
@@ -282,3 +293,34 @@ approval; denial; allow-all; human login/Done after navigation; long waits beyon
 the old 25-second deadline; cancellation; cross-tenant/tab proofs; duplicate ready;
 stale queued work; and accurate overlay/toolbar stop state. Keep native Firefox
 persistent idle/restart and Chrome onboarding tests.
+
+## Element diagnosis and form-response verification
+
+`inspect_element` accepts an exact selector or document/ref and returns at most
+4 KiB of JSON. It reports match count, state/reason, redacted control flags,
+rectangle and viewport. It does not focus, scroll or mutate the page.
+Missing and ambiguous selector matches are diagnosis states; invalid CSS,
+stale refs and lost authority remain errors. Snapshots include viewport size.
+Use diagnosis to distinguish responsive/collapsed UI from broken automation:
+inspect, reveal the intended widget when appropriate, refresh refs, act, verify.
+
+Form filling and a click acknowledgement are not a confirmed submission.
+Verify the actual response and compare document identity as well as URL.
+Do not alter production forms with preventDefault handlers or clone them merely
+to capture data. Submission may be intercepted by site code or navigate to a
+browser-generated viewer. Firefox JSON viewing is explicitly enabled in the
+native integration tests; MIME type and the actual injected response are checked.
+Some browser builds or response policies may refuse injection, and such pages
+remain fail-closed. No raw privileged renderer access or automatic POST replay
+is introduced. A failed script may already have mutated the page.
+
+Install extension 4.2.0 for operation-derived summaries/private binding and
+inspector support. The service catalogue now contains 18 tools. Prior extensions
+do not advertise inspect_element; their old grant behavior remains until
+updated. Reconnect and explicitly share again; identities need no reset.
+
+The optional `DOMAGENT_PUBLIC_HTTPBIN=1` native Firefox test submits only
+fictitious data to httpbin and verifies the actual JSON response. It is opt-in
+to keep default tests independent of public endpoint availability. Local JSON
+viewer coverage runs by default. Successful qualification does not establish
+that all Firefox versions, response policies or generated viewers are injectable.

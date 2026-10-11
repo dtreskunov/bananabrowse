@@ -146,11 +146,12 @@ function render(snapshot) {
     const article = document.createElement('article');
     paragraph(article, `${pending.client_label} would like you to share a tab.`);
     paragraph(article, pending.description);
+    paragraph(article, 'Agent explanation above is unverified; the tab and sharing scope below determine access.');
     paragraph(article, 'This name was supplied by the application. It is not a verified identity.');
     paragraph(article, 'Visit an existing or new website tab, then use the DomAgent toolbar to share that tab. You remain free to navigate and interact.');
     paragraph(article, 'Sharing allows page actions, including page scripts, only on your selected tab. Each action asks for approval unless you choose Allow all while sharing.');
     const selected = snapshot.selected_tab;
-    paragraph(article, selected ? `Selected tab: ${selected.url}` : 'No website tab selected. Visit a website in a normal browser window first.');
+    paragraph(article, selected ? `Selected tab: ${selected.title || 'Untitled'} · ${selected.url}` : 'No website tab selected. Visit a website in a normal browser window first.');
     button(article, `Share this tab with ${pending.client_label}`, async () => {
       if (!selected) throw new Error('TARGET_STALE');
       // The permission call must remain directly inside the user's click, before
@@ -177,7 +178,10 @@ function render(snapshot) {
     for (const command of target.commands || []) {
       const pending = document.createElement('article');
       paragraph(pending, `${command.operation}: ${command.description}`);
-      if (command.state === 'pending' && command === target.commands[0]) {
+      paragraph(pending, 'Agent explanation is unverified. Review the operation-derived details:');
+      for (const line of command.summary || []) paragraph(pending, line);
+      if (command.preparing) paragraph(pending, 'Inspecting the target before approval…');
+      if (command.state === 'pending' && !command.preparing && command === target.commands[0]) {
         const decide = action => request('decision', {
           target_id: target.target_id, request_id: command.request_id, action,
         });

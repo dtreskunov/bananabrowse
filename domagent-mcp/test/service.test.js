@@ -368,6 +368,9 @@ test('real HTTP MCP authenticates every request and rejects credentials on anoth
   assert(catalogue.tools.find(tool => tool.name === 'evaluate_script').description.includes('top-level'));
   assert(catalogue.tools.find(tool => tool.name === 'get_text').inputSchema.properties.max_output_bytes.maximum === 65536);
   assert(catalogue.tools.find(tool => tool.name === 'navigate').description.includes('retains sharing'));
+  const inspector = catalogue.tools.find(tool => tool.name === 'inspect_element');
+  assert.equal(inspector.inputSchema.properties.max_output_bytes.maximum, 4096);
+  assert(inspector.description.includes('Does not focus'));
   const invalid = await sdk.callTool({ name: 'set_checked', arguments: {
     target_id: 'unused-target', selector: '#check', checked: 'false', description: 'Invalid boolean',
   } });

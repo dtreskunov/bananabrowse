@@ -60,3 +60,9 @@ verify mutations and readable response pages without widening browser authority.
 Run `npm test`, `npm run build`, and `npm run check`. See
 [browser tests](../domagent-extension/test/README.md) for real-browser validation
 and unsupported capability/physical-prompt qualification limits.
+
+Version 4.2.0-beta.1 adds inspect_element (4 KiB maximum) and explains
+diagnose/reveal/refresh/act/verify in MCP initialization instructions. Extension
+4.2.0 prepares operation-derived summaries before positive approvals and binds
+resolved controls to the exact document/element. Older extension capabilities
+remain explicit; update/reload in place and share again without resetting keys.

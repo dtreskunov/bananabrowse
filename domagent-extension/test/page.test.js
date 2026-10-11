@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { beforeEach, test } from 'node:test';
 import { pageEvaluate, pageHelper, sharingIndicator } from '../src/page.js';
+beforeEach(t => {
+  const width = globalThis.innerWidth, height = globalThis.innerHeight;
+  globalThis.innerWidth = 800; globalThis.innerHeight = 600;
+  t.after(() => { globalThis.innerWidth = width; globalThis.innerHeight = height; });
+});
 
 test('password/CAPTCHA presence does not block normal inspection or page text', () => {
   const originalDocument = globalThis.document;

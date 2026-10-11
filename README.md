@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.1.0-beta.3](https://github.com/dtreskunov/domagent/releases/tag/v4.1.0-beta.3)
+[v4.2.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.2.0-beta.1)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -110,6 +110,19 @@ being rejected as an invalid future deadline. Update both the server and extensi
 existing tenant identities and credentials are unchanged.
 
 ## Service and development
+
+Service 4.2.0-beta.1 / extension 4.2.0 adds read-only `inspect_element`
+diagnostics (hard limit 4 KiB), viewport dimensions in snapshots, and
+operation-derived local approval summaries. Resolved controls are bound to the
+exact document/element so re-rendered replacements cannot inherit approval.
+Entered values and script source are hidden in summaries; the explanation
+remains explicitly unverified.
+
+The native Firefox tests explicitly enable JSON viewing and verify local JSON
+POST responses. A public httpbin POST was also verified with fictitious data
+using the actual extension. JSON content type alone is not a reproduced
+incompatibility in the tested Firefox build; uninspectable browser-generated
+documents remain fail-closed, with no privileged bypass or automatic POST retry.
 
 Node 22.13+:
 

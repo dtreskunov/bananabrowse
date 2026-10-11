@@ -202,7 +202,13 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
       if (name === 'get_text' && !args.selector && !args.ref) args = { selector: 'body', ...args };
       const call = client.callTool({ name, arguments: { target_id: target.target_id,
         description: `Please ${name} on my selected website`, ...args } });
-      await expect(options.locator('#targets')).toContainText(`Please ${name}`);
+      let completed = false;
+      call.then(() => { completed = true; });
+      await expect.poll(async () => {
+        const command = (await state(options)).targets[0]?.commands[0];
+        return completed || (command?.state === 'pending' && !command.preparing);
+      }).toBe(true);
+      if (completed) return call;
       if (!testedSyntheticApproval) {
         testedSyntheticApproval = true;
         await expect(shared.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
@@ -222,6 +228,29 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     const text = await approved('get_text', { selector: 'body' });
     expect(text.isError).not.toBe(true);
     expect(JSON.stringify(text)).toContain('Real MCP owned page');
+    for (const explanation of ['x', 'nonsense '.repeat(30)]) {
+      const reading = client.callTool({ name: 'get_text', arguments: {
+        target_id: target.target_id, description: explanation, selector: '#key-result',
+      } });
+      await expect(options.locator('#targets')).toContainText('Operation: get_text');
+      await expect(options.locator('#targets')).toContainText('Selector: #key-result');
+      await expect(options.locator('#targets')).toContainText('Agent explanation is unverified');
+      await options.getByRole('button', { name: 'Approve', exact: true }).click();
+      expect((await reading).isError).not.toBe(true);
+    }
+    const replacement = client.callTool({ name: 'click', arguments: {
+      target_id: target.target_id, description: 'Click the displayed control', selector: '#disabled',
+    } });
+    await expect(options.locator('#targets')).toContainText('Control: button "Disabled action"');
+    await shared.locator('#disabled').evaluate(element => {
+      element.outerHTML = '<button id="disabled" onclick="globalThis.wrongReplacementClicked=true">New control</button>';
+    });
+    await options.getByRole('button', { name: 'Approve', exact: true }).click();
+    expect(JSON.parse((await replacement).content[0].text).error).toBe('ELEMENT_STALE');
+    expect(await shared.evaluate(() => globalThis.wrongReplacementClicked)).toBeUndefined();
+    await shared.locator('#disabled').evaluate(element => {
+      element.outerHTML = '<button id="disabled" disabled>Disabled action</button>';
+    });
     await exerciseActions(approved);
     const screenshot = await approved('get_screenshot');
     expect(screenshot.isError).not.toBe(true);

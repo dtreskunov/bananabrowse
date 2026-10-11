@@ -1,11 +1,19 @@
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
 export function pageHelper(operation, args = {}) {
+  const nonce = () => [...crypto.getRandomValues(new Uint8Array(16))]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('');
   const documentKey = '__domagentDocumentNonce';
-  if (!globalThis[documentKey]) globalThis[documentKey] = crypto.randomUUID();
+  if (!globalThis[documentKey]) globalThis[documentKey] = nonce();
   if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
   if (args.document && args.document !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
-  if (operation === 'inspect') return { url: location.href, document_nonce: globalThis[documentKey] };
+  if (operation === 'inspect') return { url: location.href, title: document.title,
+    content_type: document.contentType, document_nonce: globalThis[documentKey] };
   const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1 };
+  const bindings = globalThis.__domagentActionBindings ||= new Map();
+  if (operation === 'release_action') {
+    bindings.delete(args.approval_token);
+    return { released: true };
+  }
   const marker = '[data-domagent-sharing]';
   const parent = node => node.parentElement || node.getRootNode()?.host;
   const ignored = element => {
@@ -86,6 +94,33 @@ export function pageHelper(operation, args = {}) {
     editable: editable(element) && !readonly(element) && !disabled(element),
     in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
   });
+  const viewport = { width: innerWidth, height: innerHeight };
+  const diagnostic = element => {
+    const rect = element.getBoundingClientRect();
+    let reason = null;
+    if (!visible(element)) reason = rect.width <= 0 || rect.height <= 0 ? 'ZERO_SIZE' : 'CSS_HIDDEN';
+    else if (disabled(element)) reason = 'DISABLED';
+    else if (readonly(element)) reason = 'READONLY';
+    const flags = elementState(element, rect);
+    if (!reason && !flags.in_viewport) reason = 'OFF_SCREEN';
+    if (!reason && flags.in_viewport) {
+      const x = (Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2;
+      const y = (Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2;
+      let hit = document.elementFromPoint(x, y);
+      while (hit?.shadowRoot) {
+        const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
+        if (!deeper || deeper === hit) break;
+        hit = deeper;
+      }
+      let reached = false;
+      for (let node = hit; node; node = parent(node)) if (node === element) { reached = true; break; }
+      if (!reached) reason = ignored(hit) ? 'SHARING_INDICATOR' : 'OBSCURED';
+    }
+    return { matches: 1, state: reason ? 'not_ready' : 'ready', reason, document: globalThis[documentKey],
+      tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
+      ...flags, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewport,
+      value_redacted: element.matches('input,textarea,select') || element.isContentEditable };
+  };
   if (operation === 'get_page_snapshot') {
     let scope = document.body;
     if (args.selector) {
@@ -123,7 +158,7 @@ export function pageHelper(operation, args = {}) {
     const elementsTruncated = candidates.length > elements.length;
     return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
       ...text, elements, elements_truncated: elementsTruncated, truncated: elementsTruncated || text.text_truncated,
-      scope: 'top-level-and-open-shadow-roots', input_mode: 'dom' };
+      scope: 'top-level-and-open-shadow-roots', input_mode: 'dom', viewport };
   }
   if (operation === 'get_interactive_elements') {
     const candidates = all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') &&
@@ -143,7 +178,14 @@ export function pageHelper(operation, args = {}) {
     return { cleared: true };
   }
   let element;
-  if (args.ref) {
+  if (args.approval_token && operation !== 'prepare_action') {
+    const binding = bindings.get(args.approval_token);
+    if (!binding || binding.operation !== operation) return { error: 'ELEMENT_STALE' };
+    element = binding.element;
+    if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+      return { error: 'ELEMENT_STALE' };
+    }
+  } else if (args.ref) {
     element = state.entries.get(args.ref);
     if (!element?.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
       return { error: 'ELEMENT_STALE' };
@@ -156,10 +198,25 @@ export function pageHelper(operation, args = {}) {
       if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
       throw error;
     }
-    if (matches.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+    if (matches.length > 1) {
+      if (operation === 'inspect_element') return { matches: matches.length, state: 'ambiguous', reason: 'ELEMENT_AMBIGUOUS', viewport };
+      return { error: 'ELEMENT_AMBIGUOUS' };
+    }
     element = matches[0];
   } else element = operation === 'scroll' ? document.scrollingElement : document.body;
-  if (!element) return { error: 'ELEMENT_NOT_FOUND' };
+  if (!element) {
+    if (['inspect_element', 'prepare_action'].includes(operation)) {
+      return { matches: 0, state: 'missing', reason: 'ELEMENT_NOT_FOUND', viewport };
+    }
+    return { error: 'ELEMENT_NOT_FOUND' };
+  }
+  if (operation === 'inspect_element') return diagnostic(element);
+  if (operation === 'prepare_action') {
+    if (bindings.size >= 32) return { error: 'QUEUE_FULL' };
+    const token = nonce();
+    bindings.set(token, { element, operation: args.action });
+    return { ...diagnostic(element), approval_token: token };
+  }
   if (operation === 'get_text') {
     if (element.tagName === 'TITLE' && element.parentElement?.tagName === 'HEAD') {
       const limit = args.max_text_chars ?? 4000;
@@ -327,10 +384,15 @@ export function sharingIndicator(details) {
     banner.append(button);
   };
   if (details.command) {
+    for (const summary of details.command.summary || []) {
+      const line = document.createElement('p');
+      line.textContent = summary;
+      banner.append(line);
+    }
     const description = document.createElement('p');
-    description.textContent = `${details.command.operation}: ${details.command.description}`;
+    description.textContent = `Agent explanation (unverified): ${details.command.description}`;
     banner.append(description);
-    if (details.command.state === 'pending') {
+    if (details.command.state === 'pending' && !details.command.preparing) {
       if (details.command.operation === 'request_handoff') {
         add('Done', 'done');
         add('Cancel', 'decline');
@@ -341,7 +403,8 @@ export function sharingIndicator(details) {
       }
     } else {
       const waiting = document.createElement('p');
-      waiting.textContent = details.command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…';
+      waiting.textContent = details.command.preparing ? 'Inspecting target before approval…' :
+        details.command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…';
       banner.append(waiting);
     }
   }

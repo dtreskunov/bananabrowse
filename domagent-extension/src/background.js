@@ -63,7 +63,7 @@ async function uiAction(message) {
   if (!message || typeof message !== 'object') fail('INVALID_MESSAGE');
   if (message.type === 'ui.state') {
     const tab = await adapter.selectedTab().catch(() => null);
-    return { ...controller.snapshot(), selected_tab: tab ? { tabId: tab.id, url: tab.pendingUrl || tab.url } : null };
+    return { ...controller.snapshot(), selected_tab: tab ? { tabId: tab.id, title: tab.title, url: tab.pendingUrl || tab.url } : null };
   }
   if (message.type === 'ui.configure') {
     const { origin } = parseConnectionUrl(message.config.connection_url);

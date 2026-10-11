@@ -98,6 +98,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     'devtools.debugger.remote-enabled': true, 'devtools.debugger.prompt-connection': false,
     'devtools.debugger.force-local': true, 'devtools.chrome.enabled': true,
     'xpinstall.signatures.required': false, 'browser.shell.checkDefaultBrowser': false,
+    'devtools.jsonview.enabled': true,
   };
   await fs.writeFile(path.join(profile, 'user.js'), Object.entries(prefs)
     .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`).join('\n'));
@@ -194,8 +195,14 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       const waiting = client.callTool({ name, arguments: {
         target_id: grant.target_id, description: `Native fixture ${name}`, ...args,
       } });
+      let completed = false;
+      waiting.then(() => { completed = true; });
       if ((advertised.includes(name) && !grant.allow_all) || name === 'request_handoff') {
-        await expect.poll(async () => (await state()).targets[0]?.commands[0]?.state).toBe('pending');
+        await expect.poll(async () => {
+          const command = (await state()).targets[0]?.commands[0];
+          return completed || (command?.state === 'pending' && !command.preparing);
+        }).toBe(true);
+        if (completed) return waiting;
         const queued = (await state()).targets[0].commands[0];
         // Native RDP cannot provide trusted DOM gestures. Use only the trusted
         // options runtime boundary; never weaken the production overlay guard.
@@ -222,6 +229,8 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       expect((await state()).targets).toEqual([]);
     } else {
       expect(JSON.parse(jsonPage.content[0].text).state).toBe('loaded');
+      expect(JSON.parse(jsonPage.content[0].text).content_type).toBe('application/json');
+      console.log('Firefox JSON viewer enabled: actual extension injection/read succeeded on POST response');
       expect((await state()).targets[0].state).toBe('active');
       const jsonText = await call('get_text');
       expect(jsonText.isError).not.toBe(true);
@@ -231,6 +240,27 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
     await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
     grant = await share();
+    if (process.env.DOMAGENT_PUBLIC_HTTPBIN === '1') {
+      await call('evaluate_script', { script: 'document.querySelector("#echo-form").action = "https://httpbin.org/post"; true' });
+      await call('type_text', { selector: 'input[name="custname"]', text: 'DomAgent-public-fixture' });
+      expect((await call('click', { selector: '#submit-fixture' })).isError).not.toBe(true);
+      const response = await call('wait_for_page');
+      expect(await evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.url)`)).toBe('https://httpbin.org/post');
+      if (response.isError) {
+        expect(JSON.parse(response.content[0].text).error).toBe('PAGE_UNAVAILABLE');
+        console.log('Public httpbin JSON POST: Firefox rejected extension document inspection');
+      } else {
+        expect(JSON.parse(response.content[0].text).content_type).toBe('application/json');
+        const read = await call('get_text');
+        expect(read.isError).not.toBe(true);
+        expect(JSON.stringify(read)).toContain('DomAgent-public-fixture');
+        console.log('Public httpbin JSON POST: actual Firefox extension read verified');
+        await request({ type: 'ui.end', target_id: grant.target_id, reason: 'OWNER_PAUSED' });
+      }
+      await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
+      await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
+      grant = await share();
+    }
     const pendingHuman = client.callTool({ name: 'request_handoff', arguments: {
       target_id: grant.target_id, description: 'Complete login in the shared tab',
     } });

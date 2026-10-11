@@ -22,8 +22,9 @@ function prefix(text, length) {
 }
 
 export function compactResult(operation, value, args = {}) {
-  const limit = args.max_output_bytes ?? DEFAULT_OUTPUT_BYTES;
-  if (!Number.isSafeInteger(limit) || limit < 1024 || limit > MAX_OUTPUT_BYTES) failure('INVALID_ARGUMENT');
+  const maximum = operation === 'inspect_element' ? 4096 : MAX_OUTPUT_BYTES;
+  const limit = args.max_output_bytes ?? (operation === 'inspect_element' ? 4096 : DEFAULT_OUTPUT_BYTES);
+  if (!Number.isSafeInteger(limit) || limit < 1024 || limit > maximum) failure('INVALID_ARGUMENT');
   let result = value;
   const hasText = ['get_text', 'get_page_snapshot'].includes(operation);
   const hasElements = ['get_interactive_elements', 'get_page_snapshot'].includes(operation);

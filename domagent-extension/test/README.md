@@ -73,6 +73,13 @@ The Chromium and Firefox engines and image must already be available.
   detailed readiness timeout causes. Native Firefox also checks JSON POST
   navigation: a supported document remains readable, or a browser-refused
   document ends sharing without changing the response URL or repeating POST.
+- Inspector tests cover collapsed 610px responsive controls, desktop layout,
+  missing/ambiguous/stale targets, value redaction and unchanged focus/scroll.
+  Approval tests require operation-derived details even with one-character or
+  long nonsense explanations, delay positive decisions until preparation,
+  reject replaced controls under bound approvals, and discard cancelled previews.
+  Firefox JSON viewing is explicitly enabled; successful POST injection must
+  report application/json and expose the fixture response under the same grant.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

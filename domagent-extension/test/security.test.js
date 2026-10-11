@@ -120,6 +120,9 @@ test('operation schemas accept ref/document targets and typed actions without br
   assert.equal(validOperationArgs('scroll', { delta_y: Infinity }), false);
   assert.equal(validOperationArgs('wait_for_page', { timeout_ms: 0 }), true);
   assert.equal(validOperationArgs('get_page_snapshot', { frameId: 1 }), false);
+  assert.equal(validOperationArgs('inspect_element', { selector: '#search', max_output_bytes: 4096 }), true);
+  assert.equal(validOperationArgs('inspect_element', { selector: '#search', max_output_bytes: 4097 }), false);
+  assert.equal(validOperationArgs('inspect_element', { selector: '#search', approval_token: 'remote' }), false);
   assert.equal(validOperationArgs('get_page_snapshot', { selector: 'main', max_text_chars: 0, max_elements: 100, max_output_bytes: 65536 }), true);
   for (const args of [{ max_elements: 101 }, { max_text_chars: 16001 }, { max_output_bytes: 65537 }]) {
     assert.equal(validOperationArgs('get_page_snapshot', args), false);

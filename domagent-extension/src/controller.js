@@ -103,6 +103,7 @@ export class Controller {
         commands: grant.queue.map(queued => ({
           request_id: queued.message.request_id, operation: queued.message.operation,
           description: queued.message.description, expires_at: queued.deadline, state: queued.state,
+          summary: queued.preview?.summary || [], preparing: queued.preparing === true,
         })),
       })),
       failures: this.failures,
@@ -504,6 +505,7 @@ export class Controller {
       queued.cancelled = true;
       queued.abort?.();
       this.result(queued.message, { code: queued.state === 'executing' ? 'OUTCOME_UNKNOWN' : 'APPROVAL_REQUIRED' });
+      this.releasePreview(grant, queued);
     }
     if (announce && this.connection) {
       try {
@@ -546,6 +548,8 @@ export class Controller {
         command: grant.queue[0] ? {
           request_id: grant.queue[0].message.request_id, description: grant.queue[0].message.description,
           operation: grant.queue[0].message.operation, state: grant.queue[0].state,
+          summary: grant.queue[0].preview?.summary || [],
+          preparing: grant.queue[0].preparing === true,
         } : null,
       });
       if (!document) {
@@ -628,7 +632,13 @@ export class Controller {
 
   present(grant) {
     const queued = grant.queue[0];
-    if (queued?.state === 'pending' && grant.allowAll && queued.message.operation !== 'request_handoff') {
+    if (queued?.state === 'pending' && !queued.preview && this.adapter.prepareAction) {
+      if (!queued.preparing) {
+        queued.preparing = true;
+        void this.prepareQueued(grant, queued);
+      }
+    }
+    if (queued?.state === 'pending' && !queued.preparing && grant.allowAll && queued.message.operation !== 'request_handoff') {
       try { this.decide(grant.target_id, queued.message.request_id, 'approve'); }
       catch (error) { this.report(error); }
     }
@@ -643,11 +653,34 @@ export class Controller {
     this.changed();
   }
 
+  async prepareQueued(grant, queued) {
+    try {
+      const preview = await this.adapter.prepareAction(grant, queued.message.operation, queued.message.args);
+      if (this.grants.get(grant.target_id) !== grant || !grant.queue.includes(queued) ||
+          queued.cancelled || (!followsNavigation(queued.message.operation) &&
+          grant.documentGeneration !== queued.documentGeneration)) {
+        await this.adapter.releaseAction?.(grant, preview);
+        return;
+      }
+      queued.preview = preview;
+      queued.preparing = false;
+      this.present(grant);
+    } catch (error) {
+      queued.preparing = false;
+      if (this.grants.get(grant.target_id) === grant && grant.queue.includes(queued)) {
+        this.finishQueued(grant, queued, { code: errorCode(error) });
+        if (errorCode(error) === 'PAGE_UNAVAILABLE') {
+          await this.end(grant.target_id, 'CAPABILITY_UNAVAILABLE');
+        }
+      }
+    }
+  }
+
   decide(targetId, requestId, action) {
     const grant = this.grants.get(targetId);
     const queued = grant?.queue[0];
     if (!grant || grant.state !== 'active' || queued?.message.request_id !== requestId ||
-        queued.state !== 'pending') fail('APPROVAL_REQUIRED');
+        queued.state !== 'pending' || (queued.preparing && action !== 'decline')) fail('APPROVAL_REQUIRED');
     if (!['approve', 'decline', 'allow_all', 'done'].includes(action)) fail('INVALID_ARGUMENT');
     const human = queued.message.operation === 'request_handoff';
     if ((human && !['done', 'decline'].includes(action)) ||
@@ -673,7 +706,14 @@ export class Controller {
     if (queued.cancelled || !grant.queue.includes(queued)) return;
     grant.queue.splice(grant.queue.indexOf(queued), 1);
     this.result(queued.message, error, value);
+    this.releasePreview(grant, queued);
     this.present(grant);
+  }
+
+  releasePreview(grant, queued) {
+    if (queued.previewReleased) return;
+    queued.previewReleased = true;
+    void this.adapter.releaseAction?.(grant, queued.preview).catch(error => this.report(error));
   }
 
   cancelCommand(message) {
@@ -687,6 +727,7 @@ export class Controller {
     } else {
       queued.cancelled = true;
       grant.queue.splice(grant.queue.indexOf(queued), 1);
+      this.releasePreview(grant, queued);
       this.present(grant);
     }
   }
@@ -742,7 +783,7 @@ export class Controller {
         this.finishQueued(grant, queued, null, { state: 'completed', user_confirmed: true });
         return;
       }
-      const execution = this.adapter.execute(grant, message.operation, message.args, checkCurrent);
+      const execution = this.adapter.execute(grant, message.operation, message.args, checkCurrent, queued.preview);
       const timeout = new Promise((_, reject) => {
         queued.abort = () => reject(new Error('APPROVAL_REQUIRED'));
         timer = setTimeout(() => reject(new Error('OUTCOME_UNKNOWN')),
@@ -764,6 +805,7 @@ export class Controller {
     } finally {
       clearTimeout(timer);
       queued.abort = null;
+      this.releasePreview(grant, queued);
     }
   }
 

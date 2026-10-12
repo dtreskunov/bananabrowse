@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.3.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.2)
+[v4.3.0-beta.3](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.3)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -119,6 +119,17 @@ being rejected as an invalid future deadline. Update both the server and extensi
 existing tenant identities and credentials are unchanged.
 
 ## Service and development
+
+Service 4.3.0-beta.3 / extension 4.3.3 adds connected `browser_info` version
+diagnostics and fixed `injection_reason` codes to distinguish permission,
+restricted-renderer, frame-loss, helper failure and unknown inspection refusal.
+Browser metadata is self-reported, not a package attestation or authorization.
+The reported user-side httpbin POST refusal is not yet explained: disposable
+Firefox tests read the actual form's JSON response with its viewer both enabled
+and disabled. This release improves diagnosis, not a claim that all renderers
+are supported. No page-policy bypass, submission replay or grant renewal is added.
+Extension 4.3.2 was reported by the user but was not published from this checkout;
+4.3.3 avoids reusing that version. Update in place without resetting keys.
 
 Service 4.2.0-beta.1 / extension 4.2.0 adds read-only `inspect_element`
 diagnostics (hard limit 4 KiB), viewport dimensions in snapshots, and

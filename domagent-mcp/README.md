@@ -36,6 +36,14 @@ the shared session. Human waits default to five minutes (max ten), followed by a
 25-second execution budget. Configure client/proxy timeouts with headroom.
 See [collaborative protocol](../docs/COLLABORATIVE-BROWSING.md).
 
+Service 4.3.0-beta.3 / extension 4.3.3 reports connected `browser_info` versions
+and allowlisted `injection_reason` inspection diagnostics. Version metadata is
+self-reported and is never grant authority or package attestation; older/offline
+peers return null. The user-profile-specific httpbin refusal remains unresolved:
+actual form submissions are readable in disposable Firefox with either JSON
+viewer setting. Do not infer MIME-type incompatibility or replay a failed POST.
+Update in place to capture the safe refusal code and matching browser version.
+
 Service 4.3.0-beta.2 / extension 4.3.1 ships the following reliability changes.
 Sharing/handoff/page-action explanations require at least 40 trimmed characters
 and at most 500 total; this is enforced in schemas and runtime, not a security

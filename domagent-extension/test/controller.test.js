@@ -23,6 +23,7 @@ async function fixture(t) {
   const record = await keys.get(origin, tenant_id);
   record.identity = { tenant_id, tenant_label: 'Atlas', device_id: 'device-1', owner_id: 'owner-1', owner_label: 'Owner' };
   const adapter = {
+    async browserInfo() { return { extension_version: '4.3.3', browser_name: 'chrome', browser_version: null }; },
     capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
     async initialize(inventory) { calls.push(['initialize', inventory]); },
     async createWorkspace(id) { calls.push(['workspace', id]); return id + 1000; },

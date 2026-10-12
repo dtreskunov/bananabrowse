@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.3.0-beta.2 and extensions 4.3.1 use wire version 4 and policy
+Service 4.3.0-beta.3 and extensions 4.3.3 use wire version 4 and policy
 `single-tab-workspace-v1`. Each handle owns one actual website tab in a dedicated
 normal window, with browser-owned side-panel consent controls.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -49,6 +49,11 @@ idle device needs a new explicit request before asking the user to approve.
 Grant capabilities enumerate page operations, not management/handoff tools.
 An advertised operation is browser-supported but may fail page policy checks.
 No additional unshared tab information is exposed by these fields.
+Connected device results include `browser_info` (`extension_version`,
+`browser_name`, `browser_version`); it is null on older/offline peers. Browser
+version is null where the runtime API does not provide it (Chrome).
+These bounded self-reported strings are diagnostic only, never attestation,
+membership, protected-origin authority or permission to share.
 
 ## Actions
 
@@ -376,6 +381,13 @@ sharing. Browser/source/exception text is never included in these diagnostics.
 No POST is repeated, grant silently renewed, protected renderer bypassed or
 already executed action retried. A supported HTML/JSON POST response keeps its
 existing handle; genuinely refused documents remain fail-closed.
+`injection_reason` may distinguish `permission_denied`, `browser_restricted`,
+`frame_unavailable`, `helper_execution_failed`, `empty_result`, or `unknown`.
+It classifies fixed browser error patterns without retaining exception text or
+URLs. A reason is evidence of the API failure class, not proof that JSON viewers
+are inherently inaccessible. The actual httpbin form is tested, with fictitious
+input only, under both JSON-viewer settings; this does not qualify every browser
+version or installed profile policy.
 
 Form filling and a click acknowledgement are not a confirmed submission.
 Verify the actual response and compare document identity as well as URL.
@@ -387,7 +399,7 @@ Some browser builds or response policies may refuse injection, and such pages
 remain fail-closed. No raw privileged renderer access or automatic POST replay
 is introduced. A failed script may already have mutated the page.
 
-Install extension 4.3.1 and the matched v4 service. The catalogue contains 18
+Install extension 4.3.3 and the matched v4 service. The catalogue contains 18
 tools. Older wire-v3 extensions are intentionally rejected because their page
 consent surface is unsafe. Reconnect and explicitly share again; identities and
 credentials need no reset. Rollback requires matched server/extension versions

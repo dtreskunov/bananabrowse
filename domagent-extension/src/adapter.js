@@ -4,6 +4,18 @@ import { compactResult } from '../../shared/results.js';
 import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
 import { actionSummary } from './approval-summary.js';
 
+export function injectionReason(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  if (/missing host permission|cannot access contents|permission.*(?:denied|tab)/i.test(message)) return 'permission_denied';
+  if (/restricted|not allowed.*(?:page|url)|cannot.*(?:privileged|about:)|extensions.*(?:not permitted|not allowed)/i.test(message)) {
+    return 'browser_restricted';
+  }
+  if (/(?:frame|document|tab).*(?:removed|closed|not found|does not exist)|no (?:frame|tab)|frame.*not ready/i.test(message)) {
+    return 'frame_unavailable';
+  }
+  return 'unknown';
+}
+
 export class BrowserAdapter {
   constructor(api, browserName) {
     this.api = api;
@@ -24,6 +36,12 @@ export class BrowserAdapter {
   capabilities() {
     return OPERATIONS.filter(operation =>
       operation !== 'get_screenshot' || this.browserName === 'chrome' || !!this.api.tabs.captureTab);
+  }
+
+  async browserInfo() {
+    const version = this.api.runtime.getManifest().version;
+    const browser = this.api.runtime.getBrowserInfo ? await this.api.runtime.getBrowserInfo() : null;
+    return { extension_version: version, browser_name: this.browserName, browser_version: browser?.version ?? null };
   }
 
   async initialize(inventory) {
@@ -348,13 +366,25 @@ export class BrowserAdapter {
       });
     } catch (error) {
       if (operation !== 'inspect') this.onWarning(error);
-      fail(operation === 'inspect' ? 'PAGE_UNAVAILABLE' : 'CAPABILITY_UNAVAILABLE');
+      if (operation === 'inspect') {
+        throw Object.assign(new Error('PAGE_UNAVAILABLE'), {
+          code: 'PAGE_UNAVAILABLE', injection_reason: injectionReason(error),
+        });
+      }
+      fail('CAPABILITY_UNAVAILABLE');
     }
     const response = responses?.[0];
     if (response?.error) {
-      fail(operation === 'inspect' ? 'PAGE_UNAVAILABLE' : 'CAPABILITY_UNAVAILABLE');
+      if (operation === 'inspect') throw Object.assign(new Error('PAGE_UNAVAILABLE'), {
+        code: 'PAGE_UNAVAILABLE', injection_reason: 'helper_execution_failed',
+      });
+      fail('CAPABILITY_UNAVAILABLE');
     }
-    if (!response?.result) fail('TARGET_STALE');
+    if (!response?.result) {
+      throw Object.assign(new Error('TARGET_STALE'), {
+        code: 'TARGET_STALE', ...(operation === 'inspect' ? { injection_reason: 'empty_result' } : {}),
+      });
+    }
     if (response.result.error) fail(response.result.error);
     return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
       ? compactResult(operation, response.result, args) : response.result),
@@ -413,6 +443,7 @@ export class BrowserAdapter {
           if (code === 'TARGET_STALE' && timeoutMs > 0) code = 'WAIT_TIMEOUT';
           throw Object.assign(new Error(code), {
             code, inspection_stage: error.inspection_stage, last_error: error.code, timeout_ms: timeoutMs,
+            ...(error.injection_reason ? { injection_reason: error.injection_reason } : {}),
           });
         }
         await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));

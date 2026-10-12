@@ -29,10 +29,22 @@ export function validDescription(value) {
   return typeof value === 'string' && value.length <= 500 &&
     [...value.trim()].length >= MIN_DESCRIPTION_LENGTH;
 }
+export function validBrowserInfo(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).every(key => ['extension_version', 'browser_name', 'browser_version'].includes(key)) &&
+    typeof value.extension_version === 'string' && value.extension_version.length <= 32 &&
+    /^[0-9]+(?:\.[0-9]+){0,3}$/.test(value.extension_version) &&
+    ['chrome', 'firefox'].includes(value.browser_name) &&
+    (value.browser_version === null || (
+      typeof value.browser_version === 'string' && /^[0-9][0-9A-Za-z.+_-]{0,63}$/.test(value.browser_version)
+    ));
+}
 export function inspectionErrorDetails(error) {
   if (!['PAGE_UNAVAILABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
       !['tab_status', 'document_injection', 'document_state', 'document_changed'].includes(error.inspection_stage)) return {};
   const result = { inspection_stage: error.inspection_stage };
+  if (['permission_denied', 'browser_restricted', 'frame_unavailable', 'helper_execution_failed',
+    'empty_result', 'unknown'].includes(error.injection_reason)) result.injection_reason = error.injection_reason;
   if (['PAGE_UNAVAILABLE', 'TARGET_STALE'].includes(error.last_error) &&
       Number.isSafeInteger(error.timeout_ms) && error.timeout_ms >= 0 && error.timeout_ms <= PAGE_WAIT_MS) {
     result.last_error = error.last_error;

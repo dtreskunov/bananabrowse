@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   authPayload, connectionUrl, enrollmentPayload, grantPayload, parseConnectionUrl, sign, verify,
   validOperationArgs, OPERATIONS, validTargetId, waitErrorDetails,
-  validDescription, inspectionErrorDetails,
+  validDescription, inspectionErrorDetails, validBrowserInfo,
 } from '../../shared/protocol.js';
 import {
   MAX_RESULT_BYTES, boundedResult, errorCode, isUiSender, needsSetup, protectedRegex, protectedUnion, validateCommand,
@@ -47,6 +47,19 @@ test('Firefox uses a persistent background without broadening website permission
   assert.equal(manifest.externally_connectable, undefined);
 });
 
+test('browser metadata and inspection reasons are bounded allowlists, never authorization or exception text', () => {
+  const info = { extension_version: '4.3.3', browser_name: 'firefox', browser_version: '147.0a1' };
+  assert.equal(validBrowserInfo(info), true);
+  for (const change of [
+    { browser_name: 'private browser name' }, { browser_version: 'https://private.example' },
+    { extension_version: '4.3.3<script>' }, { browser_version: '1'.repeat(65) }, { source: 'private' },
+  ]) assert.equal(validBrowserInfo({ ...info, ...change }), false);
+  assert.equal(validBrowserInfo({ ...info, browser_version: null }), true);
+  assert.deepEqual(inspectionErrorDetails({ code: 'PAGE_UNAVAILABLE', inspection_stage: 'document_injection',
+    injection_reason: 'browser_restricted' }), { inspection_stage: 'document_injection', injection_reason: 'browser_restricted' });
+  assert.deepEqual(inspectionErrorDetails({ code: 'PAGE_UNAVAILABLE', inspection_stage: 'document_injection',
+    injection_reason: 'private exception text' }), { inspection_stage: 'document_injection' });
+});
 test('only a fresh installation opens setup; updates/restarts never pop up or restore sharing', () => {
   assert.equal(needsSetup('install', null), true);
   for (const reason of ['update', 'chrome_update', 'shared_module_update']) {

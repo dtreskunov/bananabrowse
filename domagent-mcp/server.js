@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws';
 import {
   VERSION, POLICY_ID, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
   authPayload, grantPayload, verify, navigationUrl, validOperationArgs, validTargetId, waitErrorDetails,
-  validDescription, inspectionErrorDetails,
+  validDescription, inspectionErrorDetails, validBrowserInfo,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
@@ -103,6 +103,11 @@ export class BridgeServer {
     if (!session.authenticated) {
       if (m.type === 'hello' && !session.challenge) {
         requireValue(m.version === VERSION, 'VERSION_UNSUPPORTED');
+        requireValue(m.browser_info === undefined || validBrowserInfo(m.browser_info), 'INVALID_MESSAGE');
+        session.browser_info = m.browser_info ? {
+          extension_version: m.browser_info.extension_version, browser_name: m.browser_info.browser_name,
+          browser_version: m.browser_info.browser_version,
+        } : null;
         const device = this.store.deviceByKey(m.key_id, session.tenant_id);
         requireValue(device && device.extension_origin === session.origin, 'NOT_AUTHORIZED', 403);
         session.device = device;
@@ -392,6 +397,7 @@ export class BridgeServer {
         tenant_id: device.tenant_id,
         state,
         connection_state: connected ? 'connected' : 'offline',
+        browser_info: connected ? connection.browser_info : null,
         sharing_state: grant ? 'active' : 'none',
         pending_request_id: pending?.request_id ?? null,
         target_id: grant?.target_id ?? null, capabilities: grant?.capabilities ?? [],

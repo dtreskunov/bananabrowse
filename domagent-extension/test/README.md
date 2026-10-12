@@ -90,6 +90,13 @@ The Chromium and Firefox engines and image must already be available.
   ancestors and explicit reveal candidates without focus/scroll/value changes.
   Full service/browser smoke tests have a four-minute total budget for these
   additional cases; individual operation timeouts are unchanged.
+- Browser diagnostics cover manifest/Firefox version reporting, current
+  tenant-scoped metadata and null legacy/offline peers. Inspection failure codes
+  never include browser exception text or private URLs. The optional public
+  httpbin case submits the actual `/forms/post` form once with fictitious data.
+  Set `DOMAGENT_JSON_VIEWER=0` alongside `DOMAGENT_PUBLIC_HTTPBIN=1` to qualify the
+  viewer-disabled path; the default keeps it enabled. Initial native addon install
+  can time out in the harness; a fresh isolated run is required, not a silent skip.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

@@ -1,7 +1,7 @@
 import {
   VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS, authPayload, enrollmentPayload, extensionOrigin,
   connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId, waitErrorDetails,
-  validDescription, inspectionErrorDetails,
+  validDescription, inspectionErrorDetails, validBrowserInfo,
 } from '../../shared/protocol.js';
 import {
   MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
@@ -50,6 +50,7 @@ export class Controller {
     });
     this.eligibleClients = [];
     this.toolbarIntent = null;
+    this.browserInfo = null;
     this.adapter.onTabEvent = (...args) => this.tabEvent(...args);
     this.adapter.onWarning = error => this.report(error);
     this.adapter.onRequestClosed = requestId => {
@@ -66,6 +67,8 @@ export class Controller {
   }
 
   async initialize() {
+    this.browserInfo = await this.adapter.browserInfo();
+    if (!validBrowserInfo(this.browserInfo)) fail('INVALID_MESSAGE');
     await this.history.load();
     const saved = await this.storage.get(['config', 'savedConnections']);
     // No inventory survives a background/browser restart; identity is not authority.
@@ -104,6 +107,7 @@ export class Controller {
       eligible_clients: this.eligibleClients,
       activity: this.history.entries,
       history_unavailable: this.history.unavailable,
+      browser_info: this.browserInfo,
       workspaces: this.adapter.workspaceList?.() || [],
       pending: [...this.pending.values()].map(request => ({
         request_id: request.request_id, client_id: request.client_id, client_label: request.client_label,
@@ -278,7 +282,8 @@ export class Controller {
     socket.onopen = () => {
       if (!this.current(socket, generation)) return;
       this.phase = 'authenticating';
-      socket.send(JSON.stringify({ type: 'hello', version: VERSION, tenant_id: this.config.tenant_id, key_id: this.record.key_id }));
+      socket.send(JSON.stringify({ type: 'hello', version: VERSION, tenant_id: this.config.tenant_id, key_id: this.record.key_id,
+        ...(this.browserInfo ? { browser_info: this.browserInfo } : {}) }));
       this.changed();
     };
     socket.onmessage = event => {

@@ -115,6 +115,11 @@ function render(snapshot) {
   byId('status').textContent = status;
   byId('identity').textContent = snapshot.config.service_origin
     ? new URL(snapshot.config.service_origin).host : 'Paste the link your assistant or administrator gave you.';
+  if (snapshot.browser_info) {
+    const info = snapshot.browser_info;
+    byId('identity').textContent += ` · Extension ${info.extension_version} · ${info.browser_name}` +
+      (info.browser_version ? ` ${info.browser_version}` : ' (browser version unavailable)');
+  }
   byId('connect').disabled = !snapshot.identity || snapshot.phase !== 'disconnected';
   byId('disconnect').disabled = snapshot.phase === 'disconnected' && !snapshot.config.enabled;
 

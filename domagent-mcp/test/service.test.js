@@ -77,7 +77,7 @@ async function enroll(ctx) {
   assert.equal(response.status, 201);
   return { ...started, device: await response.json(), confirmation };
 }
-async function connect(ctx, device, { pong = true } = {}) {
+async function connect(ctx, device, { pong = true, browser_info } = {}) {
   const ws = new WebSocket(`${ctx.base.replace('http:', 'ws:')}/extension/${ctx.tenant.id}`,
     { origin: EXTENSION_ORIGIN });
   const send = ws.send.bind(ws);
@@ -101,7 +101,8 @@ async function connect(ctx, device, { pong = true } = {}) {
     });
   };
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-  ws.send(JSON.stringify({ type: 'hello', key_id: device.id, version: VERSION }));
+  ws.send(JSON.stringify({ type: 'hello', key_id: device.id, version: VERSION,
+    ...(browser_info ? { browser_info } : {}) }));
   const challenge = await next('challenge');
   ws.send(JSON.stringify({ type: 'proof', signature: await sign(device.key.privateKey, authPayload(challenge)) }));
   return { ws, next, challenge, authenticated: await next('authenticated') };
@@ -119,6 +120,23 @@ async function ready(connection, command) {
   connection.ws.send(JSON.stringify({ type: 'command.ready', request_id: command.request_id, target_id: command.target_id }));
   return connection.next('command.execute');
 }
+
+test('only authenticated current browser metadata is exposed to its tenant as diagnostic data', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const browser_info = { extension_version: '4.3.3', browser_name: 'firefox', browser_version: '146.0.1' };
+  const connection = await connect(ctx, device, { browser_info });
+  assert.deepEqual(ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0].browser_info, browser_info);
+  const other = another(ctx);
+  assert.deepEqual(ctx.app.bridge.targets(other.client.id, other.tenant.id), []);
+  assert.equal(ctx.app.bridge.grants.size, 0);
+  ctx.app.bridge.disconnected(ctx.app.bridge.connections.get(device.device.device_id), 'BROWSER_OFFLINE');
+  connection.ws.close();
+  assert.equal(ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0].browser_info, null);
+  const legacy = await connect(ctx, device);
+  assert.equal(ctx.app.bridge.targets(ctx.client.id, ctx.tenant.id)[0].browser_info, null);
+  legacy.ws.close();
+});
 
 test('fresh signed re-sharing preserves the exact existing grant, pending command and connection', async t => {
   const ctx = await setup(t);
@@ -752,13 +770,13 @@ test('safe inspection failures propagate through authenticated HTTP MCP without 
     const pending = await connection.next('command');
     await ready(connection, pending);
     connection.ws.send(JSON.stringify({ type: 'result', request_id: pending.request_id, target_id: grant.target_id,
-      error: { code: 'PAGE_UNAVAILABLE', inspection_stage, last_error: 'PAGE_UNAVAILABLE',
+      error: { code: 'PAGE_UNAVAILABLE', inspection_stage, injection_reason: 'browser_restricted', last_error: 'PAGE_UNAVAILABLE',
         timeout_ms: 10000, message: 'private browser error body', url: 'private url' } }));
     const response = await work;
     assert.equal(response.isError, true);
     const returned = JSON.parse(response.content[0].text);
     assert.deepEqual(returned, inspection_stage === 'document_injection'
-      ? { error: 'PAGE_UNAVAILABLE', inspection_stage, last_error: 'PAGE_UNAVAILABLE', timeout_ms: 10000 }
+      ? { error: 'PAGE_UNAVAILABLE', inspection_stage, injection_reason: 'browser_restricted', last_error: 'PAGE_UNAVAILABLE', timeout_ms: 10000 }
       : { error: 'PAGE_UNAVAILABLE' });
     assert.equal(JSON.stringify(response).includes('private'), false);
     assert.equal(ctx.app.bridge.grants.has(grant.target_id), false);

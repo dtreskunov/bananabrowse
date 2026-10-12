@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { BrowserAdapter } from '../src/adapter.js';
+import { BrowserAdapter, injectionReason } from '../src/adapter.js';
 
 function event() {
   const listeners = [];
@@ -11,6 +11,7 @@ function fixture(browser = 'chrome') {
   const calls = [];
   let sessionRules = [];
   const api = {
+    runtime: { getManifest() { return { version: '4.3.3' }; } },
     permissions: { async contains() { return true; } },
     tabs: {
       onUpdated: event(), onRemoved: event(),
@@ -57,6 +58,44 @@ function fixture(browser = 'chrome') {
   adapter.contexts.set(100, new Map([['main-frame', { id: 1, uniqueId: 'main-context' }]]));
   return { api, calls, adapter };
 }
+
+test('inspection refusal diagnostics are fixed codes and never expose raw browser URLs or errors', async () => {
+  const cases = [
+    ['Missing host permission for the tab https://private.example/?secret=yes', 'permission_denied'],
+    ['Cannot access a privileged URL https://private.example/', 'browser_restricted'],
+    ['Frame 0 was removed', 'frame_unavailable'],
+    ['Unexpected internal error with private data', 'unknown'],
+  ];
+  for (const [message, expected] of cases) {
+    assert.equal(injectionReason(new Error(message)), expected);
+    const f = fixture('firefox');
+    f.api.scripting.executeScript = async () => { throw new Error(message); };
+    await assert.rejects(f.adapter.inspect(100, []), error => {
+      assert.equal(error.code, 'PAGE_UNAVAILABLE');
+      assert.equal(error.injection_reason, expected);
+      assert.equal(error.inspection_stage, 'document_injection');
+      assert.equal(JSON.stringify(error).includes('private'), false);
+      assert.equal(error.message, 'PAGE_UNAVAILABLE');
+      return true;
+    });
+  }
+  const f = fixture('firefox');
+  f.api.scripting.executeScript = async () => [{ error: new Error('private helper exception') }];
+  await assert.rejects(f.adapter.inspect(100, []), error => error.injection_reason === 'helper_execution_failed');
+  f.api.scripting.executeScript = async () => [];
+  await assert.rejects(f.adapter.inspect(100, []), error => error.injection_reason === 'empty_result');
+});
+
+test('browser diagnostics identify the installed extension and available Firefox version', async () => {
+  const f = fixture('firefox');
+  f.api.runtime.getBrowserInfo = async () => ({ name: 'Firefox', version: '146.0.1' });
+  assert.deepEqual(await f.adapter.browserInfo(),
+    { extension_version: '4.3.3', browser_name: 'firefox', browser_version: '146.0.1' });
+  const chrome = fixture();
+  assert.equal((await chrome.adapter.browserInfo()).browser_version, null);
+  f.api.runtime.getBrowserInfo = async () => { throw new Error('Browser info API failure'); };
+  await assert.rejects(f.adapter.browserInfo(), /Browser info API failure/);
+});
 
 test('cosmetic indicator cleanup cannot delay debugger and network protection teardown', async () => {
   const f = fixture();
@@ -244,13 +283,14 @@ test('failed document inspection is not an optional-operation capability failure
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   f.adapter.onWarning = () => {};
-  f.api.scripting.executeScript = async () => { throw new Error('Browser refuses document injection'); };
+  f.api.scripting.executeScript = async () => { throw new Error('Missing host permission for the tab'); };
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   for (const operation of ['navigate', 'get_text', 'get_interactive_elements']) {
     const work = f.adapter.execute(grant, operation,
       operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {});
     const rejected = assert.rejects(work, error => error.code === 'PAGE_UNAVAILABLE' &&
-      error.inspection_stage === 'document_injection' && error.timeout_ms === 10000);
+      error.inspection_stage === 'document_injection' && error.timeout_ms === 10000 &&
+      error.injection_reason === 'permission_denied');
     await new Promise(resolve => setImmediate(resolve));
     t.mock.timers.tick(10000);
     await rejected;

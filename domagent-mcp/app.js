@@ -12,7 +12,7 @@ import { Fault, requireValue, failureCode, audit } from './errors.js';
 const COOKIE = '__Host-domagent_session';
 const FLOW_COOKIE = '__Host-domagent_flow';
 const SETUP_COOKIE = '__Host-domagent_setup';
-const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.2';
+const RELEASE = 'https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.3';
 const secureCookie = (name, value, age) =>
   `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${age}`;
 const equal = (a, b) => {
@@ -273,7 +273,7 @@ export function createApp(store, config, oidc) {
       return;
     }
     if ((path === '/' || path === '/health') && ['GET', 'HEAD'].includes(method)) {
-      json(res, 200, { service: 'domagent', status: 'ok', version: '4.3.0-beta.2', protocol_version: VERSION });
+      json(res, 200, { service: 'domagent', status: 'ok', version: '4.3.0-beta.3', protocol_version: VERSION });
       return;
     }
     if (path === '/style.css' && method === 'GET') {

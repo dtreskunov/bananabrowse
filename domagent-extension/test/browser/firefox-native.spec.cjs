@@ -98,7 +98,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     'devtools.debugger.remote-enabled': true, 'devtools.debugger.prompt-connection': false,
     'devtools.debugger.force-local': true, 'devtools.chrome.enabled': true,
     'xpinstall.signatures.required': false, 'browser.shell.checkDefaultBrowser': false,
-    'devtools.jsonview.enabled': true,
+    'devtools.jsonview.enabled': process.env.DOMAGENT_JSON_VIEWER !== '0',
   };
   await fs.writeFile(path.join(profile, 'user.js'), Object.entries(prefs)
     .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});`).join('\n'));
@@ -168,6 +168,9 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     store.approveEnrollment((await state()).enrollment.enrollment_id, ownerId, tenant.id);
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
     const deviceId = (await state()).identity.device_id;
+    expect((await state()).browser_info).toMatchObject({
+      extension_version: manifest.version, browser_name: 'firefox',
+    });
     const keyBefore = (await state()).key_id;
     client = new Client({ name: 'native-firefox-smoke', version: '1' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${backend.port}/mcp/${tenant.id}`), {
@@ -187,6 +190,9 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       return (await state()).targets[0];
     }
     let grant = await share();
+    const listed = JSON.parse((await client.callTool({ name: 'list_browser_targets', arguments: {} })).content[0].text);
+    expect(listed.find(device => device.device_id === deviceId).browser_info)
+      .toMatchObject({ extension_version: manifest.version, browser_name: 'firefox' });
     const reshared = await share();
     expect(reshared.target_id).toBe(grant.target_id);
     expect(reshared.windowId).toBe(grant.windowId);
@@ -247,14 +253,19 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
     grant = await share();
     if (process.env.DOMAGENT_PUBLIC_HTTPBIN === '1') {
-      await call('evaluate_script', { script: 'document.querySelector("#echo-form").action = "https://httpbin.org/post"; true' });
+      await call('navigate', { url: 'https://httpbin.org/forms/post' });
+      expect((await call('wait_for_page')).isError).not.toBe(true);
       await call('type_text', { selector: 'input[name="custname"]', text: 'DomAgent-public-fixture' });
-      expect((await call('click', { selector: '#submit-fixture' })).isError).not.toBe(true);
+      expect((await call('click', { selector: 'form button' })).isError).not.toBe(true);
       const response = await call('wait_for_page');
       expect(await evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.url)`)).toBe('https://httpbin.org/post');
       if (response.isError) {
         expect(JSON.parse(response.content[0].text).error).toBe('PAGE_UNAVAILABLE');
-        console.log('Public httpbin JSON POST: Firefox rejected extension document inspection');
+        console.log('Public httpbin JSON POST refusal:', JSON.parse(response.content[0].text));
+        console.log('Public fixture injection diagnostic:', await evaluate(`browser.scripting.executeScript({
+          target:{tabId:${userTab.id},frameIds:[0]},world:"ISOLATED",
+          func:() => ({url:location.href,type:document.contentType,crypto:typeof crypto.getRandomValues})
+        }).then(results => ({results}), error => ({message:error.message}))`));
       } else {
         expect(JSON.parse(response.content[0].text).content_type).toBe('application/json');
         const read = await call('get_text');

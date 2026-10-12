@@ -1,5 +1,5 @@
-export const VERSION = 3;
-export const POLICY_ID = 'collaborative-tab-v1';
+export const VERSION = 4;
+export const POLICY_ID = 'single-tab-workspace-v1';
 export const HEARTBEAT_MS = 5_000;
 export const LIVENESS_MS = 15_000;
 export const HUMAN_WAIT_MS = 600_000;
@@ -159,26 +159,27 @@ export async function keyId(jwk) {
 }
 
 export function authPayload(c) {
-  return encode(['domagent.v3', 'auth', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.nonce, c.key_id]);
+  return encode(['domagent.v4', 'auth', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.nonce, c.key_id]);
 }
 
 export function startPayload(c) {
-  return encode(['domagent.v3', 'enroll-start', c.origin, tenantId(c.tenant_id), c.nonce, c.key_id, c.extension_origin, c.label]);
+  return encode(['domagent.v4', 'enroll-start', c.origin, tenantId(c.tenant_id), c.nonce, c.key_id, c.extension_origin, c.label]);
 }
 
 export function statusPayload(c) {
-  return encode(['domagent.v3', 'enroll-status', c.origin, tenantId(c.tenant_id), c.enrollment_id]);
+  return encode(['domagent.v4', 'enroll-status', c.origin, tenantId(c.tenant_id), c.enrollment_id]);
 }
 
 export function enrollmentPayload(c) {
-  return encode(['domagent.v3', 'enroll-confirm', c.origin, tenantId(c.tenant_id), c.enrollment_id, c.owner_id,
+  return encode(['domagent.v4', 'enroll-confirm', c.origin, tenantId(c.tenant_id), c.enrollment_id, c.owner_id,
     c.key_id, c.nonce, c.extension_origin]);
 }
 
 export function grantPayload(c) {
   if (!Number.isSafeInteger(c.tab_id) || c.tab_id < 0) throw new Error('INVALID_TAB');
-  return encode(['domagent.v3', 'grant', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.request_id,
-    c.client_id, c.target_id, c.tab_id, c.policy_id, c.nonce, [...c.capabilities].sort()]);
+  if (!Number.isSafeInteger(c.window_id) || c.window_id < 0) throw new Error('INVALID_WINDOW');
+  return encode(['domagent.v4', 'grant', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.request_id,
+    c.client_id, c.target_id, c.tab_id, c.window_id, c.policy_id, c.nonce, [...c.capabilities].sort()]);
 }
 
 export async function sign(key, payload) {

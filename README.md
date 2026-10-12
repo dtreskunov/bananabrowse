@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.2.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.2.0-beta.1)
+[v4.3.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.1)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -26,13 +26,15 @@ stay open to keep the browser online.
 
 ## Share a tab you choose
 
-When an agent requests access, the extension opens a small request window and
-marks its toolbar. Go to the existing tab you want to share, or open a new one.
-Use the extension's **Share this tab** action. The waiting MCP call returns an
-opaque handle for that exact tab. It can request additional tabs separately.
+An agent request notifies/marks the toolbar; remote code cannot open native
+panels without a browser gesture. Click the toolbar to open trusted controls and
+share the selected actual website tab with an unambiguous linked application.
+The tab moves into its own normal window, preserving its document/unsaved state.
+You can also review requests in the native panel. Each tab/window has one handle;
+additional tabs, popups or moving the tab revoke control rather than adopting them.
 
-Every action includes a plain-language explanation. Review it on the shared page
-or in the extension:
+Every action includes an unverified explanation and operation-derived details.
+Review them in Chrome's side panel or Firefox's sidebar, outside the webpage:
 
 **Approve** executes the exact action once. **Decline** rejects it.
 **Allow all while sharing** accepts supported ordinary-page actions for that
@@ -45,9 +47,14 @@ agent waits. Password/CAPTCHA detection no longer automatically revokes control.
 User navigation invalidates stale queued actions, not the sharing relationship.
 Do not automatically retry an uncertain mutation.
 
-**Stop sharing** immediately disables local authority and pending work. A page
+**Stop sharing** immediately disables authority/pending work and closes the
+controlled tab, losing unsaved state. Explicit Disconnect closes controlled tabs
+too. Unexpected failures/revocations leave the response for manual inspection.
+Local private history keeps at most 200 metadata-only commands/observed events;
+it is not a full audit of arbitrary JavaScript effects. A page
 border/banner is a useful visual cue, not an unspoofable security boundary;
-extension toolbar and popup state remain independent.
+extension toolbar and native panel state remain independent. No positive
+consent controls exist in webpage DOM; `page.decision` is always rejected.
 
 ## MCP application setup
 
@@ -138,8 +145,8 @@ origin and this service's own OIDC client/issuer. Place the plaintext backend
 behind a trusted TLS proxy. See [deployment/security](docs/SECURE-PAIRING.md)
 and [2.x tenant migration](docs/TENANT-MIGRATION.md).
 
-**Protocol v3 is a coordinated server/extension upgrade.** 3.x tenant databases,
-credentials and device identities remain; no reset is needed. Old v2 live proofs
+**Protocol v4 is a coordinated server/extension upgrade.** Existing tenant databases,
+credentials and device identities remain; no reset is needed. Old v3 live proofs
 and grants cannot authorize the new service. Update the extensions and reconnect,
 then explicitly share again. Beta.2 (2.x) databases still require explicit migration.
 
@@ -149,7 +156,8 @@ privileged fallback or visible-tab screenshot is provided. This is an unsigned
 private beta; physical permission prompts and all advertised browser versions
 remain acceptance gates.
 
-Shared tabs use existing website sign-ins and can expose private page content,
+The dedicated window uses the normal profile and preserves opener relationships;
+it is not cookie/account isolation or a sandbox. Shared tabs use existing website sign-ins and can expose private page content,
 readable cookies/storage, and network/account actions. Human login does not promise
 secret isolation, especially under allow-all scripts. Pause/stop cannot undo effects
 or JavaScript already scheduled. Protected DomAgent/IdP management origins stay blocked.

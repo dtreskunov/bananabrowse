@@ -177,15 +177,19 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
       requestInit: { headers: { Authorization: `Bearer ${credentials.credential}` } },
     }));
     const pageOrigin = `http://127.0.0.1:${pageServer.address().port}`;
-    const shared = await context.newPage();
+    let shared = await context.newPage();
     await shared.goto(pageOrigin);
+    await shared.locator('input[name="search"]').fill('unsaved workspace fixture');
+    await shared.evaluate(() => { globalThis.workspaceDocumentStamp = 'same original document'; });
+    const originalWindow = await worker.evaluate(url =>
+      chrome.tabs.query({}).then(tabs => tabs.find(tab => tab.url === url).windowId), pageOrigin + '/');
     const accessPromise = client.callTool({ name: 'request_browser_access', arguments: {
       device_id: deviceId, description: 'Read the website I select',
     } });
     await expect(options.locator('#requests')).toContainText('Atlas would like');
     await expect(options.locator('#requests')).toContainText('not a verified identity');
-    await expect.poll(() => context.pages().some(page => page.url().includes('/request.html?'))).toBe(true);
-    const requestWindow = context.pages().find(page => page.url().includes('/request.html?'));
+    expect(context.pages().some(page => page.url().includes('/request.html?'))).toBe(false);
+    const requestWindow = options;
     await expect(requestWindow.locator('#requests')).toContainText('Read the website I select');
     await expect(requestWindow.locator('#requests input[type="checkbox"]')).toHaveCount(0);
     await expect(requestWindow.locator('#requests')).toContainText(pageOrigin);
@@ -195,6 +199,12 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     expect(JSON.parse(access.content[0].text).state).toBe('active');
     await expect(options.locator('#targets')).toContainText('can use this tab');
     const target = (await state(options)).targets[0];
+    expect(target.windowId).not.toBe(originalWindow);
+    expect(await shared.locator('input[name="search"]').inputValue()).toBe('unsaved workspace fixture');
+    expect(await shared.evaluate(() => globalThis.workspaceDocumentStamp)).toBe('same original document');
+    expect(await worker.evaluate(windowId => chrome.tabs.query({ windowId }).then(tabs => tabs.length), target.windowId)).toBe(1);
+    expect(await worker.evaluate(tabId => chrome.sidePanel.getOptions({ tabId }), target.tabId))
+      .toMatchObject({ enabled: true, path: `panel.html?window_id=${target.windowId}` });
     expect((await worker.evaluate(() => chrome.tabs.query({ active: true, windowType: 'normal' })))
       .some(tab => tab.id === target.tabId && tab.url.startsWith(pageOrigin))).toBe(true);
     let testedSyntheticApproval = false;
@@ -211,7 +221,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
       if (completed) return call;
       if (!testedSyntheticApproval) {
         testedSyntheticApproval = true;
-        await expect(shared.getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
+        await expect(shared.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
         await shared.evaluate(() => {
           const root = document.querySelector('[data-domagent-sharing]').shadowRoot;
           for (const button of root.querySelectorAll('button')) {
@@ -257,7 +267,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     expect(screenshot.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
     expect(Buffer.from(screenshot.content[0].data, 'base64').subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
     await expect(shared.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
-    await expect(options.locator('#error')).toBeEmpty();
+    await expect(options.locator('#error')).toContainText('Click the DomAgent toolbar');
     expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('ON');
     expect(await worker.evaluate(() => chrome.action.getTitle({}))).toContain('Atlas can use');
     expect(JSON.stringify(text)).not.toContain('Stop sharing');
@@ -267,14 +277,14 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     await expect(options.locator('#targets')).toContainText('Please sign in');
     await shared.goto(`${pageOrigin}/login`);
     await shared.locator('#password').fill('fixture-only-password');
-    await expect(shared.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
+    await expect(shared.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
     await shared.evaluate(() => {
       const root = document.querySelector('[data-domagent-sharing]').shadowRoot;
-      [...root.querySelectorAll('button')].find(button => button.textContent === 'Done').click();
+      for (const button of root.querySelectorAll('button')) button.click();
     });
     await new Promise(resolve => setTimeout(resolve, 150));
     expect((await state(options)).targets[0].commands[0].state).toBe('pending');
-    await shared.getByRole('button', { name: 'Done', exact: true }).click();
+    await options.getByRole('button', { name: 'Done', exact: true }).click();
     const humanResult = await human;
     expect(humanResult.isError).not.toBe(true);
     expect(JSON.parse(humanResult.content[0].text)).toMatchObject({ state: 'completed', user_confirmed: true });
@@ -297,7 +307,7 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     expect((await state(options)).targets[0].state).toBe('active');
     await shared.getByRole('button', { name: 'Stop sharing' }).click();
     await expect(options.locator('#targets')).toContainText('No shared tabs');
-    await expect(shared.locator('[data-domagent-sharing]')).toHaveCount(0);
+    await expect.poll(() => shared.isClosed()).toBe(true);
     expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('IDLE');
     expect(await worker.evaluate(() => chrome.action.getTitle({}))).toContain('No tabs are being shared');
     // Historical cosmetic errors do not turn off independent trusted UI.
@@ -313,13 +323,13 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
         return response;
       };
     });
-    await expect(options.locator('#error')).toBeEmpty();
+    await expect(options.locator('#error')).toContainText('Click the DomAgent toolbar');
     await options.evaluate(() => globalThis.restoreMessages());
     const paused = await client.callTool({
       name: 'get_text', arguments: { target_id: target.target_id, selector: 'body', description: 'Read stopped tab' },
     });
     expect(paused.isError).toBe(true);
-    expect((await worker.evaluate(id => chrome.tabs.get(id), target.tabId)).url).toContain('127.0.0.1');
+    expect(await worker.evaluate(id => chrome.tabs.query({}).then(tabs => tabs.some(tab => tab.id === id)), target.tabId)).toBe(false);
     expect(await worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules())).toEqual([]);
 
     // The owner can choose a different active normal tab after the request window opens.
@@ -346,7 +356,12 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
     } });
     expect(JSON.parse(timed.content[0].text).error).toBe('COMMAND_EXPIRED');
     expect((await state(options)).targets[0].state).toBe('active');
-    await options.getByRole('button', { name: 'Stop sharing', exact: true }).click();
+    const unrelated = await worker.evaluate(({ windowId, url }) =>
+      chrome.tabs.create({ windowId, url, active: false }), { windowId: changed.windowId, url: `${pageOrigin}/unrelated` });
+    await expect.poll(async () => (await state(options)).targets.length).toBe(0);
+    await options.getByRole('button', { name: 'Close controlled tab', exact: true }).click();
+    expect(await worker.evaluate(tabId => chrome.tabs.get(tabId).then(tab => tab.url), unrelated.id))
+      .toBe(`${pageOrigin}/unrelated`);
     const expiring = await client.callTool({ name: 'request_browser_access', arguments: {
       device_id: deviceId, description: 'Let this sharing request expire', wait_timeout_seconds: 1,
     } });
@@ -387,7 +402,8 @@ test('real Chrome extension and actual service: guided setup, automatic pairing,
       device_id: deviceId, description: 'Share again after tenant switch',
     } });
     await expect(options.locator('#requests')).toContainText('Atlas would like');
-    await shared.bringToFront();
+    shared = await context.newPage();
+    await shared.goto(pageOrigin);
     await expect(options.locator('#requests')).toContainText(pageOrigin);
     await options.getByRole('button', { name: 'Share this tab with Atlas', exact: true }).click();
     expect((await nextAccess).isError).not.toBe(true);

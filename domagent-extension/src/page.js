@@ -367,17 +367,17 @@ export function sharingIndicator(details) {
   const api = typeof browser === 'undefined' ? chrome : browser;
   // Capture the isolated-world runtime method, never a page-world bridge.
   const send = api.runtime.sendMessage.bind(api.runtime);
-  const add = (label, action) => {
+  const addStop = () => {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = label;
+    button.textContent = 'Stop sharing and close tab';
     button.addEventListener('click', event => {
       // Page scripts can reach this cosmetic DOM, but cannot supply a user gesture.
-      if (action !== 'stop' && !event.isTrusted) return;
+      if (!event.isTrusted) return;
       button.disabled = true;
-      send({ type: action === 'stop' ? 'page.stop' : 'page.decision',
+      send({ type: 'page.stop',
         target_id: details.target_id, token: details.token,
-        request_id: details.command?.request_id, action })
+        request_id: details.command?.request_id })
         .then(response => { if (!response?.ok) button.disabled = false; })
         .catch(() => { button.disabled = false; });
     });
@@ -392,23 +392,12 @@ export function sharingIndicator(details) {
     const description = document.createElement('p');
     description.textContent = `Agent explanation (unverified): ${details.command.description}`;
     banner.append(description);
-    if (details.command.state === 'pending' && !details.command.preparing) {
-      if (details.command.operation === 'request_handoff') {
-        add('Done', 'done');
-        add('Cancel', 'decline');
-      } else {
-        add('Approve', 'approve');
-        add('Decline', 'decline');
-        add('Allow all while sharing', 'allow_all');
-      }
-    } else {
-      const waiting = document.createElement('p');
-      waiting.textContent = details.command.preparing ? 'Inspecting target before approval…' :
-        details.command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…';
-      banner.append(waiting);
-    }
+    const waiting = document.createElement('p');
+    waiting.textContent = details.command.state === 'pending'
+      ? 'Review this request in the DomAgent side panel.' : 'Action running or waiting for service.';
+    banner.append(waiting);
   }
-  add('Stop sharing', 'stop');
+  addStop();
   root.append(style, banner);
   document.documentElement.append(host);
   globalThis.__domagentSharingHost = host;

@@ -1,8 +1,8 @@
 # Collaborative tab-sharing protocol
 
-Service 4.2.0-beta.1 and extensions 4.2.0 use wire version 3 and policy
-`collaborative-tab-v1`. This replaces dedicated automation tabs, per-capability
-selection, immediate-return sharing requests, and revoking login-page handoff.
+Service 4.3.0-beta.1 and extensions 4.3.0 use wire version 4 and policy
+`single-tab-workspace-v1`. Each handle owns one actual website tab in a dedicated
+normal window, with browser-owned side-panel consent controls.
 Tenant identity and OIDC setup remain independent of calling applications.
 
 ## Sharing
@@ -13,17 +13,27 @@ The server coalesces concurrent requests for the same client/device, with bounde
 waiters and expiry. Cancelling the last waiter removes its request/prompt.
 No active tab is automatically shared when a request arrives.
 
-The local share action selects a normal user tab at the time of consent, installs
-required origin protection, and signs the tab ID, fresh target ID, client/tenant,
+The local share action moves the selected actual tab (not a URL clone) into a
+new normal window, preserving the document and unsaved state. It installs
+required origin protection and signs the tab/window IDs, fresh target ID, client/tenant,
 policy, request nonce, connection ID/epoch and advertised browser operations.
 Unsupported browser operations remain unavailable; this is a fixed ordinary-page
 boundary, not arbitrary privileged browser APIs.
 
-The MCP result contains `target_id`, its alias `tab_handle`, the selected `tab_id`,
+The MCP result contains `target_id`, its alias `tab_handle`, the selected `tab_id`, `window_id`,
 and supported capabilities. Every operation still uses an explicit `target_id`.
 `list_browser_targets` lists eligible devices and their `shared_tabs`, not unrelated
 tabs; compatibility fields `target_id/capabilities` describe the first shared tab.
 Sharing another tab is an explicit action and yields a distinct handle.
+
+The toolbar opens native controls immediately and shares the selected website
+tab when the linked client/request is unambiguous. Without a pending request it
+creates a short-lived one-shot local intent and requests a fresh server nonce.
+Navigation/connection changes invalidate that intent. Ambiguous requests require
+explicit selection in trusted UI. Sharing never enables Allow all implicitly.
+Remote requests notify/mark the toolbar; they cannot manufacture the gesture
+required to open a native panel. If opening controls in the newly created window
+is browser-refused, click its toolbar; `PANEL_OPEN_REQUIRED` is explicit.
 
 Device results also separate `connection_state` (`connected`/`offline`),
 `sharing_state` (`active`/`none`), and `pending_request_id` (null without an
@@ -60,13 +70,32 @@ queues it independently of heartbeat traffic and displays:
 - Decline: `ACTION_DECLINED`, no execution.
 - Allow all while sharing: supported ordinary-page operations for this tab/client
   for this sharing session; never human-confirmation requests or other tabs.
-- Stop sharing: invalidate local authority immediately and cancel pending work.
+- Stop sharing: invalidate authority immediately, cancel pending work, and close
+  the controlled tab. Unsaved state is lost; closing the last tab closes its window.
 
-Positive decisions must come from trusted extension UI or real trusted user
-interaction with packaged isolated overlay controls. An agent's injected script
-cannot synthesize approval, allow-all, or Done. Validate target, sender/frame,
-document and request nonce; do not add a general page-to-extension control bridge.
-Toolbar/popup provide an independent fallback when the page overlay fails.
+Positive decisions come only from exact packaged extension UI: Chrome side panel,
+Firefox sidebar, or trusted settings. Website DOM never contains Approve,
+Allow all or Done; all `page.decision` messages are rejected, even with genuine
+nonce/sender metadata. Real clicks on webpage-owned DOM are not consent proof:
+the page can relabel/reposition genuine controls. The page decoration is cosmetic;
+its only control is a nonce/document-bound negative Stop requiring a trusted click.
+
+Moving the tab out, adding another tab or opening a popup from the controlled tab
+revokes authority rather than adopting new tabs. Checks run before preparation,
+execution and readiness waits. Cleanup closes only the recorded controlled tab,
+never the whole window or unrelated tabs.
+
+Local activity history retains at most 200 metadata-only events across extension
+restarts. It records commands and observed lifecycle events, not every JavaScript
+or network side effect. It never persists descriptions, arguments, typed values,
+source, page contents or URLs. Storage failure is explicitly shown. History is
+available only to trusted extension UI, not MCP callers or website scripts.
+
+This is the normal browser profile, not a sandbox: cookies/logins, same-origin
+relationships and opener links survive moving the actual tab. Arbitrary page
+JavaScript is still included in explicit Allow all. Stop cannot undo requests,
+account changes, timers elsewhere or service workers. Closing ends execution in
+that document, not all effects on the profile or account.
 
 ## Human wait and execution budgets
 
@@ -285,8 +314,9 @@ must remain at the response URL, never silently revert or repeat the POST.
 ## Lifecycle and tests
 
 Stop, tab closure, revocation, browser/service restart, or disconnect ends sharing
-and allow-all state. Reconnect restores identity only. Existing user tabs remain
-open and are never adopted from stale stored tab IDs.
+and allow-all state. Reconnect restores identity only. Explicit Stop/Disconnect closes owned tabs. Unexpected disconnects/revocations
+leave them available for inspection and manual closure in trusted controls.
+Restart never restores grants or adopts stale stored tab IDs.
 
 Test real user-tab choice while a different tab/window is active; individual action
 approval; denial; allow-all; human login/Done after navigation; long waits beyond
@@ -314,10 +344,11 @@ Some browser builds or response policies may refuse injection, and such pages
 remain fail-closed. No raw privileged renderer access or automatic POST replay
 is introduced. A failed script may already have mutated the page.
 
-Install extension 4.2.0 for operation-derived summaries/private binding and
-inspector support. The service catalogue now contains 18 tools. Prior extensions
-do not advertise inspect_element; their old grant behavior remains until
-updated. Reconnect and explicitly share again; identities need no reset.
+Install extension 4.3.0 and the matched v4 service. The catalogue contains 18
+tools. Older wire-v3 extensions are intentionally rejected because their page
+consent surface is unsafe. Reconnect and explicitly share again; identities and
+credentials need no reset. Rollback requires matched server/extension versions
+and restores the older consent weakness; do not recommend it as a security fix.
 
 The optional `DOMAGENT_PUBLIC_HTTPBIN=1` native Firefox test submits only
 fictitious data to httpbin and verifies the actual JSON response. It is opt-in

@@ -79,6 +79,17 @@ class NativeRdp {
     if (result.hasException) {
       throw new Error(`Native Firefox evaluation failed: ${result.exceptionMessage}`);
     }
+    if (result.result?.type === 'longString') {
+      const grip = result.result;
+      if (!Number.isSafeInteger(grip.length) || grip.length > 500_000) {
+        throw new Error('Native Firefox console result exceeds fixture budget');
+      }
+      const { substring } = await this.request(grip.actor, 'substring', { start: 0, end: grip.length });
+      if (typeof substring !== 'string' || substring.length !== grip.length) {
+        throw new Error('Native Firefox console string was incomplete');
+      }
+      return substring;
+    }
     return result.result;
   }
 

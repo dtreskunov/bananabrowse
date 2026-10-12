@@ -46,6 +46,7 @@ test('only top-level exact packaged UI pages may send local decisions', () => {
   const runtime = { id: 'extension-id', getURL: page => `chrome-extension://extension-id/${page}` };
   const ui = { id: runtime.id, url: runtime.getURL('options.html'), frameId: 0, tab: { id: 1 } };
   assert.equal(isUiSender(ui, runtime), true);
+  assert.equal(isUiSender({ ...ui, url: runtime.getURL('panel.html?window_id=123') }, runtime), true);
   assert.equal(isUiSender({ ...ui, url: runtime.getURL('request.html?request_id=one') }, runtime), true);
   for (const sender of [
     { ...ui, url: 'https://site.example/' },
@@ -189,8 +190,10 @@ test('proof signatures bind service, enrollment, target, capability, client and 
   assert.equal(await verify(record.public_key, authPayload({ ...auth, tenant_id: otherTenant }), signature), false);
   assert.throws(() => authPayload({ ...auth, tenant_id: undefined }), /INVALID_TENANT/);
   const approval = { ...auth, request_id: 'request', target_id: 'target', client_id: 'client',
-    policy_id: 'collaborative-tab-v1', tab_id: 7, capabilities: ['navigate', 'get_text'] };
+    policy_id: 'single-tab-workspace-v1', tab_id: 7, window_id: 17, capabilities: ['navigate', 'get_text'] };
   const grantSignature = await sign(record.privateKey, grantPayload(approval));
+  assert.equal(await verify(record.public_key, grantPayload({ ...approval, window_id: 18 }), grantSignature), false);
+  assert.throws(() => grantPayload({ ...approval, window_id: undefined }), /INVALID_WINDOW/);
   for (const field of ['origin', 'epoch', 'connection_id', 'request_id', 'client_id', 'target_id', 'policy_id', 'nonce']) {
     assert.equal(await verify(record.public_key, grantPayload({ ...approval, [field]: 'changed' }), grantSignature), false);
   }

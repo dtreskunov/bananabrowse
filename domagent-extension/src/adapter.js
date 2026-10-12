@@ -18,6 +18,7 @@ export class BrowserAdapter {
     this.actionWindows = new Map();
     this.selectedWindowId = null;
     this.onRequestClosed = () => {};
+    this.workspaces = new Map();
   }
 
   capabilities() {
@@ -94,6 +95,27 @@ export class BrowserAdapter {
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
     this.api.tabs.onRemoved.addListener(tabId => this.onTabEvent(tabId, 'closed'));
+    this.api.tabs.onRemoved.addListener(tabId => this.workspaces.delete(tabId));
+    const changed = () => {
+      void this.verifyWorkspaces().catch(error => this.onWarning(error));
+    };
+    this.api.tabs.onAttached?.addListener((tabId, info) => {
+      for (const [ownedId, record] of this.workspaces) {
+        if (info.newWindowId === record.windowId && tabId !== ownedId) this.onTabEvent(ownedId, 'workspace_changed');
+      }
+      changed();
+    });
+    this.api.tabs.onDetached?.addListener(tabId => {
+      if (this.workspaces.has(tabId)) this.onTabEvent(tabId, 'workspace_changed');
+      changed();
+    });
+    this.api.tabs.onCreated?.addListener(tab => {
+      if (this.workspaces.has(tab.openerTabId)) this.onTabEvent(tab.openerTabId, 'workspace_changed');
+      for (const [ownedId, record] of this.workspaces) {
+        if (tab.windowId === record.windowId && tab.id !== ownedId) this.onTabEvent(ownedId, 'workspace_changed');
+      }
+      changed();
+    });
     this.api.webNavigation.onBeforeNavigate.addListener(details => {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
@@ -127,7 +149,14 @@ export class BrowserAdapter {
     if (window.type === 'normal') this.selectedWindowId = windowId;
   }
 
-  async selectedTab() {
+  async selectedTab(windowId) {
+    if (windowId !== undefined) {
+      if (!Number.isSafeInteger(windowId) || windowId < 0) fail('INVALID_ARGUMENT');
+      if ((await this.api.windows.get(windowId)).type !== 'normal') fail('TARGET_STALE');
+      const tabs = await this.api.tabs.query({ windowId, active: true });
+      const tab = tabs[0];
+      return tab && /^https?:\/\//.test(tab.pendingUrl || tab.url) ? tab : null;
+    }
     if (this.selectedWindowId === null) {
       const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
       const window = windows.find(window => window.focused) || windows.at(-1);
@@ -147,13 +176,8 @@ export class BrowserAdapter {
   }
 
   async requestWindow(requestId) {
-    // Save the normal window before the extension-owned request window gets focus.
-    await this.selectedTab();
-    const window = await this.api.windows.create({
-      type: 'popup', width: 440, height: 600, focused: true,
-      url: this.api.runtime.getURL(`request.html?request_id=${encodeURIComponent(requestId)}`),
-    });
-    this.requestWindows.set(requestId, window.id);
+    // A remote request cannot supply the gesture required to open native panels.
+    this.onPanelNeeded?.(requestId);
   }
 
   async closeRequestWindow(requestId) {
@@ -163,23 +187,63 @@ export class BrowserAdapter {
   }
 
   async actionWindow(targetId) {
-    if (this.actionWindows.has(targetId)) return;
-    const record = { id: null };
-    this.actionWindows.set(targetId, record);
-    try {
-      const window = await this.api.windows.create({
-        type: 'popup', width: 440, height: 600, focused: false,
-        url: this.api.runtime.getURL('popup.html'),
-      });
-      if (this.actionWindows.get(targetId) !== record) {
-        await this.api.windows.remove(window.id).catch(() => {});
-        return;
-      }
-      record.id = window.id;
-    } catch (error) {
-      if (this.actionWindows.get(targetId) === record) this.actionWindows.delete(targetId);
-      throw error;
+    this.onPanelNeeded?.(targetId);
+  }
+
+  async openPanel(tab) {
+    if (this.browserName === 'chrome') return this.api.sidePanel.open({ tabId: tab.id });
+    return this.api.sidebarAction.open();
+  }
+
+  async createWorkspace(tabId) {
+    const existing = this.workspaces.get(tabId);
+    if (existing && !existing.boundaryLost) {
+      await this.assertWorkspace({ tabId, windowId: existing.windowId });
+      return existing.windowId;
     }
+    this.workspaces.delete(tabId);
+    const window = await this.api.windows.create({ tabId, type: 'normal', focused: true });
+    this.workspaces.set(tabId, { windowId: window.id, boundaryLost: false });
+    this.selectedWindowId = window.id;
+    if (this.browserName === 'chrome') {
+      await this.api.sidePanel.setOptions({ tabId, path: `panel.html?window_id=${window.id}`, enabled: true });
+    }
+    try { await this.openPanel({ id: tabId }); }
+    catch (error) { this.onWarning(Object.assign(error, { code: 'PANEL_OPEN_REQUIRED' })); }
+    await this.assertWorkspace({ tabId, windowId: window.id });
+    return window.id;
+  }
+
+  async assertWorkspace(grant) {
+    if (!Number.isSafeInteger(grant.windowId)) fail('WORKSPACE_CHANGED');
+    const tab = await this.api.tabs.get(grant.tabId);
+    const tabs = await this.api.tabs.query({ windowId: grant.windowId });
+    if (tab.windowId !== grant.windowId || tabs.length !== 1 || tabs[0].id !== grant.tabId) fail('WORKSPACE_CHANGED');
+  }
+
+  async verifyWorkspaces() {
+    for (const [tabId, record] of this.workspaces) {
+      if (record.boundaryLost) continue;
+      try { await this.assertWorkspace({ tabId, windowId: record.windowId }); }
+      catch (error) {
+        this.onWarning(error);
+        record.boundaryLost = true;
+        this.onTabEvent(tabId, 'workspace_changed');
+      }
+    }
+  }
+
+  async closeWorkspace(tabId, windowId) {
+    const record = this.workspaces.get(tabId);
+    if (!record || record.windowId !== windowId) fail('WORKSPACE_CHANGED');
+    const tab = await this.api.tabs.get(tabId);
+    if (tab.windowId !== windowId) fail('WORKSPACE_CHANGED');
+    await this.api.tabs.remove(tabId);
+    this.workspaces.delete(tabId);
+  }
+
+  workspaceList() {
+    return [...this.workspaces].map(([tabId, record]) => ({ tabId, windowId: record.windowId }));
   }
 
   async closeActionWindow(targetId) {
@@ -311,6 +375,7 @@ export class BrowserAdapter {
   }
 
   async prepareAction(grant, operation, args) {
+    await this.assertWorkspace(grant);
     if (['wait_for_page', 'request_handoff'].includes(operation)) {
       const tab = await this.api.tabs.get(grant.tabId);
       navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
@@ -335,11 +400,13 @@ export class BrowserAdapter {
 
   async execute(grant, operation, args, checkCurrent, preview) {
     if (!validOperationArgs(operation, args)) fail('INVALID_ARGUMENT');
+    await this.assertWorkspace(grant);
     const tabId = grant.tabId;
     if (operation === 'wait_for_page') {
       const deadline = Date.now() + (args.timeout_ms ?? PAGE_WAIT_MS);
       while (true) {
         checkCurrent();
+        await this.assertWorkspace(grant);
         const tab = await this.api.tabs.get(tabId);
         navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
         checkCurrent();
@@ -430,6 +497,7 @@ export class BrowserAdapter {
     const deadline = Date.now() + timeoutMs;
     while (true) {
       checkCurrent();
+      await this.assertWorkspace(grant);
       try {
         return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce,
           ...(preview?.approval_token ? { approval_token: preview.approval_token } : {}) });

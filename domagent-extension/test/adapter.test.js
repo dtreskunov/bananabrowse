@@ -14,9 +14,10 @@ function fixture(browser = 'chrome') {
     permissions: { async contains() { return true; } },
     tabs: {
       onUpdated: event(), onRemoved: event(),
-      onActivated: event(),
-      async query() { return [{ id: 1, active: true, url: 'https://site.example/' }]; },
-      async get(id) { return { id, active: true, url: 'https://site.example/', status: 'complete' }; },
+      onActivated: event(), onCreated: event(), onAttached: event(), onDetached: event(),
+      async query(args) { return [{ id: args.active ? 1 : 100, windowId: 10, active: true, url: 'https://site.example/' }]; },
+      async get(id) { return { id, windowId: 10, active: true, url: 'https://site.example/', status: 'complete' }; },
+      async remove(id) { calls.push(['remove', id]); },
       async create(args) { calls.push(['create', args]); return { id: 100, ...args }; },
       async update(id, args) { calls.push(['update', id, args]); },
     },
@@ -24,7 +25,10 @@ function fixture(browser = 'chrome') {
       onFocusChanged: event(), onRemoved: event(),
       async get() { return { id: 10, type: 'normal' }; },
       async getAll() { return [{ id: 10, focused: true, type: 'normal' }]; },
+      async create(args) { calls.push(['move', args]); return { id: 10 }; },
     },
+    sidePanel: { async open(args) { calls.push(['panel', args]); }, async setOptions() {} },
+    sidebarAction: { async open() { calls.push(['sidebar']); } },
     webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event() },
     webRequest: { onBeforeRequest: event() },
     declarativeNetRequest: {
@@ -167,7 +171,7 @@ test('neutral or protected pages are not eligible for sharing', async () => {
 
 test('Chrome dispatcher only issues narrowly named tab evaluation/screenshot methods', async () => {
   const f = fixture();
-  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   await f.adapter.execute(grant, 'evaluate_script', { script: 'document.title' }, () => {});
   await f.adapter.execute(grant, 'get_screenshot', {}, () => {});
   const methods = f.calls.filter(call => call[0] === 'cdp');
@@ -179,7 +183,7 @@ test('Chrome dispatcher only issues narrowly named tab evaluation/screenshot met
 
 test('Firefox remote script is passed as data to MAIN only, not a content-message dispatcher', async () => {
   const f = fixture('firefox');
-  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   const script = 'typeof browser';
   await f.adapter.execute(grant, 'evaluate_script', { script }, () => {});
   const scripts = f.calls.filter(call => call[0] === 'script').map(call => call[1]);
@@ -196,7 +200,7 @@ test('Firefox remote script is passed as data to MAIN only, not a content-messag
 
 test('Firefox injection failures remain distinct from script and policy failures', async () => {
   const f = fixture('firefox');
-  const grant = { tabId: 100, protected_origins: [] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   f.adapter.onWarning = () => {};
   f.api.scripting.executeScript = async args => {
     if (args.world === 'MAIN') throw new Error('Injection refused');
@@ -207,7 +211,7 @@ test('Firefox injection failures remain distinct from script and policy failures
 
 test('Chrome distinguishes JavaScript errors and enforces the same output budget', async () => {
   const f = fixture();
-  const grant = { tabId: 100, protected_origins: [] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   const original = f.api.debugger.sendCommand;
   for (const name of ['SyntaxError', 'Error']) {
     f.api.debugger.sendCommand = async (target, method, args) => method === 'Runtime.evaluate'
@@ -223,7 +227,7 @@ test('Chrome distinguishes JavaScript errors and enforces the same output budget
 test('Firefox screenshots capture the target tab or advertise unavailable; never the visible tab', async () => {
   const f = fixture('firefox');
   assert.equal(f.adapter.capabilities().includes('get_screenshot'), false);
-  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   await assert.rejects(f.adapter.execute(grant, 'get_screenshot', {}, () => {}), /CAPABILITY_UNAVAILABLE/);
   let captured;
   f.api.tabs.captureTab = async id => { captured = id; return 'data:image/png;base64,aW1hZ2U='; };
@@ -240,7 +244,7 @@ test('failed document inspection is not an optional-operation capability failure
   const f = fixture('firefox');
   f.adapter.onWarning = () => {};
   f.api.scripting.executeScript = async () => { throw new Error('Browser refuses document injection'); };
-  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   for (const operation of ['navigate', 'get_text', 'get_interactive_elements']) {
     await assert.rejects(f.adapter.execute(grant, operation,
       operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {}), /PAGE_UNAVAILABLE/);
@@ -253,7 +257,7 @@ test('failed document inspection is not an optional-operation capability failure
 test('actionability waits use the configured deadline and never retry a mutation after execution', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
-  const grant = { tabId: 100, protected_origins: [] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   let attempts = 0;
   f.api.scripting.executeScript = async ({ args }) => {
     if (args[0] === 'inspect') return [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
@@ -278,7 +282,7 @@ test('actionability waits use the configured deadline and never retry a mutation
 test('readiness deadlines and cancellation during waits are enforced without executing later work', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
-  const grant = { tabId: 100, protected_origins: [] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   let attempts = 0;
   f.api.scripting.executeScript = async ({ args }) => {
     if (args[0] === 'inspect') return [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
@@ -309,9 +313,9 @@ test('readiness deadlines and cancellation during waits are enforced without exe
 test('wait_for_page distinguishes loaded state from navigation started and blocks protected destinations', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
-  const grant = { tabId: 100, protected_origins: ['https://control.example'] };
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   let loading = true;
-  f.api.tabs.get = async () => ({ url: 'https://site.example/', status: loading ? 'loading' : 'complete' });
+  f.api.tabs.get = async () => ({ windowId: 10, url: 'https://site.example/', status: loading ? 'loading' : 'complete' });
   f.api.scripting.executeScript = async () => [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
   const waiting = f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 100 }, () => {});
   await new Promise(resolve => setImmediate(resolve));
@@ -320,6 +324,41 @@ test('wait_for_page distinguishes loaded state from navigation started and block
   assert.deepEqual(await waiting, { state: 'loaded', url: 'https://site.example/', document: 'document-1' });
   loading = true;
   await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}), /WAIT_TIMEOUT/);
-  f.api.tabs.get = async () => ({ pendingUrl: 'https://control.example/login', status: 'loading' });
+  f.api.tabs.get = async () => ({ windowId: 10, pendingUrl: 'https://control.example/login', status: 'loading' });
   await assert.rejects(f.adapter.execute(grant, 'wait_for_page', {}, () => {}), /HANDOFF_REQUIRED/);
+});
+
+test('workspaces move the actual tab, use native panels and close only the owned tab', async () => {
+  for (const browser of ['chrome', 'firefox']) {
+    const f = fixture(browser);
+    await f.adapter.initialize([]);
+    const windowId = await f.adapter.createWorkspace(100);
+    assert.equal(windowId, 10);
+    assert.deepEqual(f.calls.find(call => call[0] === 'move')[1], { tabId: 100, type: 'normal', focused: true });
+    assert(f.calls.some(call => call[0] === (browser === 'chrome' ? 'panel' : 'sidebar')));
+    await assert.rejects(f.adapter.closeWorkspace(999, windowId), /WORKSPACE_CHANGED/);
+    await f.adapter.closeWorkspace(100, windowId);
+    assert.deepEqual(f.calls.filter(call => call[0] === 'remove'), [['remove', 100]]);
+  }
+});
+
+test('extra tabs, moving a tab, or an owned opener popup synchronously report boundary loss', async () => {
+  const f = fixture();
+  await f.adapter.initialize([]);
+  await f.adapter.createWorkspace(100);
+  const observed = [];
+  f.adapter.onTabEvent = (...args) => observed.push(args);
+  f.api.tabs.onCreated.listeners[0].fn({ id: 101, windowId: 20, openerTabId: 100 });
+  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
+  observed.length = 0;
+  f.api.tabs.onAttached.listeners[0].fn(101, { newWindowId: 10 });
+  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
+  observed.length = 0;
+  f.api.tabs.onDetached.listeners[0].fn(100);
+  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
+  f.api.tabs.query = async () => [{ id: 100 }, { id: 101 }];
+  await assert.rejects(f.adapter.assertWorkspace({ tabId: 100, windowId: 10 }), /WORKSPACE_CHANGED/);
+  f.api.tabs.get = async id => ({ id, windowId: 30 });
+  await assert.rejects(f.adapter.closeWorkspace(100, 10), /WORKSPACE_CHANGED/);
+  assert(!f.calls.some(call => call[0] === 'remove'));
 });

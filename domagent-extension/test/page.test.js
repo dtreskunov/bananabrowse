@@ -68,7 +68,7 @@ test('missing elements and invalid CSS selectors are distinct from a stale targe
   }
 });
 
-test('packaged positive decision handlers reject synthetic page clicks', async t => {
+test('page decoration contains no positive consent controls; only a trusted negative Stop remains', async t => {
   const saved = { document: globalThis.document, location: globalThis.location, chrome: globalThis.chrome,
     __domagentSharingHost: globalThis.__domagentSharingHost };
   t.after(() => Object.assign(globalThis, saved));
@@ -89,13 +89,13 @@ test('packaged positive decision handlers reject synthetic page clicks', async t
     sharingIndicator({ target_id: 'target', token: 'nonce', label: 'Client',
       command: { request_id: 'request', operation, description: 'Human instructions', state: 'pending' } });
     const buttons = elements.filter(node => node.handlers.click);
-    for (const button of buttons.filter(node => node.textContent !== 'Stop sharing')) {
-      button.handlers.click({ isTrusted: false });
-    }
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].textContent, 'Stop sharing and close tab');
+    buttons[0].handlers.click({ isTrusted: false });
     assert.equal(messages.length, 0);
     buttons[0].handlers.click({ isTrusted: true });
     await Promise.resolve();
-    assert.equal(messages.pop().action, operation === 'request_handoff' ? 'done' : 'approve');
+    assert.equal(messages.pop().type, 'page.stop');
   }
 });
 

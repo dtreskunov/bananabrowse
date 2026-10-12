@@ -45,9 +45,26 @@ controller = new Controller({
   inventoryStorage: api.storage.session,
   extensionUrl: api.runtime.getURL(''), changed: updateBadge, notify,
 });
+adapter.onPanelNeeded = () => notify('DomAgent controls', 'Open the DomAgent side panel from the toolbar to review requests.');
 ready = controller.initialize().catch(error => {
   fatalError = error;
   controller.report(error);
+});
+action.onClicked.addListener(tab => {
+  // Open native controls before awaiting anything that could consume activation.
+  const opening = adapter.openPanel(tab);
+  opening.then(() => {
+    controller.failures = controller.failures.filter(code => code !== 'PANEL_OPEN_REQUIRED');
+    updateBadge();
+  }, error => controller.report(Object.assign(error, { code: 'PANEL_OPEN_REQUIRED' })));
+  void (async () => {
+    const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
+    if (!granted) fail('PERMISSION_REQUIRED');
+    await ready;
+    if (!controller.snapshot().identity) return api.runtime.openOptionsPage();
+    await adapter.rememberWindow(tab.windowId);
+    await controller.shareSelected(tab.id);
+  })().catch(error => controller.report(error));
 });
 
 api.runtime.onInstalled.addListener(details => {
@@ -62,8 +79,13 @@ async function uiAction(message) {
   if (fatalError) fail('PROTECTION_UNAVAILABLE');
   if (!message || typeof message !== 'object') fail('INVALID_MESSAGE');
   if (message.type === 'ui.state') {
-    const tab = await adapter.selectedTab().catch(() => null);
-    return { ...controller.snapshot(), selected_tab: tab ? { tabId: tab.id, title: tab.title, url: tab.pendingUrl || tab.url } : null };
+    const tab = await adapter.selectedTab(message.windowId);
+    const snapshot = controller.snapshot();
+    if (message.windowId !== undefined) {
+      snapshot.targets = snapshot.targets.filter(target => target.windowId === message.windowId);
+      snapshot.workspaces = snapshot.workspaces.filter(workspace => workspace.windowId === message.windowId);
+    }
+    return { ...snapshot, selected_tab: tab ? { tabId: tab.id, title: tab.title, url: tab.pendingUrl || tab.url } : null };
   }
   if (message.type === 'ui.configure') {
     const { origin } = parseConnectionUrl(message.config.connection_url);
@@ -82,12 +104,14 @@ async function uiAction(message) {
   if (message.type === 'ui.connect') return controller.enable();
   if (message.type === 'ui.disconnect') return controller.disconnect();
   if (message.type === 'ui.approve') return controller.approve(message.request_id, message.tabId);
+  if (message.type === 'ui.shareSelected') return controller.shareSelected(message.tabId, message.client_id);
   if (message.type === 'ui.decision') return controller.decide(message.target_id, message.request_id, message.action);
   if (message.type === 'ui.deny') return controller.deny(message.request_id);
   if (message.type === 'ui.end') {
     if (!LOCAL_END_REASONS.has(message.reason)) fail('INVALID_ARGUMENT');
-    return controller.end(message.target_id, message.reason);
+    return controller.end(message.target_id, message.reason, true, false, true);
   }
+  if (message.type === 'ui.closeWorkspace') return adapter.closeWorkspace(message.tabId, message.windowId);
   if (message.type === 'ui.inspectTab') {
     if (!controller.snapshot().targets.some(target => target.tabId === message.tabId)) fail('NOT_AUTHORIZED');
     return api.tabs.update(message.tabId, { active: true });
@@ -96,21 +120,23 @@ async function uiAction(message) {
 }
 
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (['page.stop', 'page.decision'].includes(message?.type)) {
-    ready.then(() => message.type === 'page.stop'
-      ? controller.stopFromPage(message, sender, api.runtime.id)
-      : controller.decisionFromPage(message, sender, api.runtime.id)).then(
+  if (message?.type === 'page.stop') {
+    ready.then(() => controller.stopFromPage(message, sender, api.runtime.id)).then(
       () => sendResponse({ ok: true }),
       () => sendResponse({ ok: false, error: { code: 'NOT_AUTHORIZED' } }),
     );
     return true;
+  }
+  if (message?.type === 'page.decision') {
+    sendResponse({ ok: false, error: { code: 'NOT_AUTHORIZED' } });
+    return false;
   }
   if (!isUiSender(sender, api.runtime)) {
     sendResponse({ ok: false, error: { code: 'NOT_AUTHORIZED' } });
     return false;
   }
   const run = () => uiAction(message);
-  const immediate = ['ui.state', 'ui.end', 'ui.disconnect', 'ui.deny', 'ui.decision'].includes(message?.type);
+  const immediate = ['ui.state', 'ui.end', 'ui.closeWorkspace', 'ui.disconnect', 'ui.deny', 'ui.decision'].includes(message?.type);
   const operation = immediate ? run() : localMutation.then(run, run);
   if (!immediate) localMutation = operation;
   operation.then(

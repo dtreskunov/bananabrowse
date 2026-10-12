@@ -5,6 +5,7 @@ const byId = id => document.getElementById(id);
 let busy = false;
 let formLoaded = false;
 let lastRender = '';
+let selectedTab = null;
 
 const errors = {
   INVALID_CONNECTION_LINK: 'Paste a connection link like https://example.org/join/… — not an approval link or a password.',
@@ -43,6 +44,9 @@ const errors = {
   SCRIPT_RUNTIME_ERROR: 'The supplied JavaScript failed on this page.',
   SCRIPT_SERIALIZATION_ERROR: 'The script result cannot be returned as JSON. Ask for plain JSON data.',
   SCRIPT_EXECUTION_UNAVAILABLE: 'The browser could not run page JavaScript. Snapshots and targeted text may still work.',
+  WORKSPACE_CHANGED: 'The workspace changed. Sharing stopped; unrelated tabs were not closed.',
+  PANEL_OPEN_REQUIRED: 'Click the DomAgent toolbar in the workspace window to open its trusted controls.',
+  HISTORY_UNAVAILABLE: 'The activity history could not be saved. Current controls are still available.',
 };
 
 function showError(error) {
@@ -50,6 +54,9 @@ function showError(error) {
 }
 
 async function request(type, extra = {}) {
+  if (type === 'state' && location.pathname === '/panel.html') {
+    extra = { ...extra, windowId: (await api.windows.getCurrent()).id };
+  }
   const response = await api.runtime.sendMessage({ type: `ui.${type}`, ...extra });
   if (!response?.ok) throw new Error(response?.error?.code || 'BROWSER_OFFLINE');
   return response.value;
@@ -85,6 +92,16 @@ function paragraph(parent, value) {
 }
 
 function render(snapshot) {
+  selectedTab = snapshot.selected_tab;
+  if (byId('share-clients')) {
+    byId('share-clients').replaceChildren();
+    if (snapshot.eligible_clients.length > 1) {
+      paragraph(byId('share-clients'), 'Choose the linked application to share with (names are unverified).');
+      for (const client of snapshot.eligible_clients) {
+        button(byId('share-clients'), `Share with ${client.label}`, () => shareSelected(client.id));
+      }
+    }
+  }
   const connected = snapshot.phase === 'authenticated';
   const active = snapshot.targets.filter(target => target.state === 'active');
   const name = snapshot.identity?.tenant_label || 'your assistant';
@@ -201,8 +218,26 @@ function render(snapshot) {
     button(article, 'View tab', () => request('inspectTab', { tabId: target.tabId }));
     if (target.target_id) {
       button(article, 'Stop sharing', () => request('end', { target_id: target.target_id, reason: 'OWNER_PAUSED' }));
+      paragraph(article, 'Stop closes this controlled tab and loses unsaved state.');
     }
     byId('targets').append(article);
+  }
+  for (const workspace of snapshot.workspaces || []) {
+    if (snapshot.targets.some(target => target.tabId === workspace.tabId)) continue;
+    const article = document.createElement('article');
+    paragraph(article, `Workspace window ${workspace.windowId}: sharing ended.`);
+    button(article, 'Close controlled tab', () => request('closeWorkspace', {
+      tabId: workspace.tabId, windowId: workspace.windowId,
+    }));
+    byId('targets').append(article);
+  }
+  if (byId('activity')) {
+    byId('activity').replaceChildren();
+    for (const entry of [...(snapshot.activity || [])].reverse().slice(0, 100)) {
+      paragraph(byId('activity'), `${new Date(entry.time).toLocaleTimeString()} · ${entry.event}` +
+        `${entry.operation ? ` · ${entry.operation}` : ''}${entry.code ? ` · ${entry.code}` : ''}`);
+    }
+    if (snapshot.history_unavailable) paragraph(byId('activity'), 'History persistence failed; some events may be missing.');
   }
   const failures = snapshot.failures.filter(code => code !== 'INDICATOR_UNAVAILABLE');
   if (failures.length) showError(new Error(failures.at(-1)));
@@ -243,5 +278,13 @@ byId('add-connection')?.addEventListener('click', () => {
   byId('connection-link').focus();
 });
 byId('done')?.addEventListener('click', () => window.close());
+async function shareSelected(clientId) {
+  const selected = selectedTab;
+  if (!selected) throw new Error('TARGET_STALE');
+  const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
+  if (!granted) throw new Error('PERMISSION_REQUIRED');
+  await request('shareSelected', { tabId: selected.tabId, ...(clientId ? { client_id: clientId } : {}) });
+}
+byId('share-selected')?.addEventListener('click', () => action(() => shareSelected()));
 refresh().catch(showError);
 setInterval(() => { if (!busy) refresh().catch(showError); }, 250);

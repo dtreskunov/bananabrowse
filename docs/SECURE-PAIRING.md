@@ -1,8 +1,8 @@
 # Tenant-scoped pairing and deployment
 
-The 4.0.0 service uses [collaborative tab sharing](COLLABORATIVE-BROWSING.md).
-It replaces dedicated tabs, capability checklists, and automatic login-page
-revocation. Identity setup remains; live connections now use wire protocol v3.
+The 4.3.0 service uses [single-tab workspaces](COLLABORATIVE-BROWSING.md).
+Positive consent lives in browser-owned panels, never webpage DOM.
+Identity setup remains; live connections require wire protocol v4.
 
 ## Trust and authorization
 
@@ -23,8 +23,8 @@ display labels only; exact issuer/subject determines identity and tenant access.
 
 Every HTTP MCP request authenticates and matches its credential's tenant to
 `/mcp/<tenant>`. WSS `/extension/<tenant>` authenticates the device key in that
-tenant. Protocol v3 binds origin and tenant into every signed transcript, including
-the user-selected tab ID in sharing approval.
+tenant. Protocol v4 binds origin and tenant into every signed transcript, including
+the selected tab and dedicated window IDs in sharing approval.
 Cross-tenant client/device relationships are rejected. Bare `/mcp`, `/extension`,
 legacy enrollment endpoints, and older protocol proofs are no authorization fallback.
 
@@ -93,9 +93,10 @@ invalidates old queues, proofs, and grant authority before connecting the new pa
   tested build, so capture is not advertised. Page CSP can deny supplied scripts.
 
 The page-edge border/banner is a helpful, spoofable DOM decoration, not a
-security boundary. Positive action approval and Done require actual user
-interaction in isolated packaged controls or trusted extension UI; scripts
-cannot forge approvals. Its stop action may end only its shared tab/document.
+security boundary. Positive action approval and Done exist only in exact
+packaged extension UI. Webpage positive decisions are unconditionally rejected:
+a real click in a page-controlled layout is not sufficient consent evidence.
+Its negative Stop may close only its nonce/document-bound shared tab.
 Toolbar/extension UI state is independent. Cosmetic failures warn rather than
 claim tamper-proof decoration or disabling otherwise usable sharing.
 Banner warnings are scoped to the currently shared tab and clear when rendering
@@ -107,8 +108,17 @@ Tabs share website sign-ins, readable cookies/storage, and internal-network
 access. Text/images/scripts may expose private information. Visible login/password
 or CAPTCHA controls no longer automatically revoke the shared session; agent code
 should request human assistance rather than handle credentials. Allow-all page
-scripts are not secret-isolating. Stop cannot undo effects or scheduled JavaScript;
-tabs remain open for the user.
+scripts are not secret-isolating. Normal cookies/login state and opener links
+are preserved; the dedicated window is visibility/ownership, not a sandbox.
+Stop/explicit Disconnect closes owned tabs and loses unsaved state. Revocation,
+unexpected disconnect or browser-refused pages retain the response for inspection.
+Closing stops document scripts but cannot undo requests/account changes or
+site background workers. Extra tabs/popups or moving the controlled tab revoke
+authority; no new tab is auto-adopted and unrelated tabs are never closed.
+
+Extension-private history is capped at 200 metadata-only events. It excludes
+descriptions, arguments, source, values, URLs and page contents; errors saving it
+are surfaced. It is a command/observed-event log, not a full script-effect audit.
 
 ## Deployment
 
@@ -134,8 +144,10 @@ Follow [the coordinated migration procedure](TENANT-MIGRATION.md). Do not hot-
 restart an upgraded worktree without reviewing the database/endpoint transition.
 Rollback requires matched database and code versions.
 3.x tenant databases/device identities need no schema migration for collaboration.
-Update server and extensions together, reconnect with v3, and explicitly share
+Update server and extensions together, reconnect with v4, and explicitly share
 tabs again. Existing grants and allow-all state never survive a restart.
+Older v3 clients are rejected because their webpage consent controls are unsafe.
+No database/credential reset is needed. Matched rollback restores that weakness.
 
 Audit logs are allowlisted metadata only. Keep raw proxy access logs disabled
 and review proxy errors/journal access. A calling application may retain returned

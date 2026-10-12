@@ -40,7 +40,7 @@ export function isUiSender(sender, runtime) {
     const url = new URL(sender.url);
     url.search = '';
     url.hash = '';
-    return ['options.html', 'popup.html', 'request.html'].some(page => url.href === runtime.getURL(page));
+    return ['options.html', 'popup.html', 'request.html', 'panel.html'].some(page => url.href === runtime.getURL(page));
   } catch { return false; }
 }
 
@@ -97,6 +97,8 @@ export function errorCode(error) {
     'OPERATION_FAILED',
     'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
     'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE', 'INVALID_RESULT',
+    'WORKSPACE_CHANGED', 'PANEL_OPEN_REQUIRED',
+    'HISTORY_UNAVAILABLE',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

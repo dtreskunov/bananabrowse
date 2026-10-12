@@ -1,10 +1,10 @@
-# Extension validation (protocol v3, collaborative-tab-v1)
+# Extension validation (protocol v4, single-tab-workspace-v1)
 
 Actual-service Chrome and native Firefox shift server action timestamps two
-minutes ahead while retaining the bounded relative budgets. Overlay/trusted UI
+minutes ahead while retaining the bounded relative budgets. Trusted extension UI
 approvals, allow-all and human Done must still complete without a socket reset.
 Controller tests also cover a server behind the browser and malformed execution
-budgets. Physical Firefox pointer clicks remain an operator acceptance check. (protocol v3, collaborative-tab-v1)
+budgets. Physical toolbar/sidebar gestures remain an operator acceptance check.
 
 With the pinned service dependencies already installed, from the repository root:
 
@@ -48,7 +48,7 @@ The Chromium and Firefox engines and image must already be available.
   human waits, staged ready/execute permits, cancellation/stop without retries,
   sender/tab/frame/document/nonce binding, synthetic positive clicks, and
   install-versus-update behavior.
-- Actual-service collaboration: immediate request window with description,
+- Actual-service collaboration: toolbar notification and trusted request descriptions,
   existing-tab selection and selecting a different normal-window tab afterward,
   per-action approvals, forged page approval/allow-all/Done rejection, human
   login/navigation without grant loss, Done/Cancel, grant-scoped allow-all,
@@ -94,7 +94,9 @@ DOMAGENT_FIREFOX_JUGGLER=1 npm run test:browser -- --grep 'real firefox'
 The native run uses Firefox's own RDP, not Juggler. Its console cannot synthesize
 a physical permission gesture, so trusted options-page runtime messages drive
 configuration, sharing and decisions with fixture hosts pre-granted. Synthetic
-page clicks must still fail the actual production `event.isTrusted` guard.
+page messages never authorize a positive decision. Its only Stop is negative and
+requires a trusted click. Native RDP reads long-string grips with bounded,
+complete retrieval as private history increases UI state size.
 Server approval uses
 the real Store; Chrome exercises both server browser forms. Both sides still
 perform actual signed enrollment and WSS authentication.
@@ -117,13 +119,18 @@ With the released browser build, manually verify in supported Chrome and Firefox
    not open it. Decline then accept the server-only permission prompt.
 2. The public link starts focused sign-in/approval and automatically connects.
    No tabs are shared and no general website permission is requested yet.
-3. A request opens an extension window independently of the selected tab. Visit
+3. A request notifies/marks the toolbar without opening a remote popup. Visit
    an existing or new normal-window website tab and choose **Share this tab with …**
-   from the toolbar. Decline then accept website permission. There are no
+   from the native panel/toolbar. The actual tab moves with its current document
+   and unsaved state. Decline then accept website permission. There are no
    capability checkboxes; only the explicitly selected tab gets fixed page APIs.
-4. Confirm the named page border/banner and toolbar, keyboard-accessible
-   **Stop sharing**, navigation reinstallation, and removal after stop. A website
-   may hide or imitate DOM decoration; the toolbar remains independent.
+4. Confirm native panel Approve/Allow all/Done are never webpage controls.
+   Confirm the named page border/banner and toolbar, keyboard-accessible
+   **Stop sharing**, navigation reinstallation, and tab closure after Stop. A website
+   may hide or imitate DOM decoration; browser-owned controls remain independent.
+   Add/move a tab or open a popup: sharing must revoke without adopting it.
+   Closing an ended owned tab must leave unrelated tabs/windows intact.
+   Verify metadata-only bounded history and its explicit persistence warnings.
 5. Switch connections with active sharing, disconnect, suspend/restart, and
    verify fresh local approval is required. No old target works.
    Approve/Decline/Allow-all apply per tab; human Done/Cancel retain sharing even

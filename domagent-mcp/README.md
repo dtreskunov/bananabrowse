@@ -11,7 +11,7 @@ npm start
 Configuration and OIDC sign-in are described in
 [the deployment guide](../docs/SECURE-PAIRING.md).
 Upgrade existing beta.2 databases through [explicit tenant migration](../docs/TENANT-MIGRATION.md)
-before restarting. Browsers must use matching protocol-v3 extensions; 3.x
+before restarting. Browsers must use matching protocol-v4 extensions; 3.x/4.x
 tenant credentials and pairing identities need no reset.
 
 Public metadata: `GET /.well-known/domagent`.
@@ -28,12 +28,19 @@ credential. MCP endpoint: `/mcp/<tenant>`. Device WSS: `/extension/<tenant>`.
 Public extension input: `/join/<tenant>`. Browser pairing completes automatically
 after server approval; local approval remains required before sharing.
 
-Protocol v3 supports user-selected existing tabs, multiple handles, supervised
+Protocol v4 supports actual user-selected tabs moved to single-tab windows,
+native side-panel approval, bounded private activity history, and supervised
 actions with `description`, and **Allow all while sharing**. `request_browser_access`
 waits for tab selection; `request_handoff` waits for human Done without revoking
 the shared session. Human waits default to five minutes (max ten), followed by a
 25-second execution budget. Configure client/proxy timeouts with headroom.
 See [collaborative protocol](../docs/COLLABORATIVE-BROWSING.md).
+
+Service 4.3.0-beta.1 / extension 4.3.0 rejects older wire-v3 clients intentionally.
+Stop/explicit Disconnect closes the controlled tab, losing unsaved state. Extra
+tabs, popups and moving the tab revoke sharing without adopting other tabs.
+The normal profile is reused; this window is not cookie/account isolation.
+History records commands and observed events, not arbitrary script side effects.
 
 Version 4.1.0-beta.1 adds document-bound snapshots, strict selector/reference targets,
 actionability waits, select/check/key/scroll operations, and explicit navigation

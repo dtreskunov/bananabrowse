@@ -8,7 +8,13 @@ The `dtreskunov/domagent` secure-pairing branch currently publishes tested priva
 betas manually. These releases contain compiled Chrome and Firefox ZIPs, a
 tracked-source service ZIP, and `SHA256SUMS`. Asset filenames use the service
 release version; the manifests carry the browser extension version (for example,
-service `4.2.0-beta.1`, extension `4.2.0`).
+service `4.3.0-beta.1`, extension `4.3.0`).
+
+The v4 workspace upgrade intentionally rejects older wire-v3 extensions.
+Update server/browser packages together. Existing keys, tenants and credentials
+need no reset; only live sharing/Allow all end. Stop now closes the controlled
+tab and loses unsaved state. Back up SQLite before deployment and verify identity
+fingerprints afterward. Matched rollback restores the older consent weakness.
 
 Run the unit/MCP tests, build both extensions, run the real-browser suite, and
 check JavaScript before committing and tagging the exact tested revision.

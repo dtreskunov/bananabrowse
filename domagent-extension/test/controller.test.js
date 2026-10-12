@@ -25,6 +25,8 @@ async function fixture(t) {
   const adapter = {
     capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
     async initialize(inventory) { calls.push(['initialize', inventory]); },
+    async createWorkspace(id) { calls.push(['workspace', id]); return id + 1000; },
+    async closeWorkspace(id, windowId) { calls.push(['closeWorkspace', id, windowId]); },
     async selectedTabById(id) { calls.push(['select', id]); return { id, url: 'https://site.example/' }; },
     async requestWindow(id) { calls.push(['window', id]); },
     async closeRequestWindow(id) { calls.push(['closeWindow', id]); },
@@ -48,7 +50,8 @@ async function fixture(t) {
   const receive = message => controller.receive(JSON.stringify(message), socket, controller.generation);
   const challenge = { type: 'challenge', origin, ...binding, nonce: 'nonce-1', key_id: record.key_id };
   await receive(challenge);
-  await receive({ type: 'authenticated', ...binding, ...record.identity, protected_origins: ['https://idp.example'] });
+  await receive({ type: 'authenticated', ...binding, ...record.identity, protected_origins: ['https://idp.example'],
+    eligible_clients: [{ id: 'client-1', label: 'Atlas' }] });
   t.after(() => controller.dispose());
   return { controller, adapter, calls, socket, saved, record, challenge, receive,
     advance(ms) { clock += ms; controller.lastPing = clock; } };
@@ -66,7 +69,8 @@ async function approve(f, clientId = 'client-1', tabId = 100, ack = true) {
   const request = await pending(f, clientId);
   await f.controller.approve(request.request_id, tabId);
   const grant = [...f.controller.grants.values()].find(grant => grant.tabId === tabId);
-  if (ack) await f.receive({ type: 'grant.active', tenant_id, target_id: grant.target_id, tab_id: tabId, client_id: clientId });
+  if (ack) await f.receive({ type: 'grant.active', tenant_id, target_id: grant.target_id, tab_id: tabId,
+    window_id: grant.windowId, client_id: clientId });
   return { grant, request };
 }
 function command(f, grant, extra = {}) {
@@ -83,9 +87,9 @@ async function execute(f, grant, message, action = 'approve') {
   return f.socket.sent.find(value => value.type === 'result' && value.request_id === message.request_id);
 }
 
-test('v3 identity proofs preserve keys and require exact tenant/connection', async t => {
+test('v4 identity proofs preserve keys and require exact tenant/connection', async t => {
   const f = await fixture(t);
-  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 3, tenant_id, key_id: f.record.key_id });
+  assert.deepEqual(f.socket.sent[0], { type: 'hello', version: 4, tenant_id, key_id: f.record.key_id });
   assert(await verify(f.record.public_key, authPayload(f.challenge), f.socket.sent[1].signature));
   await assert.rejects(f.receive({ type: 'ping', tenant_id: 'other' }), /NOT_AUTHORIZED/);
 });
@@ -100,7 +104,8 @@ test('approved actions execute with bounded local budgets despite server/browser
     await f.receive(request);
     await f.controller.approve(request.request_id, 100);
     const grant = [...f.controller.grants.values()][0];
-    await f.receive({ type: 'grant.active', tenant_id, client_id: grant.client_id, tab_id: 100, target_id: grant.target_id });
+    await f.receive({ type: 'grant.active', tenant_id, client_id: grant.client_id, tab_id: 100,
+      window_id: grant.windowId, target_id: grant.target_id });
     const action = command(f, grant, { expires_at: f.controller.now() + 600_000 + skew,
       wait_timeout_ms: 600_000, operation: 'navigate', args: { url: 'https://ordinary.example/' } });
     f.controller.enqueue(action);
@@ -140,7 +145,7 @@ test('native browser fetch has its global receiver', async t => {
   const f = await fixture(t);
   assert.deepEqual(await f.controller.api('challenge'), { nonce: 'test' });
 });
-test('every sharing request opens a trusted window before any heartbeat; description is visible', async t => {
+test('every sharing request alerts trusted controls before any heartbeat; description is visible', async t => {
   const f = await fixture(t);
   const request = await pending(f);
   await flush();
@@ -156,9 +161,9 @@ test('actual selected tab and fixed capabilities are signed after protection and
   assert.deepEqual(f.calls.filter(call => ['select', 'protect', 'attach'].includes(call[0])).map(call => call[0]),
     ['select', 'protect', 'attach']);
   assert(await verify(f.record.public_key, grantPayload({ ...request, origin,
-    target_id: grant.target_id, tab_id: 42, capabilities: approval.capabilities }), approval.signature));
+    target_id: grant.target_id, tab_id: 42, window_id: grant.windowId, capabilities: approval.capabilities }), approval.signature));
   assert.equal(await verify(f.record.public_key, grantPayload({ ...request, origin,
-    target_id: grant.target_id, tab_id: 43, capabilities: approval.capabilities }), approval.signature), false);
+    target_id: grant.target_id, tab_id: 43, window_id: grant.windowId, capabilities: approval.capabilities }), approval.signature), false);
 });
 test('failed protection and changed selection never grant authority', async t => {
   const f = await fixture(t);
@@ -461,7 +466,7 @@ test('request cancellation and closing a request window deny no other requests',
   await f.receive({ type: 'approval.cancel', tenant_id, request_id: second.request_id, reason: 'timeout' });
   assert.equal(f.controller.pending.size, 0);
 });
-test('page decisions bind nonce, sender, tab, frame, URL, document, grant and request', async t => {
+test('page decisions are rejected even with the genuine nonce, sender and document', async t => {
   const f = await fixture(t);
   const { grant } = await approve(f);
   grant.indicatorToken = 'nonce';
@@ -474,8 +479,60 @@ test('page decisions bind nonce, sender, tab, frame, URL, document, grant and re
     assert.throws(() => f.controller.decisionFromPage(decision, { ...sender, ...change }, 'extension'), /NOT_AUTHORIZED/);
   }
   assert.throws(() => f.controller.decisionFromPage({ ...decision, token: 'old' }, sender, 'extension'), /NOT_AUTHORIZED/);
-  f.controller.decisionFromPage(decision, sender, 'extension');
-  assert.equal(f.socket.sent.at(-1).type, 'command.ready');
+  for (const action of ['approve', 'allow_all', 'done', 'decline']) {
+    assert.throws(() => f.controller.decisionFromPage({ ...decision, action }, sender, 'extension'), /NOT_AUTHORIZED/);
+  }
+  assert.equal(grant.queue[0].state, 'pending');
+  assert.equal(grant.allowAll, undefined);
+  assert(!f.socket.sent.some(frame => frame.type === 'command.ready'));
+  for (const change of [{ id: 'other' }, { frameId: 2 }, { tab: { id: 999 } }, { documentId: 'old' }]) {
+    assert.throws(() => f.controller.stopFromPage({ ...decision, type: 'page.stop' },
+      { ...sender, ...change }, 'extension'), /NOT_AUTHORIZED/);
+  }
+  await f.controller.stopFromPage({ ...decision, type: 'page.stop' }, sender, 'extension');
+  assert.equal(f.controller.grants.size, 0);
+  assert(f.calls.some(call => call[0] === 'closeWorkspace' && call[1] === 100));
+});
+
+test('toolbar sharing captures a one-shot intent; navigation cancels it and ambiguity never guesses', { timeout: 2000 }, async t => {
+  const f = await fixture(t);
+  const sent = f.controller.send.bind(f.controller);
+  let acknowledge;
+  const approval = new Promise(resolve => { acknowledge = resolve; });
+  f.controller.send = message => {
+    sent(message);
+    if (message.type === 'grant.approve') acknowledge();
+  };
+  await f.controller.shareSelected(100);
+  assert.equal(f.socket.sent.at(-1).type, 'access.request');
+  await pending(f);
+  await approval;
+  assert.equal(f.socket.sent.at(-1).type, 'grant.approve');
+  assert.equal(f.controller.toolbarIntent, null);
+  assert.equal([...f.controller.grants.values()][0].allowAll, undefined);
+  const other = await fixture(t);
+  await other.controller.shareSelected(100);
+  other.controller.tabEvent(100, 'navigation', 'https://site.example/new');
+  await pending(other);
+  await flush();
+  assert.equal(other.controller.grants.size, 0);
+  await pending(other, 'client-2');
+  await assert.rejects(other.controller.shareSelected(100), /APPROVAL_REQUIRED/);
+});
+
+test('workspace boundary loss revokes before cleanup and explicit disconnect closes each owned tab', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  f.controller.tabEvent(grant.tabId, 'workspace_changed');
+  assert.equal(f.controller.grants.size, 0);
+  assert(f.controller.history.entries.some(entry => entry.event === 'workspace_changed'));
+  const { grant: a } = await approve(f, 'client-1', 101);
+  const { grant: b } = await approve(f, 'client-1', 102);
+  const closing = f.controller.disconnect();
+  assert.equal(f.controller.grants.size, 0);
+  await closing;
+  assert.deepEqual(f.calls.filter(call => call[0] === 'closeWorkspace').map(call => call.slice(1)),
+    [[a.tabId, a.windowId], [b.tabId, b.windowId]]);
 });
 test('liveness loss and restart preserve pairing but never restore user-tab authority', async t => {
   const f = await fixture(t);

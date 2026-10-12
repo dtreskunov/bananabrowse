@@ -116,7 +116,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
           origin, ...current, nonce: 'nonce-auth', key_id: enrollment.key_id,
         }), message.signature)).toBe(true);
         client.send(JSON.stringify({ type: 'authenticated', ...owner, ...current,
-          protected_origins: [origin] }));
+          protected_origins: [origin], eligible_clients: [{ id: 'client-test', label: 'Atlas' }] }));
         clearInterval(pingTimer);
         pingTimer = setInterval(() => {
           if (client.readyState === 1) client.send(JSON.stringify({ type: 'ping', tenant_id }));
@@ -127,7 +127,8 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
           ...socket.approval, ...message, origin, ...current,
         }), message.signature)).toBe(true);
         target = message.target_id;
-        client.send(JSON.stringify({ type: 'grant.active', tenant_id, target_id: target, tab_id: message.tab_id, client_id: 'client-test' }));
+        client.send(JSON.stringify({ type: 'grant.active', tenant_id, target_id: target,
+          tab_id: message.tab_id, window_id: message.window_id, client_id: 'client-test' }));
       } else if (message.type === 'command.ready') {
         client.send(JSON.stringify({ type: 'command.execute', tenant_id,
           request_id: message.request_id, target_id: message.target_id, expires_at: Date.now() + 25_000 }));
@@ -298,7 +299,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     console.log(`[${browserName}] device authenticated`);
 
     // Ordinary pages have no bridge and cannot manufacture trusted runtime senders.
-    const userTab = await context.newPage();
+    let userTab = await context.newPage();
     await userTab.goto(pageOrigin);
     expect(await userTab.evaluate(() => typeof globalThis.chrome?.runtime?.sendMessage)).toBe('undefined');
     expect(await userTab.evaluate(() => typeof globalThis.browser?.runtime?.sendMessage)).toBe('undefined');
@@ -361,12 +362,14 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     await expect(options.locator('#targets')).toContainText('No shared tabs');
     expect((await command('get_text')).error.code).toBe('APPROVAL_REQUIRED');
     const oldTarget = target;
-    await shared.bringToFront();
+    await expect.poll(() => userTab.isClosed()).toBe(true);
+    userTab = await context.newPage();
+    await userTab.goto(pageOrigin);
     const fresh = await approve(options, 'approval-fresh');
     expect(target).not.toBe(oldTarget);
-    expect(fresh.targets[0].tabId).toBe(state.targets[0].tabId);
+    expect(fresh.targets[0].tabId).not.toBe(state.targets[0].tabId);
     await command('navigate', { url: `${pageOrigin}/password` });
-    await waitForTab(state.targets[0].tabId);
+    await waitForTab(fresh.targets[0].tabId);
     expect((await command('get_text')).result.text).toContain('Authenticate manually');
     expect((await command('request_handoff')).result).toEqual({ state: 'completed', user_confirmed: true });
     await expect(options.locator('#targets')).toContainText('can use this tab');

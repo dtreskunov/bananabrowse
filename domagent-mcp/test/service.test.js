@@ -109,7 +109,7 @@ async function connect(ctx, device, { pong = true } = {}) {
 async function activate(ctx, device, connection, client = ctx.client, tab_id = 100) {
   assert.equal(ctx.app.bridge.requestAccess(client.id, device.device.device_id).state, 'pending');
   const request = await connection.next('approval.request');
-  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id, capabilities: [...OPERATIONS] };
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id, window_id: tab_id + 1000, capabilities: [...OPERATIONS] };
   connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
     signature: await sign(device.key.privateKey, grantPayload(grant)) }));
   assert.equal((await connection.next('grant.active')).target_id, grant.target_id);
@@ -119,6 +119,31 @@ async function ready(connection, command) {
   connection.ws.send(JSON.stringify({ type: 'command.ready', request_id: command.request_id, target_id: command.target_id }));
   return connection.next('command.execute');
 }
+
+test('v3 is rejected without resetting keys; v4 advertises linked clients and rejects signed window tampering', async t => {
+  const ctx = await setup(t);
+  const device = await enroll(ctx);
+  const ws = new WebSocket(`${ctx.base.replace('http:', 'ws:')}/extension/${ctx.tenant.id}`,
+    { origin: EXTENSION_ORIGIN });
+  const rejected = new Promise((resolve, reject) => {
+    ws.on('message', raw => resolve(JSON.parse(raw)));
+    ws.once('error', reject);
+  });
+  await new Promise(resolve => ws.once('open', resolve));
+  ws.send(JSON.stringify({ type: 'hello', tenant_id: ctx.tenant.id, key_id: device.id, version: 3 }));
+  assert.equal((await rejected).code, 'VERSION_UNSUPPORTED');
+  const connection = await connect(ctx, device);
+  assert.deepEqual(connection.authenticated.eligible_clients, [{ id: ctx.client.id, label: 'Atlas' }]);
+  ctx.app.bridge.requestAccess(ctx.client.id, device.device.device_id);
+  const request = await connection.next('approval.request');
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 100,
+    window_id: 1000, capabilities: [...OPERATIONS] };
+  const signature = await sign(device.key.privateKey, grantPayload(grant));
+  connection.ws.send(JSON.stringify({ ...grant, window_id: 1001, type: 'grant.approve', signature }));
+  assert.equal((await connection.next('error')).code, 'NOT_AUTHORIZED');
+  assert.equal(ctx.app.bridge.grants.size, 0);
+  assert.equal(ctx.store.device(device.device.device_id, ctx.tenant.id).key_id, device.id);
+});
 
 test('config and connection link validation reject insecure and ambiguous inputs', () => {
   assert.throws(() => loadConfig({}), /SERVICE_ORIGIN_REQUIRED/);
@@ -620,7 +645,7 @@ test('sharing waits resolve only after a signed user-selected tab, and concurren
   assert.equal(waiting.connection_state, 'connected');
   assert.equal(waiting.sharing_state, 'none');
   assert.equal(waiting.pending_request_id, request.request_id);
-  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 42, capabilities: [...OPERATIONS] };
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 42, window_id: 1042, capabilities: [...OPERATIONS] };
   connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
     signature: await sign(device.key.privateKey, grantPayload(grant)) }));
   const results = await Promise.all([first, second]);
@@ -741,7 +766,7 @@ test('HTTP MCP waits for sharing and action approval with correct descriptions',
     device_id: device.device.device_id, description: 'Choose a Strava tab', wait_timeout_seconds: 60,
   } });
   const request = await connection.next('approval.request');
-  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 80, capabilities: [...OPERATIONS] };
+  const grant = { ...request, origin: ORIGIN, target_id: token(), tab_id: 80, window_id: 1080, capabilities: [...OPERATIONS] };
   connection.ws.send(JSON.stringify({ ...grant, type: 'grant.approve',
     signature: await sign(device.key.privateKey, grantPayload(grant)) }));
   const shared = await work;

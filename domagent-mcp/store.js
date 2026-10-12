@@ -232,6 +232,12 @@ export class Store {
     return this.db.prepare('SELECT id FROM devices WHERE tenant_id=? AND revoked=0')
       .all(c.tenant_id).map(d => this.device(d.id, c.tenant_id)).filter(Boolean);
   }
+  clientsForDevice(deviceId, tenant) {
+    const device = this.device(deviceId, tenant);
+    requireValue(device, 'NOT_AUTHORIZED', 403);
+    return this.db.prepare('SELECT id,label FROM clients WHERE tenant_id=? AND revoked=0')
+      .all(device.tenant_id).filter(client => this.linked(client.id, deviceId, tenant));
+  }
   devicesForOwner(ownerId, tenant) {
     return this.db.prepare('SELECT id,label FROM devices WHERE owner_id=? AND tenant_id=? AND revoked=0')
       .all(ownerId, tenant);

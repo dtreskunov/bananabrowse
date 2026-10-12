@@ -173,7 +173,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${backend.port}/mcp/${tenant.id}`), {
       requestInit: { headers: { Authorization: `Bearer ${credentials.credential}` } },
     }));
-    const userTab = await evaluate(`browser.tabs.create({url:${JSON.stringify(pageOrigin)},active:true})`);
+    let userTab = await evaluate(`browser.tabs.create({url:${JSON.stringify(pageOrigin)},active:true})`);
     await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
     async function share() {
       const waiting = client.callTool({ name: 'request_browser_access', arguments: {
@@ -196,7 +196,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
         target_id: grant.target_id, description: `Native fixture ${name}`, ...args,
       } });
       let completed = false;
-      waiting.then(() => { completed = true; });
+      waiting.then(() => { completed = true; }, () => { completed = true; });
       if ((advertised.includes(name) && !grant.allow_all) || name === 'request_handoff') {
         await expect.poll(async () => {
           const command = (await state()).targets[0]?.commands[0];
@@ -237,7 +237,9 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       expect(JSON.stringify(jsonText)).toContain('JSON fixture');
       await request({ type: 'ui.end', target_id: grant.target_id, reason: 'OWNER_PAUSED' });
     }
-    await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
+    if (!await evaluate(`browser.tabs.query({}).then(tabs => tabs.some(tab => tab.id === ${userTab.id}))`)) {
+      userTab = await evaluate(`browser.tabs.create({url:${JSON.stringify(pageOrigin)},active:true})`);
+    } else await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
     await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
     grant = await share();
     if (process.env.DOMAGENT_PUBLIC_HTTPBIN === '1') {
@@ -257,7 +259,9 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
         console.log('Public httpbin JSON POST: actual Firefox extension read verified');
         await request({ type: 'ui.end', target_id: grant.target_id, reason: 'OWNER_PAUSED' });
       }
-      await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
+      if (!await evaluate(`browser.tabs.query({}).then(tabs => tabs.some(tab => tab.id === ${userTab.id}))`)) {
+        userTab = await evaluate(`browser.tabs.create({url:${JSON.stringify(pageOrigin)},active:true})`);
+      } else await evaluate(`browser.tabs.update(${userTab.id},{url:${JSON.stringify(pageOrigin)},active:true})`);
       await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
       grant = await share();
     }
@@ -275,7 +279,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       target:{tabId:${grant.tabId},frameIds:[0]},world:"MAIN",
       func:() => {
         const root = document.querySelector("[data-domagent-sharing]").shadowRoot;
-        Array.from(root.querySelectorAll("button")).find(button => button.textContent === "Done").click();
+        for (const button of root.querySelectorAll("button")) button.click();
       }
     })`);
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -330,6 +334,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     expect(app.bridge.grants.size).toBe(0);
     expect(app.bridge.targets(credentials.id)[0].state).toBe('approval_required');
   } catch (error) {
+    console.error('[native Firefox assertion]', error.stack);
     console.error('[native Firefox fixture failure]', logs);
     throw error;
   } finally {

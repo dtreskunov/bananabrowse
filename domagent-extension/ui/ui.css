@@ -1,6 +1,8 @@
 :root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
 body { max-width: 850px; margin: 24px auto; padding: 0 16px; }
 body.popup { min-width: 390px; max-width: 480px; margin: 12px; padding: 0; }
+body.panel { min-width: 0; max-width: none; margin: 12px; padding: 0; }
+#activity { max-height: 28rem; overflow-y: auto; }
 h1 { margin: 0; }
 h2 { font-size: 1.1rem; }
 section, article { border: 1px solid #888; border-radius: 6px; margin: 14px 0; padding: 12px; }

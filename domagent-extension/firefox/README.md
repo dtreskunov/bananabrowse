@@ -22,25 +22,30 @@ Saved connections have independent nonextractable device keys. One connection
 is enabled at a time; switching ends sharing and queued actions. Updates keep
 identity without reopening setup. Legacy origin-only records cannot authorize
 tenant connections and require fresh pairing. Existing tenant keys authenticate
-protocol v3 without re-pairing.
+protocol v4 without re-pairing; matched upgrades reject unsafe older v3 clients.
 
-Requests open a small extension-owned window, regardless of the current tab.
-Visit an existing/new website tab, then use the toolbar's **Share this tab with …**.
-The selected normal-window URL is displayed. Sharing requests optional HTTP(S)
+Requests notify/mark the toolbar. Click it to open the native Firefox sidebar and
+share the selected actual tab with an unambiguous linked application. Panel
+controls also allow explicit selection. Sharing moves the actual tab into a
+dedicated normal window, preserving its document and unsaved state. Each handle
+owns one tab/window; other tabs/popups or moving it revoke sharing, not adopt
+other tabs. If opening controls after the move is browser-refused, click the
+workspace toolbar; `PANEL_OPEN_REQUIRED` is explicit. Sharing requests optional HTTP(S)
 website permission, including intranet hosts. Capabilities are fixed, without
 checkboxes, and scoped only to selected tabs. Multiple tabs per client are allowed.
 
-Each action's operation and description appear in the overlay and trusted popup.
+Each action's operation-derived details and unverified description appear in the
+browser-owned sidebar or trusted settings.
 **Approve**, **Decline**, or **Allow all while sharing** control ordinary actions;
 allow-all is scoped to that grant. **Done**/**Cancel** handle human assistance
 without ending sharing; allow-all never confirms human tasks. Readiness waits for
 the server's fresh 25-second execution permit. Navigation invalidates old-document
 actions without ending sharing; password/CAPTCHA presence does not block inspection.
 
-The packaged isolated helper requires `event.isTrusted` for decisions, with
-nonce/sender/frame/tab/document/grant binding. Scripts cannot approve through DOM
-clicks. The banner is cosmetic and can be hidden or imitated; the trusted toolbar,
-popup and settings remain fallback controls.
+Webpage DOM has no positive controls and every page.decision is rejected, even
+with genuine sender/nonce metadata. The cosmetic banner contains only a
+trusted-click, bound negative Stop. Private local metadata history is capped at
+200 events, not exposed to MCP and not a full audit of arbitrary-script effects.
 
 A blocking webRequest listener protects all requests from each selected shared
 tab, including redirects and subresources, before grant approval. Remote code is
@@ -54,10 +59,13 @@ capability and requires per-action approval unless allow-all is enabled; page CS
 can still make it unavailable.
 
 Control ends on stop, protected-page navigation, revoke, disconnect, missed heartbeat and restart.
-The tab remains open, and a fresh local approval is required. Tabs share website
+Explicit Stop/Disconnect closes owned tabs, losing unsaved state. Unexpected
+revocation leaves the response for inspection; fresh approval is required. Tabs share website
 sessions; page-readable secrets, cookies and ordinary page network/account
 actions are exposed. Prior/scheduled JavaScript and side effects are not undone.
-No claim is made that login/CAPTCHA heuristics hide all secrets.
+Normal cookies/login state and opener relationships persist; this is not a
+sandbox. Closing cannot undo sent requests/account changes/site background
+workers. No claim is made that login/CAPTCHA heuristics hide all secrets.
 
 `node --test domagent-extension/test/*.test.js` runs local enforcement tests.
 See `../test/README.md` for browser qualification limitations.

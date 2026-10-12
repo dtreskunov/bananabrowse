@@ -1,4 +1,4 @@
-import { EXECUTION_MS, HUMAN_WAIT_MS, OPERATIONS, navigationUrl, serviceOrigin, validOperationArgs } from '../../shared/protocol.js';
+import { EXECUTION_MS, HUMAN_WAIT_MS, OPERATIONS, navigationUrl, serviceOrigin, validOperationArgs, validDescription } from '../../shared/protocol.js';
 
 export const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
@@ -74,7 +74,7 @@ export function validateCommand(message, grant, connection, protectedOrigins, no
   if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= 0) fail('INVALID_ARGUMENT');
   if (message.expires_at <= now) fail('COMMAND_EXPIRED');
   if (message.expires_at > now + HUMAN_WAIT_MS) fail('INVALID_ARGUMENT');
-  text(message.description, 4096);
+  if (!validDescription(message.description)) fail('INVALID_ARGUMENT');
   if (message.operation !== 'request_handoff' && (!OPERATIONS.includes(message.operation) ||
       !grant.capabilities.includes(message.operation))) fail('CAPABILITY_UNAVAILABLE');
   const args = message.args;

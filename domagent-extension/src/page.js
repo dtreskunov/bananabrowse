@@ -7,7 +7,7 @@ export function pageHelper(operation, args = {}) {
   if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
   if (args.document && args.document !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
   if (operation === 'inspect') return { url: location.href, title: document.title,
-    content_type: document.contentType, document_nonce: globalThis[documentKey] };
+    content_type: document.contentType, document_nonce: globalThis[documentKey], ready_state: document.readyState };
   const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1 };
   const bindings = globalThis.__domagentActionBindings ||= new Map();
   if (operation === 'release_action') {
@@ -95,6 +95,31 @@ export function pageHelper(operation, args = {}) {
     in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
   });
   const viewport = { width: innerWidth, height: innerHeight };
+  const hidingNode = element => {
+    for (let node = element; node; node = parent(node)) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none') return { node, reason: 'DISPLAY_NONE' };
+      if (style.opacity === '0') return { node, reason: 'OPACITY_ZERO' };
+      if (['hidden', 'collapse'].includes(style.visibility) &&
+          (!parent(node) || getComputedStyle(parent(node)).visibility !== style.visibility)) {
+        return { node, reason: 'VISIBILITY_HIDDEN' };
+      }
+    }
+    return null;
+  };
+  const metadata = element => ({
+    tag: element.tagName.toLowerCase(), id: element.id?.slice(0, 80) || null,
+    role: roleOf(element)?.slice(0, 80) || null, name: nameOf(element).slice(0, 80),
+  });
+  const activationLabel = element => {
+    if (!element.matches('input[type="checkbox"],input[type="radio"]') || visible(element)) return {};
+    const hiding = hidingNode(element);
+    if (hiding && hiding.node !== element) return {};
+    const labels = [...(element.labels || [])].filter(label =>
+      label.control === element && label.isConnected && !ignored(label) && visible(label));
+    if (labels.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+    return { label: labels[0] };
+  };
   const diagnostic = element => {
     const rect = element.getBoundingClientRect();
     let reason = null;
@@ -116,10 +141,28 @@ export function pageHelper(operation, args = {}) {
       for (let node = hit; node; node = parent(node)) if (node === element) { reached = true; break; }
       if (!reached) reason = ignored(hit) ? 'SHARING_INDICATOR' : 'OBSCURED';
     }
+    const hiding = hidingNode(element);
+    let hiddenDetails = {};
+    if (hiding) {
+      const controls = hiding.node.id ? all.filter(control =>
+        control.getRootNode() === hiding.node.getRootNode() &&
+        control.getAttribute('aria-controls')?.split(/\s+/).includes(hiding.node.id) &&
+        visible(control) && !disabled(control)).slice(0, 3) : [];
+      hiddenDetails = {
+        hidden_by: { ...metadata(hiding.node), reason: hiding.reason, is_target: hiding.node === element },
+        reveal_controls: controls.map(control => ({
+          ...metadata(control), expanded: control.getAttribute('aria-expanded'),
+        })),
+      };
+    }
+    const activation = activationLabel(element);
     return { matches: 1, state: reason ? 'not_ready' : 'ready', reason, document: globalThis[documentKey],
       tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
       ...flags, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewport,
-      value_redacted: element.matches('input,textarea,select') || element.isContentEditable };
+      value_redacted: element.matches('input,textarea,select') || element.isContentEditable,
+      ...hiddenDetails,
+      ...(activation.label ? { activation: { ...metadata(activation.label), kind: 'associated_label' } } : {}),
+    };
   };
   if (operation === 'get_page_snapshot') {
     let scope = document.body;
@@ -178,11 +221,16 @@ export function pageHelper(operation, args = {}) {
     return { cleared: true };
   }
   let element;
+  let activator;
   if (args.approval_token && operation !== 'prepare_action') {
     const binding = bindings.get(args.approval_token);
     if (!binding || binding.operation !== operation) return { error: 'ELEMENT_STALE' };
     element = binding.element;
+    activator = binding.activator;
     if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+      return { error: 'ELEMENT_STALE' };
+    }
+    if (activator && activator !== element && (!activator.isConnected || activator.control !== element || ignored(activator))) {
       return { error: 'ELEMENT_STALE' };
     }
   } else if (args.ref) {
@@ -213,8 +261,10 @@ export function pageHelper(operation, args = {}) {
   if (operation === 'inspect_element') return diagnostic(element);
   if (operation === 'prepare_action') {
     if (bindings.size >= 32) return { error: 'QUEUE_FULL' };
+    const activation = args.action === 'set_checked' ? activationLabel(element) : {};
+    if (activation.error) return { error: activation.error };
     const token = nonce();
-    bindings.set(token, { element, operation: args.action });
+    bindings.set(token, { element, activator: activation.label || element, operation: args.action });
     return { ...diagnostic(element), approval_token: token };
   }
   if (operation === 'get_text') {
@@ -231,7 +281,13 @@ export function pageHelper(operation, args = {}) {
     const text = textData(element);
     return { ...text, truncated: text.text_truncated, rendered: true, text_source: 'rendered' };
   }
-  if (!visible(element)) return { error: 'ELEMENT_NOT_VISIBLE' };
+  if (!activator && operation === 'set_checked') {
+    const activation = activationLabel(element);
+    if (activation.error) return { error: activation.error };
+    activator = activation.label;
+  }
+  activator ||= element;
+  if (!visible(activator)) return { error: 'ELEMENT_NOT_VISIBLE' };
   if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
   if (operation === 'type_text' && (!editable(element) || element.matches('input[type="file"]'))) {
     return { error: 'ELEMENT_NOT_EDITABLE' };
@@ -250,9 +306,9 @@ export function pageHelper(operation, args = {}) {
   const labelControl = element.closest('label')?.control;
   if (element.matches('input[type="file"]') || labelControl?.matches('input[type="file"]') ||
       (link && (link.hasAttribute('download') || link.target === '_blank'))) return { error: 'HANDOFF_REQUIRED' };
-  element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  activator.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-  const rect = element.getBoundingClientRect();
+  const rect = activator.getBoundingClientRect();
   const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
   const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
   if (right <= left || bottom <= top) return { error: 'ELEMENT_NOT_VISIBLE' };
@@ -282,8 +338,10 @@ export function pageHelper(operation, args = {}) {
   }
   let reached = false;
   for (let node = hit; node; node = parent(node)) {
-    if (node === element) { reached = true; break; }
+    if (node === activator) { reached = true; break; }
   }
+  if (!reached && activator.matches('label') && hit === activator.control &&
+      hit?.matches('input[type="checkbox"],input[type="radio"]')) reached = true;
   if (!reached) return { error: 'ELEMENT_OBSCURED' };
   if (operation === 'click') {
     if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
@@ -295,7 +353,8 @@ export function pageHelper(operation, args = {}) {
     return { clicked: true, input_mode: 'dom' };
   }
   if (operation === 'set_checked') {
-    if (element.checked !== args.checked) element.click();
+    if (element.checked !== args.checked) activator.click();
+    if (!element.isConnected || (activator !== element && activator.control !== element)) return { error: 'ELEMENT_STALE' };
     if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
     return { checked: element.checked, input_mode: 'dom' };
   }

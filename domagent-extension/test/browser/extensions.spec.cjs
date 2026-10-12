@@ -223,7 +223,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
   async function command(operation, args = {}, client = 'client-test') {
     const request_id = crypto.randomUUID();
     socket.send(JSON.stringify({ type: 'command', request_id, target_id: target, client_id: client,
-      operation, args, description: `Fixture action ${operation}`, expires_at: Date.now() + 600_000, ...socket.binding }));
+      operation, args, description: `Fixture action ${operation} in the explicitly selected test browser tab`, expires_at: Date.now() + 600_000, ...socket.binding }));
     await expect.poll(async () => {
       if (messages.some(message => message.type === 'result' && message.request_id === request_id)) return 'result';
       const state = await uiPage.evaluate(async () => (await (globalThis.browser || globalThis.chrome).runtime.sendMessage({ type: 'ui.state' })).value);
@@ -248,7 +248,7 @@ test(`real ${browserName} extension: pairing, trusted approval, page commands, f
     const previousTarget = target;
     socket.approval = { type: 'approval.request', ...socket.binding, request_id: requestId,
       client_id: 'client-test', client_label: '<script>untrusted label</script>',
-      policy_id: protocol.POLICY_ID, description: 'Share a website I choose',
+      policy_id: protocol.POLICY_ID, description: 'Share a website I choose in the explicitly selected browser tab',
       nonce: `nonce-${requestId}`, protected_origins: [origin],
       expires_at: Date.now() + 60_000 };
     socket.send(JSON.stringify(socket.approval));

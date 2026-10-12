@@ -36,6 +36,15 @@ the shared session. Human waits default to five minutes (max ten), followed by a
 25-second execution budget. Configure client/proxy timeouts with headroom.
 See [collaborative protocol](../docs/COLLABORATIVE-BROWSING.md).
 
+Service 4.3.0-beta.2 / extension 4.3.1 ships the following reliability changes.
+Sharing/handoff/page-action explanations require at least 40 trimmed characters
+and at most 500 total; this is enforced in schemas and runtime, not a security
+proof. Exact-bound re-sharing preserves active grants/queues. Page failures can
+include fixed `inspection_stage` and bounded `last_error`/`timeout_ms` metadata;
+transient inspection is retried before execution, never a mutation or POST.
+The inspector reports bounded hiding-ancestor/reveal-control and styled-label
+metadata without field values, focus or scrolling.
+
 Service 4.3.0-beta.1 / extension 4.3.0 rejects older wire-v3 clients intentionally.
 Stop/explicit Disconnect closes the controlled tab, losing unsaved state. Extra
 tabs, popups and moving the tab revoke sharing without adopting other tabs.

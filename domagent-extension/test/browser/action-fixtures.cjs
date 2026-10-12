@@ -9,6 +9,10 @@ const actionHtml = `
 <button id="disabled" disabled>Disabled action</button>
 <button class="duplicate">First</button><button class="duplicate">Second</button>
 <label><input id="check" type="checkbox">Enable feature</label>
+<label id="styled-label" for="styled-check" style="display:inline-block;position:relative;width:160px;height:44px">
+  Open styled navigation<input id="styled-check" type="checkbox"
+    style="position:absolute;inset:0;margin:0;width:100%;height:100%;opacity:0">
+</label>
 <label for="select">Colour</label><select id="select"><option value="red">Red</option><option value="blue">Blue</option></select>
 <input id="keyboard" aria-label="Keyboard target"><span id="key-result"></span>
 <div style="position:relative;width:200px;height:40px">
@@ -63,6 +67,12 @@ async function exerciseActions(call) {
   assert.equal((await result('inspect_element', { selector: '#offscreen' })).reason, 'OFF_SCREEN');
   assert.equal((await result('inspect_element', { selector: '#absent-control' })).state, 'missing');
   assert.equal((await result('inspect_element', { selector: '.duplicate' })).state, 'ambiguous');
+  const styled = await result('inspect_element', { selector: '#styled-check' });
+  assert.equal(styled.activation.kind, 'associated_label');
+  await result('set_checked', { selector: '#styled-check', checked: true });
+  assert.equal((await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value, true);
+  await result('click', { selector: '#styled-label' });
+  assert.equal((await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value, false);
   for (const secret of ['fixture-password-secret', 'fixture-textarea-secret', 'fixture-editable-secret',
     'fixture-readonly-secret', 'fixture-hidden-secret', 'Stop sharing', 'Unshared iframe control']) {
     assert.equal(JSON.stringify(snapshot).includes(secret), false, secret);
@@ -150,7 +160,10 @@ async function exerciseActions(call) {
   assert.equal(runtime.isError, true);
   assert.equal(JSON.parse(runtime.content[0].text).error, 'SCRIPT_RUNTIME_ERROR');
   await result('navigate', { url: `${snapshot.url}?document-change=1` });
+  const immediateSnapshot = await result('get_page_snapshot');
+  assert.notEqual(immediateSnapshot.document, snapshot.document);
   const loaded = await result('wait_for_page');
+  assert.equal(loaded.document, immediateSnapshot.document);
   assert.notEqual(loaded.document, snapshot.document);
   await error('type_text', { ...target, text: 'Must not cross documents' }, 'TARGET_STALE');
   for (const [name, text] of [

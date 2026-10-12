@@ -240,14 +240,20 @@ test('Firefox screenshots capture the target tab or advertise unavailable; never
   await assert.rejects(f.adapter.execute(grant, 'get_screenshot', {}, () => {}), /CAPABILITY_UNAVAILABLE/);
 });
 
-test('failed document inspection is not an optional-operation capability failure', async () => {
+test('failed document inspection is not an optional-operation capability failure', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   f.adapter.onWarning = () => {};
   f.api.scripting.executeScript = async () => { throw new Error('Browser refuses document injection'); };
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   for (const operation of ['navigate', 'get_text', 'get_interactive_elements']) {
-    await assert.rejects(f.adapter.execute(grant, operation,
-      operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {}), /PAGE_UNAVAILABLE/);
+    const work = f.adapter.execute(grant, operation,
+      operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {});
+    const rejected = assert.rejects(work, error => error.code === 'PAGE_UNAVAILABLE' &&
+      error.inspection_stage === 'document_injection' && error.timeout_ms === 10000);
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(10000);
+    await rejected;
   }
   assert.equal(f.calls.some(call => call[0] === 'update'), false);
   f.api.scripting.executeScript = async () => [{ error: new Error('Document execution failed') }];
@@ -340,6 +346,103 @@ test('workspaces move the actual tab, use native panels and close only the owned
     await f.adapter.closeWorkspace(100, windowId);
     assert.deepEqual(f.calls.filter(call => call[0] === 'remove'), [['remove', 100]]);
   }
+});
+
+test('post-navigation inspection waits for tab/document readiness and retries only benign inspection', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  let loading = true, ready = false, failures = 1, snapshots = 0;
+  f.adapter.onWarning = () => {};
+  f.api.tabs.get = async id => ({ id, windowId: 10, url: 'https://site.example/',
+    status: loading ? 'loading' : 'complete' });
+  f.api.scripting.executeScript = async ({ args: [operation] }) => {
+    if (operation === 'inspect') {
+      if (failures-- > 0) throw new Error('Frame temporarily detached during navigation');
+      return [{ result: { url: 'https://site.example/', document_nonce: 'new-document',
+        ready_state: ready ? 'complete' : 'loading' } }];
+    }
+    snapshots++;
+    return [{ result: { document: 'new-document', text: 'new page', elements: [] } }];
+  };
+  const previewWork = f.adapter.prepareAction(grant, 'get_page_snapshot', {}, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.filter(call => call[0] === 'update').length, 0);
+  loading = false;
+  t.mock.timers.tick(50);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(50);
+  await new Promise(resolve => setImmediate(resolve));
+  ready = true;
+  t.mock.timers.tick(50);
+  const preview = await previewWork;
+  assert.equal(preview.document_nonce, 'new-document');
+  const snapshot = await f.adapter.execute(grant, 'get_page_snapshot', {}, () => {}, preview);
+  assert.equal(snapshot.document, 'new-document');
+  assert.equal(snapshots, 1);
+});
+
+test('reads after a navigation request cannot approve the previous still-complete document', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  let url = 'https://site.example/', document = 'old-document';
+  f.api.tabs.get = async id => ({ id, windowId: 10, url, status: 'complete' });
+  f.api.scripting.executeScript = async () => [{ result: { url, document_nonce: document, ready_state: 'complete' } }];
+  await f.adapter.execute(grant, 'navigate', { url: 'https://site.example/new' }, () => {});
+  const preparing = f.adapter.prepareAction(grant, 'get_page_snapshot', {}, () => {});
+  let prepared = false;
+  preparing.then(() => { prepared = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prepared, false);
+  url = 'https://site.example/new';
+  document = 'new-document';
+  t.mock.timers.tick(50);
+  assert.equal((await preparing).document_nonce, 'new-document');
+  assert.equal(grant.navigation, undefined);
+  assert.equal(f.calls.filter(call => call[0] === 'update').length, 1);
+  grant.navigation = { from: url, url: url + '#section', document };
+  url += '#section';
+  assert.equal((await f.adapter.prepareAction(grant, 'get_page_snapshot', {})).document_nonce, 'new-document');
+});
+
+test('navigation between tabs.get and inspection is detected; permanent refusal and cancellation stay fail-closed', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
+  let url = 'https://site.example/old';
+  f.api.tabs.get = async id => ({ id, windowId: 10, url, status: 'complete' });
+  f.api.scripting.executeScript = async () => {
+    url = 'https://site.example/new';
+    return [{ result: { url, ready_state: 'complete', document_nonce: 'new-document' } }];
+  };
+  await assert.rejects(f.adapter.inspect(100, grant.protected_origins), error =>
+    error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed');
+  await assert.rejects(f.adapter.execute(grant, 'click', { selector: 'button', timeout_ms: 0 }, () => {},
+    { document_nonce: 'old-document' }), error => error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed');
+  let attempts = 0;
+  f.adapter.onWarning = () => {};
+  f.api.scripting.executeScript = async () => { attempts++; throw new Error('Renderer refuses injection'); };
+  const unavailable = f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 100 }, () => {});
+  const rejected = assert.rejects(unavailable, error => error.code === 'PAGE_UNAVAILABLE' &&
+    error.inspection_stage === 'document_injection' && error.last_error === 'PAGE_UNAVAILABLE' && error.timeout_ms === 100);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(100);
+  await rejected;
+  let stopped = false;
+  const waiting = f.adapter.prepareAction(grant, 'get_page_snapshot', {}, () => {
+    if (stopped) throw Object.assign(new Error('APPROVAL_REQUIRED'), { code: 'APPROVAL_REQUIRED' });
+  });
+  const cancelled = assert.rejects(waiting, /APPROVAL_REQUIRED/);
+  await new Promise(resolve => setImmediate(resolve));
+  const before = attempts;
+  stopped = true;
+  t.mock.timers.tick(50);
+  await cancelled;
+  assert.equal(attempts, before);
+  url = 'https://control.example/private';
+  await assert.rejects(f.adapter.prepareAction(grant, 'get_page_snapshot', {}), /HANDOFF_REQUIRED/);
+  assert.equal(attempts, before);
 });
 
 test('extra tabs, moving a tab, or an owned opener popup synchronously report boundary loss', async () => {

@@ -1,6 +1,6 @@
 # Collaborative tab-sharing protocol
 
-Service 4.3.0-beta.1 and extensions 4.3.0 use wire version 4 and policy
+Service 4.3.0-beta.2 and extensions 4.3.1 use wire version 4 and policy
 `single-tab-workspace-v1`. Each handle owns one actual website tab in a dedicated
 normal window, with browser-owned side-panel consent controls.
 Tenant identity and OIDC setup remain independent of calling applications.
@@ -26,6 +26,11 @@ and supported capabilities. Every operation still uses an explicit `target_id`.
 tabs; compatibility fields `target_id/capabilities` describe the first shared tab.
 Sharing another tab is an explicit action and yields a distinct handle.
 
+A freshly signed re-share of an active handle preserves that grant and its
+pending command queue only when client, tenant, device, connection, tab, window
+and capabilities still match. It consumes a new request nonce; stale proofs or
+changing a handle's binding do not authorize reuse.
+
 The toolbar opens native controls immediately and shares the selected website
 tab when the linked client/request is unambiguous. Without a pending request it
 creates a short-lived one-shot local intent and requests a fresh server nonce.
@@ -47,7 +52,11 @@ No additional unshared tab information is exposed by these fields.
 
 ## Actions
 
-Every page call includes a nonempty, bounded `description`. Treat it as unverified
+Sharing, human assistance and every page call require a `description` of at
+least 40 characters after trimming and at most 500 total characters.
+Short descriptions return `INVALID_ARGUMENTS` before MCP target dispatch; whitespace
+padding does not satisfy the minimum. This is an intent-quality requirement,
+not a consent security proof. Treat it as unverified
 requester text; pair it with operation-derived details. Render as text, never HTML.
 One approved click/script may itself cause arbitrary ordinary-page side effects.
 Descriptions are not a security proof and logs must not retain them or arguments.
@@ -226,7 +235,7 @@ Targeted actions accept either `selector`, or both `ref` and `document`:
   "target_id": "<shared tab handle>",
   "ref": "e3",
   "document": "<document from snapshot>",
-  "description": "Fill the account nickname",
+  "description": "Fill the account nickname in the selected profile form",
   "text": "My nickname",
   "timeout_ms": 3000
 }
@@ -248,6 +257,11 @@ reject covered controls. No browser-wide input or raw CDP surface is added:
 - `type_text`: replace the field value and dispatch input/change events.
 - `select_option({value})`: select a unique enabled option in a single-select.
 - `set_checked({checked})`: set a native checkbox, or select a native radio.
+  Styled inputs hidden by their own CSS can use an exact associated visible label.
+  Both control and activation label are bound during approval. A hidden ancestor,
+  disabled control, unrelated overlay or replacement label still fails.
+  `click` on a visible label also accepts its exact associated checkbox/radio at
+  the hit-test point; it never treats an unrelated transparent input as authority.
   Clearing a radio and multi-select operations require human assistance.
 - `press_key({key})`: dispatch synthetic DOM keydown/keyup for the documented
   key enum. Browser defaults (form submission, Tab traversal, editing) and
@@ -333,6 +347,35 @@ Missing and ambiguous selector matches are diagnosis states; invalid CSS,
 stale refs and lost authority remain errors. Snapshots include viewport size.
 Use diagnosis to distinguish responsive/collapsed UI from broken automation:
 inspect, reveal the intended widget when appropriate, refresh refs, act, verify.
+It does not poll element readiness and has no `timeout_ms` argument. A hidden
+control can report `hidden_by` with bounded element/ancestor metadata and its
+CSS hiding reason, plus at most three visible/enabled `reveal_controls` with an
+explicit matching `aria-controls`. These are candidates, not proof of intended
+workflow and never automatically activated. `activation` describes an associated
+label available to operate a styled checkbox/radio without exposing its value.
+
+### Navigation inspection readiness
+
+Before producing an approval preview, inspection waits up to 10 seconds for a
+settled document (or the operation's explicit `timeout_ms`). It checks browser tab
+status, injected `document.readyState`, and URL consistency before/after inspection.
+Only benign inspection is retried during transient navigation/injection failure.
+An unapproved document-unbound read can discard its obsolete preview and prepare
+a new one as navigation settles. Explicit document/ref requests, scripts,
+mutations and already approved reads never silently rebind.
+After approval, the same inspection checks remain document-bound: a replacement
+document cannot silently inherit a prior preview or mutation approval.
+`wait_for_page` uses its own bounded page wait and checks cancellation, authority
+and workspace identity on every attempt.
+
+Safe failures may include `inspection_stage`: `tab_status`, `document_state`,
+`document_changed`, or `document_injection`. Exhausted inspection waits also
+include allowlisted `last_error`/`timeout_ms`. A settling page can return
+`WAIT_TIMEOUT`; persistent injection refusal returns `PAGE_UNAVAILABLE` and ends
+sharing. Browser/source/exception text is never included in these diagnostics.
+No POST is repeated, grant silently renewed, protected renderer bypassed or
+already executed action retried. A supported HTML/JSON POST response keeps its
+existing handle; genuinely refused documents remain fail-closed.
 
 Form filling and a click acknowledgement are not a confirmed submission.
 Verify the actual response and compare document identity as well as URL.
@@ -344,7 +387,7 @@ Some browser builds or response policies may refuse injection, and such pages
 remain fail-closed. No raw privileged renderer access or automatic POST replay
 is introduced. A failed script may already have mutated the page.
 
-Install extension 4.3.0 and the matched v4 service. The catalogue contains 18
+Install extension 4.3.1 and the matched v4 service. The catalogue contains 18
 tools. Older wire-v3 extensions are intentionally rejected because their page
 consent surface is unsafe. Reconnect and explicitly share again; identities and
 credentials need no reset. Rollback requires matched server/extension versions

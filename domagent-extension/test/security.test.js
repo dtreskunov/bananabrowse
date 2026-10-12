@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   authPayload, connectionUrl, enrollmentPayload, grantPayload, parseConnectionUrl, sign, verify,
   validOperationArgs, OPERATIONS, validTargetId, waitErrorDetails,
+  validDescription, inspectionErrorDetails,
 } from '../../shared/protocol.js';
 import {
   MAX_RESULT_BYTES, boundedResult, errorCode, isUiSender, needsSetup, protectedRegex, protectedUnion, validateCommand,
@@ -17,7 +18,24 @@ const binding = { tenant_id, epoch: 'epoch-1', connection_id: 'connection-1' };
 const grant = { ...binding, state: 'active', client_id: 'client-1', target_id: 'target-1',
   capabilities: ['navigate', 'get_text', 'evaluate_script'] };
 const command = { ...binding, type: 'command', request_id: 'request-1', target_id: 'target-1',
-  client_id: 'client-1', operation: 'get_text', description: 'Read the page', args: {}, expires_at: Date.now() + 25_000 };
+  client_id: 'client-1', operation: 'get_text', description: 'Read the page in the explicitly selected browser tab', args: {}, expires_at: Date.now() + 25_000 };
+
+test('descriptions enforce exactly forty trimmed characters and safe page errors exclude browser/source data', () => {
+  for (const description of ['x', 'a'.repeat(39), ' '.repeat(40), ` ${'a'.repeat(39)} `, 'a'.repeat(501),
+    '😀'.repeat(39)]) {
+    assert.equal(validDescription(description), false);
+    assert.throws(() => validateCommand({ ...command, description }, grant, binding, [origin]), /INVALID_ARGUMENT/);
+  }
+  for (const description of ['a'.repeat(40), 'a'.repeat(500), ` ${'a'.repeat(40)} `, '😀'.repeat(40)]) {
+    assert.equal(validDescription(description), true);
+  }
+  assert.deepEqual(inspectionErrorDetails({ code: 'PAGE_UNAVAILABLE', inspection_stage: 'document_injection',
+    last_error: 'PAGE_UNAVAILABLE', timeout_ms: 10000, source: 'private', url: 'private' }),
+    { inspection_stage: 'document_injection', last_error: 'PAGE_UNAVAILABLE', timeout_ms: 10000 });
+  assert.deepEqual(inspectionErrorDetails({ code: 'PAGE_UNAVAILABLE', inspection_stage: 'private browser error' }), {});
+  assert.deepEqual(inspectionErrorDetails({ code: 'WAIT_TIMEOUT', inspection_stage: 'tab_status',
+    last_error: 'private text', timeout_ms: 10000 }), { inspection_stage: 'tab_status' });
+});
 
 test('Firefox uses a persistent background without broadening website permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../firefox/manifest.json', import.meta.url), 'utf8'));

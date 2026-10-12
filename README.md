@@ -7,7 +7,7 @@ depend on a particular agent application or credential manager.
 ## Install and connect
 
 Download your browser's compiled ZIP from
-[v4.3.0-beta.1](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.1)
+[v4.3.0-beta.2](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.2)
 and extract all files.
 
 - Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
@@ -69,7 +69,9 @@ Use the application's own secure credential-management workflow for
 belong in chat. Device WSS is `/extension/<tenant>`.
 
 `request_browser_access` now waits for the user to share a tab.
-All page operations and `request_handoff` require `description`.
+Sharing, all page operations and `request_handoff` require `description`:
+at least 40 characters after trimming, maximum 500. Describe useful intent;
+length alone is not a consent security proof.
 Human waits default to five minutes, configurable up to ten; execution then
 has a separate 25-second budget. Configure actual MCP client, proxy, and network
 timeouts accordingly. A 600-second client timeout is suitable for the default
@@ -124,6 +126,20 @@ operation-derived local approval summaries. Resolved controls are bound to the
 exact document/element so re-rendered replacements cannot inherit approval.
 Entered values and script source are hidden in summaries; the explanation
 remains explicitly unverified.
+
+Service 4.3.0-beta.2 / extension 4.3.1 fixes freshly approved re-sharing
+of the same exact handle without losing its connection or command queue.
+Navigation inspection waits for a settled document and retries only benign
+inspection, never mutations or POSTs. Safe `inspection_stage` diagnostics explain
+where readiness failed; persistent renderer refusal remains fail-closed.
+Styled checkbox/radio inputs can use exact bound visible labels. Inspector metadata
+identifies hiding ancestors and explicit `aria-controls` reveal candidates without
+changing focus, scrolling or revealing field values.
+Update both service and extension for these improvements; wire version remains 4.
+The new 40-character trimmed description minimum is a deliberate validation change.
+Existing short callers must supply useful explanations; no credential/key reset
+is needed. Unapproved reads can refresh their preview as navigation settles, but
+approved work, explicit document/ref requests and mutations never silently rebind.
 
 The native Firefox tests explicitly enable JSON viewing and verify local JSON
 POST responses. A public httpbin POST was also verified with fictitious data

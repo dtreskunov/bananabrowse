@@ -24,6 +24,22 @@ export const READINESS_ERRORS = Object.freeze([
   'ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
   'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'OPTION_NOT_FOUND',
 ]);
+export const MIN_DESCRIPTION_LENGTH = 40;
+export function validDescription(value) {
+  return typeof value === 'string' && value.length <= 500 &&
+    [...value.trim()].length >= MIN_DESCRIPTION_LENGTH;
+}
+export function inspectionErrorDetails(error) {
+  if (!['PAGE_UNAVAILABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
+      !['tab_status', 'document_injection', 'document_state', 'document_changed'].includes(error.inspection_stage)) return {};
+  const result = { inspection_stage: error.inspection_stage };
+  if (['PAGE_UNAVAILABLE', 'TARGET_STALE'].includes(error.last_error) &&
+      Number.isSafeInteger(error.timeout_ms) && error.timeout_ms >= 0 && error.timeout_ms <= PAGE_WAIT_MS) {
+    result.last_error = error.last_error;
+    result.timeout_ms = error.timeout_ms;
+  }
+  return result;
+}
 export function waitErrorDetails(error) {
   if (error?.code !== 'WAIT_TIMEOUT' || !READINESS_ERRORS.includes(error.last_error) ||
       !Number.isSafeInteger(error.timeout_ms) || error.timeout_ms <= 0 || error.timeout_ms > PAGE_WAIT_MS) return {};

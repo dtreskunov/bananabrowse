@@ -347,7 +347,7 @@ export class BrowserAdapter {
         target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: pageHelper, args: [operation, args],
       });
     } catch (error) {
-      this.onWarning(error);
+      if (operation !== 'inspect') this.onWarning(error);
       fail(operation === 'inspect' ? 'PAGE_UNAVAILABLE' : 'CAPABILITY_UNAVAILABLE');
     }
     const response = responses?.[0];
@@ -367,21 +367,67 @@ export class BrowserAdapter {
       (!tab.pendingUrl || tab.pendingUrl === 'about:blank');
     if (allowBlank && blank) return { url: 'about:blank' };
     navigationUrl(tab.pendingUrl || tab.url, origins);
-    if (tab.status === 'loading') fail('TARGET_STALE');
-    const page = await this.helper(tabId, 'inspect', {});
+    if (tab.status === 'loading' || tab.pendingUrl) {
+      throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
+    }
+    let page;
+    try { page = await this.helper(tabId, 'inspect', {}); }
+    catch (error) {
+      if (['PAGE_UNAVAILABLE', 'TARGET_STALE'].includes(error.code)) error.inspection_stage = 'document_injection';
+      throw error;
+    }
     navigationUrl(page.url, origins);
-    if (page.url !== tab.url) fail('TARGET_STALE');
+    if (page.ready_state && page.ready_state !== 'complete') {
+      throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_state' });
+    }
+    const current = await this.api.tabs.get(tabId);
+    navigationUrl(current.pendingUrl || current.url, origins);
+    if (page.url !== tab.url || current.url !== page.url || current.status === 'loading' || current.pendingUrl) {
+      throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
+    }
     return page;
   }
 
-  async prepareAction(grant, operation, args) {
+  async waitForInspection(grant, timeoutMs, check, allowBlank = false) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      check();
+      await this.assertWorkspace(grant);
+      try {
+        const page = await this.inspect(grant.tabId, grant.protected_origins, allowBlank);
+        const navigation = grant.navigation;
+        if (navigation && page.document_nonce === navigation.document && (
+          navigation.from === navigation.url || page.url !== navigation.url
+        )) {
+          throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
+        }
+        if (navigation) delete grant.navigation;
+        check();
+        return page;
+      } catch (error) {
+        check();
+        if (!['TARGET_STALE', 'PAGE_UNAVAILABLE'].includes(error.code) || !error.inspection_stage) throw error;
+        if (Date.now() >= deadline) {
+          delete grant.navigation;
+          let code = error.code;
+          if (code === 'TARGET_STALE' && timeoutMs > 0) code = 'WAIT_TIMEOUT';
+          throw Object.assign(new Error(code), {
+            code, inspection_stage: error.inspection_stage, last_error: error.code, timeout_ms: timeoutMs,
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+      }
+    }
+  }
+
+  async prepareAction(grant, operation, args, check = () => {}) {
     await this.assertWorkspace(grant);
     if (['wait_for_page', 'request_handoff'].includes(operation)) {
       const tab = await this.api.tabs.get(grant.tabId);
       navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
       return { summary: actionSummary(operation, args, { title: tab.title, url: tab.pendingUrl || tab.url }) };
     }
-    const page = await this.inspect(grant.tabId, grant.protected_origins, operation === 'navigate');
+    const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
     let target;
     if (operation !== 'inspect_element' && (args.selector || args.ref)) {
       target = await this.helper(grant.tabId, 'prepare_action', {
@@ -403,22 +449,20 @@ export class BrowserAdapter {
     await this.assertWorkspace(grant);
     const tabId = grant.tabId;
     if (operation === 'wait_for_page') {
-      const deadline = Date.now() + (args.timeout_ms ?? PAGE_WAIT_MS);
-      while (true) {
-        checkCurrent();
-        await this.assertWorkspace(grant);
-        const tab = await this.api.tabs.get(tabId);
-        navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
-        checkCurrent();
-        if (tab.status === 'complete' && !tab.pendingUrl) {
-          const page = await this.inspect(tabId, grant.protected_origins);
-          checkCurrent();
-          return { state: 'loaded', url: page.url, document: page.document_nonce,
-            ...(page.content_type ? { content_type: page.content_type } : {}) };
+      let page;
+      try { page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, checkCurrent); }
+      catch (error) {
+        if (error.code === 'TARGET_STALE' && args.timeout_ms === 0) {
+          error.code = error.message = 'WAIT_TIMEOUT';
         }
-        if (Date.now() >= deadline) fail('WAIT_TIMEOUT');
-        await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+        throw error;
       }
+      return { state: 'loaded', url: page.url, document: page.document_nonce,
+        ...(page.content_type ? { content_type: page.content_type } : {}) };
+    }
+    const document = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, checkCurrent, operation === 'navigate');
+    if (preview?.document_nonce && preview.document_nonce !== document.document_nonce) {
+      throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
     }
     let context;
     if (operation === 'evaluate_script' && this.browserName === 'chrome') {
@@ -427,12 +471,10 @@ export class BrowserAdapter {
       if (!context?.uniqueId) fail('TARGET_STALE');
       checkCurrent();
     }
-    const document = await this.inspect(tabId, grant.protected_origins, operation === 'navigate');
-    checkCurrent();
-    if (preview?.document_nonce && preview.document_nonce !== document.document_nonce) fail('TARGET_STALE');
     if (operation === 'navigate') {
       const url = navigationUrl(args.url, grant.protected_origins);
       grant.blankAllowed = false;
+      grant.navigation = { document: document.document_nonce, from: document.url, url };
       await this.api.tabs.update(tabId, { url });
       return { url, navigation_started: true };
     }

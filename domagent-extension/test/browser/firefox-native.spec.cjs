@@ -16,7 +16,7 @@ const { StreamableHTTPClientTransport } = localRequire('@modelcontextprotocol/sd
 const { actionHtml, exerciseActions, respondToForm } = require('./action-fixtures.cjs');
 
 test('native Firefox: collaborative sharing, guarded decisions, persistent restart and no-UI heartbeat', async () => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/store.js')).href);
   const { createApp } = await import(pathToFileURL(path.join(root, 'domagent-mcp/app.js')).href);
   const artifacts = path.join(root, 'domagent-extension/.browser-artifacts/firefox-native');
@@ -177,7 +177,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     await expect.poll(() => evaluate(`browser.tabs.get(${userTab.id}).then(tab => tab.status)`)).toBe('complete');
     async function share() {
       const waiting = client.callTool({ name: 'request_browser_access', arguments: {
-        device_id: deviceId, description: 'Share my selected Firefox tab',
+        device_id: deviceId, description: 'Share my selected Firefox tab in the explicitly selected browser tab',
       } });
       await expect.poll(async () => (await state()).pending.length).toBe(1);
       await evaluate(`browser.tabs.update(${userTab.id},{active:true})`);
@@ -187,13 +187,17 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       return (await state()).targets[0];
     }
     let grant = await share();
+    const reshared = await share();
+    expect(reshared.target_id).toBe(grant.target_id);
+    expect(reshared.windowId).toBe(grant.windowId);
+    expect((await state()).targets).toHaveLength(1);
     const advertised = (await state()).capabilities;
     expect(advertised).toContain('evaluate_script');
     expect(advertised.includes('get_screenshot')).toBe(await evaluate('typeof browser.tabs.captureTab === "function"'));
     async function call(name, args = {}, decision = 'approve') {
       if (name === 'get_text' && !args.selector && !args.ref) args = { selector: 'body', ...args };
       const waiting = client.callTool({ name, arguments: {
-        target_id: grant.target_id, description: `Native fixture ${name}`, ...args,
+        target_id: grant.target_id, description: `Native fixture ${name} in the explicitly selected test browser tab`, ...args,
       } });
       let completed = false;
       waiting.then(() => { completed = true; }, () => { completed = true; });
@@ -266,7 +270,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
       grant = await share();
     }
     const pendingHuman = client.callTool({ name: 'request_handoff', arguments: {
-      target_id: grant.target_id, description: 'Complete login in the shared tab',
+      target_id: grant.target_id, description: 'Complete login in the shared tab in the explicitly selected browser tab',
     } });
     await expect.poll(async () => (await state()).targets[0]?.commands[0]?.state).toBe('pending');
     await evaluate(`browser.tabs.update(${grant.tabId},{url:${JSON.stringify(`${pageOrigin}/after-login`)}})`);
@@ -314,7 +318,7 @@ test('native Firefox: collaborative sharing, guarded decisions, persistent resta
     expect((await state()).identity.device_id).toBe(deviceId);
     expect((await state()).targets).toEqual([]);
     const old = await client.callTool({ name: 'get_text', arguments: {
-      target_id: beforeRestart, selector: 'body', description: 'Cannot resurrect the old grant',
+      target_id: beforeRestart, selector: 'body', description: 'Cannot resurrect the old grant in the explicitly selected browser tab',
     } });
     expect(old.isError).toBe(true);
     const unattendedConnection = app.bridge.connections.get(deviceId).connection_id;

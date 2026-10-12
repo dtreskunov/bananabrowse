@@ -80,6 +80,16 @@ The Chromium and Firefox engines and image must already be available.
   reject replaced controls under bound approvals, and discard cancelled previews.
   Firefox JSON viewing is explicitly enabled; successful POST injection must
   report application/json and expose the fixture response under the same grant.
+- Reliability coverage enforces exact 39/40/500/501-character and whitespace
+  description boundaries; real server/extension re-sharing preserves the exact
+  handle and queues while rejecting binding/capability changes. Readiness tests
+  include immediately requested snapshots after navigate, transient inspection
+  injection failure, cancellation and persistent renderer refusal. Chrome/native
+  Firefox operate opacity-zero styled checkboxes via their visible labels and
+  verify no overlay/disabled/replacement bypass. Inspector reports bounded hiding
+  ancestors and explicit reveal candidates without focus/scroll/value changes.
+  Full service/browser smoke tests have a four-minute total budget for these
+  additional cases; individual operation timeouts are unchanged.
 
 The extended Playwright Firefox Juggler test remains explicitly skipped by
 default: the supplied 1.58.2 engine crashes on extension documents at

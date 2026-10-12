@@ -1,3 +1,5 @@
+import { inspectionErrorDetails } from '../shared/protocol.js';
+
 export class Fault extends Error {
   constructor(code, status = 400) {
     super(code);
@@ -21,5 +23,6 @@ const FIELDS = new Set([
 
 export function audit(event, fields = {}) {
   const metadata = Object.fromEntries(Object.entries(fields).filter(([key]) => FIELDS.has(key)));
+  Object.assign(metadata, inspectionErrorDetails(fields));
   process.stdout.write(`${JSON.stringify({ event, ...metadata })}\n`);
 }

@@ -26,6 +26,7 @@ async function fixture(t) {
     capabilities: () => ['navigate', 'get_text', 'evaluate_script', 'click', 'type_text'],
     async initialize(inventory) { calls.push(['initialize', inventory]); },
     async createWorkspace(id) { calls.push(['workspace', id]); return id + 1000; },
+    async assertWorkspace(grant) { calls.push(['assertWorkspace', grant.tabId, grant.windowId]); },
     async closeWorkspace(id, windowId) { calls.push(['closeWorkspace', id, windowId]); },
     async selectedTabById(id) { calls.push(['select', id]); return { id, url: 'https://site.example/' }; },
     async requestWindow(id) { calls.push(['window', id]); },
@@ -59,7 +60,7 @@ async function fixture(t) {
 
 async function pending(f, client_id = 'client-1', request_id = crypto.randomUUID()) {
   const request = { type: 'approval.request', ...binding, request_id, client_id,
-    client_label: '<img src=x onerror=evil()>', description: 'Help me research a website',
+    client_label: '<img src=x onerror=evil()>', description: 'Help me research a website in the explicitly selected browser tab',
     policy_id: POLICY_ID, nonce: `nonce-${request_id}`,
     expires_at: f.controller.now() + 600_000, protected_origins: ['https://idp.example'] };
   await f.receive(request);
@@ -75,7 +76,7 @@ async function approve(f, clientId = 'client-1', tabId = 100, ack = true) {
 }
 function command(f, grant, extra = {}) {
   return { type: 'command', ...binding, request_id: crypto.randomUUID(), target_id: grant.target_id,
-    client_id: grant.client_id, operation: 'get_text', args: {}, description: 'Read this page',
+    client_id: grant.client_id, operation: 'get_text', args: {}, description: 'Read this page in the explicitly selected browser tab',
     expires_at: f.controller.now() + 600_000, ...extra };
 }
 async function execute(f, grant, message, action = 'approve') {
@@ -98,7 +99,7 @@ test('approved actions execute with bounded local budgets despite server/browser
     const f = await fixture(t);
     f.advance(200_000);
     const request = { type: 'approval.request', ...binding, request_id: crypto.randomUUID(),
-      client_id: 'client-1', client_label: 'Atlas', description: 'Share a tab',
+      client_id: 'client-1', client_label: 'Atlas', description: 'Share a tab in the explicitly selected browser tab',
       policy_id: POLICY_ID, nonce: 'request-nonce', protected_origins: [],
       expires_at: f.controller.now() + 600_000 + skew, wait_timeout_ms: 600_000 };
     await f.receive(request);
@@ -250,7 +251,7 @@ test('allow-all affects ordinary page commands in only this grant; never human D
 test('human Done survives login navigation, completes handshake, and retains sharing', async t => {
   const f = await fixture(t);
   const { grant } = await approve(f);
-  const human = command(f, grant, { operation: 'request_handoff', description: 'Sign in yourself' });
+  const human = command(f, grant, { operation: 'request_handoff', description: 'Sign in yourself in the explicitly selected browser tab' });
   f.controller.enqueue(human);
   f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/login');
   f.controller.decide(grant.target_id, human.request_id, 'done');
@@ -283,6 +284,45 @@ test('navigation rejects old-document queued and ready actions without ending sh
     target_id: grant.target_id, expires_at: f.controller.now() + 25_000 });
   assert.equal(grant.state, 'active');
   assert(!f.calls.some(call => call[0] === 'execute'));
+});
+
+test('only unapproved document-unbound reads refresh their preview through navigation; no approved work is rebound', async t => {
+  const f = await fixture(t);
+  const { grant } = await approve(f);
+  let resolveOld;
+  let preparations = 0;
+  f.adapter.prepareAction = async () => {
+    preparations++;
+    if (preparations === 1) return new Promise(resolve => { resolveOld = resolve; });
+    return { document_nonce: 'new-document', summary: ['Tab: new document'], approval_token: 'new-binding' };
+  };
+  f.adapter.releaseAction = async (_grant, preview) => { if (preview) f.calls.push(['releasePreview', preview.approval_token]); };
+  const message = command(f, grant);
+  f.controller.enqueue(message);
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/new');
+  assert.equal(grant.queue.length, 1);
+  assert.equal(grant.queue[0].preparing, true);
+  resolveOld({ document_nonce: 'old-document', summary: ['Tab: old document'], approval_token: 'old-binding' });
+  await flush();
+  assert.equal(grant.queue[0].preview.document_nonce, 'new-document');
+  assert.equal(grant.queue[0].preparing, false);
+  assert(f.calls.some(call => call[0] === 'releasePreview' && call[1] === 'old-binding'));
+  assert(!f.socket.sent.some(frame => frame.type === 'command.ready'));
+  f.controller.decide(grant.target_id, message.request_id, 'approve');
+  f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/another');
+  assert.equal(f.socket.sent.at(-1).error.code, 'TARGET_STALE');
+  assert.equal(grant.queue.length, 0);
+  assert(!f.calls.some(call => call[0] === 'execute'));
+  for (const extra of [
+    { operation: 'type_text', args: { selector: '#input', text: 'value' } },
+    { operation: 'evaluate_script', args: { script: 'document.title' } },
+    { args: { ref: 'e1', document: 'previous-document' } },
+  ]) {
+    const bound = command(f, grant, extra);
+    f.controller.enqueue(bound);
+    f.controller.tabEvent(grant.tabId, 'navigation', 'https://site.example/next');
+    assert.equal(f.socket.sent.find(frame => frame.type === 'result' && frame.request_id === bound.request_id).error.code, 'TARGET_STALE');
+  }
 });
 test('expired human wait returns COMMAND_EXPIRED and keeps grant', async t => {
   const f = await fixture(t);
@@ -388,7 +428,7 @@ test('positive approval waits for target preparation and executes only the captu
   const { grant } = await approve(f);
   let resolve;
   f.adapter.prepareAction = () => new Promise(done => { resolve = done; });
-  const message = command(f, grant, { operation: 'click', args: { selector: '#button' }, description: 'x' });
+  const message = command(f, grant, { operation: 'click', args: { selector: '#button' }, description: 'Click the intended button in this shared browser tab' });
   f.controller.enqueue(message);
   assert.throws(() => f.controller.decide(grant.target_id, message.request_id, 'approve'), /APPROVAL_REQUIRED/);
   const preview = { summary: ['Operation: click', 'Selector: #button'], approval_token: 'bound-element' };

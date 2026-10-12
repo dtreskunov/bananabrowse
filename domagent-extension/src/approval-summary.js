@@ -8,6 +8,9 @@ export function actionSummary(operation, args, page, target) {
   if (target) {
     lines.push(`Control: ${target.role || target.tag || 'element'} "${target.name || 'Unnamed'}"`);
     lines.push(`Readiness: ${target.state}`);
+    if (target.activation?.kind === 'associated_label') {
+      lines.push(`Activation: associated label "${target.activation.name || 'Unnamed'}".`);
+    }
   } else if (args.selector || args.ref) {
     lines.push('Control not resolved yet; approval applies to the displayed selector/reference.');
   }

@@ -1,6 +1,7 @@
 import {
   VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS, authPayload, enrollmentPayload, extensionOrigin,
   connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId, waitErrorDetails,
+  validDescription, inspectionErrorDetails,
 } from '../../shared/protocol.js';
 import {
   MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
@@ -13,6 +14,9 @@ export const LOCAL_END_REASONS = new Set([
 ]);
 const END_REASONS = new Set([...LOCAL_END_REASONS, 'OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'REPLACED']);
 const followsNavigation = operation => ['request_handoff', 'wait_for_page'].includes(operation);
+const canRefreshReadPreview = message =>
+  ['get_page_snapshot', 'get_text', 'get_interactive_elements', 'inspect_element', 'get_screenshot'].includes(message.operation) &&
+  !message.args.ref && !message.args.document;
 
 export class Controller {
   constructor({ adapter, keys, storage, inventoryStorage, extensionUrl,
@@ -370,7 +374,7 @@ export class Controller {
       id(message.request_id);
       id(message.client_id);
       text(message.client_label);
-      text(message.description, 4096);
+      if (!validDescription(message.description)) fail('INVALID_MESSAGE');
       text(message.nonce);
       message.expires_at = localDeadline(message, 'wait_timeout_ms', HUMAN_WAIT_MS, this.now());
       if (message.policy_id !== POLICY_ID || !Number.isFinite(message.expires_at) ||
@@ -483,6 +487,9 @@ export class Controller {
         await this.adapter.inspect(tab.id, grant.protected_origins);
         checkApproval();
         await this.adapter.attach(tab.id);
+        checkApproval();
+      } else {
+        await this.adapter.assertWorkspace(grant);
         checkApproval();
       }
       const signature = await sign(this.record.privateKey, grantPayload({
@@ -714,12 +721,24 @@ export class Controller {
   }
 
   async prepareQueued(grant, queued) {
+    const preparingGeneration = grant.documentGeneration;
     try {
-      const preview = await this.adapter.prepareAction(grant, queued.message.operation, queued.message.args);
+      const check = () => {
+        if (this.grants.get(grant.target_id) !== grant || !grant.queue.includes(queued) || queued.cancelled) fail('APPROVAL_REQUIRED');
+        if (queued.deadline <= this.now()) fail('COMMAND_EXPIRED');
+        if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
+      };
+      const preview = await this.adapter.prepareAction(grant, queued.message.operation, queued.message.args, check);
       if (this.grants.get(grant.target_id) !== grant || !grant.queue.includes(queued) ||
           queued.cancelled || (!followsNavigation(queued.message.operation) &&
           grant.documentGeneration !== queued.documentGeneration)) {
         await this.adapter.releaseAction?.(grant, preview);
+        return;
+      }
+      if (canRefreshReadPreview(queued.message) && grant.documentGeneration !== preparingGeneration) {
+        await this.adapter.releaseAction?.(grant, preview);
+        queued.preparing = false;
+        this.present(grant);
         return;
       }
       queued.preview = preview;
@@ -728,7 +747,12 @@ export class Controller {
     } catch (error) {
       queued.preparing = false;
       if (this.grants.get(grant.target_id) === grant && grant.queue.includes(queued)) {
-        this.finishQueued(grant, queued, { code: errorCode(error) });
+        if (canRefreshReadPreview(queued.message) && grant.documentGeneration !== preparingGeneration &&
+            ['TARGET_STALE', 'PAGE_UNAVAILABLE', 'WAIT_TIMEOUT'].includes(errorCode(error))) {
+          this.present(grant);
+          return;
+        }
+        this.finishQueued(grant, queued, { code: errorCode(error), ...inspectionErrorDetails(error) });
         if (errorCode(error) === 'PAGE_UNAVAILABLE') {
           await this.end(grant.target_id, 'CAPABILITY_UNAVAILABLE');
         }
@@ -867,11 +891,11 @@ export class Controller {
       if (!queued.cancelled && this.grants.get(grant.target_id) === grant) {
         // Invalidate authority before advancing another queued action.
         if (code === 'OUTCOME_UNKNOWN' || code === 'PAGE_UNAVAILABLE') {
-          this.result(message, { code });
+          this.result(message, { code, ...inspectionErrorDetails(error) });
           grant.queue.splice(grant.queue.indexOf(queued), 1);
           await this.end(grant.target_id, code === 'PAGE_UNAVAILABLE' ? 'CAPABILITY_UNAVAILABLE' : 'OUTCOME_UNKNOWN');
         } else {
-          this.finishQueued(grant, queued, { code, ...waitErrorDetails(error) });
+          this.finishQueued(grant, queued, { code, ...waitErrorDetails(error), ...inspectionErrorDetails(error) });
           if (code === 'WORKSPACE_CHANGED') await this.end(grant.target_id, 'OWNER_PAUSED');
         }
       }
@@ -891,9 +915,16 @@ export class Controller {
         grant.documentGeneration++;
         grant.indicatorToken = null;
         grant.indicatorDocument = null;
+        let refresh = false;
         for (const queued of [...grant.queue]) {
           if (queued.state !== 'executing' && !followsNavigation(queued.message.operation)) {
-            this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
+            if (queued.state === 'pending' && canRefreshReadPreview(queued.message)) {
+              this.releasePreview(grant, queued);
+              queued.preview = null;
+              queued.previewReleased = false;
+              queued.documentGeneration = grant.documentGeneration;
+              refresh = true;
+            } else this.finishQueued(grant, queued, { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
           }
         }
         if (url) {
@@ -910,6 +941,7 @@ export class Controller {
             void this.end(grant.target_id, 'HANDOFF', true, protectedOrigin);
           }
         }
+        if (refresh && this.grants.get(grant.target_id) === grant) this.present(grant);
       } else if (type === 'complete') {
         void this.updateIndicator(grant);
       } else {

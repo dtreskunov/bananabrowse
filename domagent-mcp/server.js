@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import {
   VERSION, POLICY_ID, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
   authPayload, grantPayload, verify, navigationUrl, validOperationArgs, validTargetId, waitErrorDetails,
+  validDescription, inspectionErrorDetails,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
@@ -143,7 +144,7 @@ export class BridgeServer {
     if (m.type === 'pong') return;
     if (m.type === 'access.request') {
       this.requestAccess(m.client_id, session.device.id, true, session.tenant_id,
-        'Share a tab again with your assistant', HUMAN_WAIT_MS);
+        'Share this selected browser tab with your assistant', HUMAN_WAIT_MS);
       return;
     }
     if (m.type === 'approval.deny') {
@@ -157,28 +158,41 @@ export class BridgeServer {
     }
     if (m.type === 'grant.approve') {
       const r = this.requests.get(m.request_id);
+      const existing = this.grants.get(m.target_id);
       requireValue(r && r.device_id === session.device.id && r.expires_at > Date.now() &&
         this.store.client(r.client_id, session.tenant_id)?.credential_hash === this.requestCredentials.get(r.request_id) &&
         r.connection_id === session.connection_id && r.client_id === m.client_id &&
         m.policy_id === POLICY_ID && m.nonce === r.nonce &&
         Number.isSafeInteger(m.tab_id) && m.tab_id >= 0 &&
         Number.isSafeInteger(m.window_id) && m.window_id >= 0 &&
-        ID.test(m.target_id) && !this.grants.has(m.target_id) &&
+        ID.test(m.target_id) &&
         Array.isArray(m.capabilities) && m.capabilities.length > 0 &&
         new Set(m.capabilities).size === m.capabilities.length &&
         m.capabilities.every(op => OPERATIONS.includes(op)), 'INVALID_GRANT');
+      requireValue(!existing || (
+        existing.tenant_id === session.tenant_id && existing.client_id === r.client_id &&
+        existing.device_id === r.device_id && existing.connection_id === session.connection_id &&
+        existing.tab_id === m.tab_id && existing.window_id === m.window_id &&
+        existing.capabilities.length === m.capabilities.length &&
+        m.capabilities.every(op => existing.capabilities.includes(op))
+      ), 'INVALID_GRANT');
       requireValue(await verify(JSON.parse(session.device.public_key), grantPayload({
         ...r, origin: this.config.origin, target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities,
       }), m.signature), 'NOT_AUTHORIZED', 403);
       requireValue(this.current(session) && this.store.linked(r.client_id, r.device_id),
         'NOT_AUTHORIZED', 403);
-      for (const [id, grant] of this.grants) {
-        if (grant.device_id === r.device_id && grant.tab_id === m.tab_id) this.endGrant(id, 'REPLACED');
+      requireValue(this.requests.get(r.request_id) === r && r.expires_at > Date.now() &&
+        this.store.client(r.client_id, session.tenant_id)?.credential_hash === this.requestCredentials.get(r.request_id) &&
+        this.grants.get(m.target_id) === existing, 'INVALID_GRANT');
+      if (!existing) {
+        for (const [id, grant] of this.grants) {
+          if (grant.device_id === r.device_id && grant.tab_id === m.tab_id) this.endGrant(id, 'REPLACED');
+        }
+        this.grants.set(m.target_id, {
+          tenant_id: session.tenant_id, client_id: r.client_id, device_id: r.device_id, connection_id: r.connection_id,
+          target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities, queued: 0, tail: Promise.resolve(),
+        });
       }
-      this.grants.set(m.target_id, {
-        tenant_id: session.tenant_id, client_id: r.client_id, device_id: r.device_id, connection_id: r.connection_id,
-        target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities, queued: 0, tail: Promise.resolve(),
-      });
       this.send(session, { type: 'grant.active', client_id: r.client_id, target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id });
       this.finishRequest(r.request_id, null, {
         state: 'active', request_id: r.request_id, target_id: m.target_id, tab_handle: m.target_id,
@@ -240,7 +254,7 @@ export class BridgeServer {
           'RESULT_TOO_LARGE', 'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
           'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE', 'WORKSPACE_CHANGED'].includes(m.error.code)
           ? m.error.code : 'OPERATION_FAILED';
-        call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error)));
+        call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error)));
         if (code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
         else if (code === 'PAGE_UNAVAILABLE') this.endGrant(m.target_id, 'CAPABILITY_UNAVAILABLE');
       } else {
@@ -290,7 +304,7 @@ export class BridgeServer {
     requireValue(client && this.store.linked(clientId, deviceId, client.tenant_id), 'NOT_AUTHORIZED', 403);
     const session = this.connections.get(deviceId);
     requireValue(session && this.current(session), 'BROWSER_OFFLINE', 409);
-    requireValue(typeof description === 'string' && description.trim() && description.length <= 500 &&
+    requireValue(validDescription(description) &&
       Number.isInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
     for (const request of this.requests.values()) {
       if (request.client_id === clientId && request.device_id === deviceId && request.expires_at > Date.now()) {
@@ -387,7 +401,7 @@ export class BridgeServer {
     });
   }
   async operate(clientId, targetId, operation, args, signal, tenant,
-    description = 'Use the shared page', waitMs = HUMAN_WAIT_MS) {
+    description = 'Perform the requested action in this shared browser tab', waitMs = HUMAN_WAIT_MS) {
     requireValue(validTargetId(targetId), 'INVALID_ARGUMENTS');
     requireValue((OPERATIONS.includes(operation) || operation === 'request_handoff') &&
       args && typeof args === 'object' && !Array.isArray(args),
@@ -398,7 +412,7 @@ export class BridgeServer {
       this.store.linked(clientId, grant.device_id, grant.tenant_id),
       'NOT_AUTHORIZED', 403);
     requireValue(operation === 'request_handoff' || grant.capabilities.includes(operation), 'CAPABILITY_UNAVAILABLE');
-    requireValue(typeof description === 'string' && description.trim() && description.length <= 500 &&
+    requireValue(validDescription(description) &&
       Number.isInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
     if (operation === 'navigate') {
       try { navigationUrl(args.url, this.config.protectedOrigins); }
@@ -479,7 +493,7 @@ export class BridgeServer {
         });
       } catch (error) {
         audit('operation_finished', { client_id: clientId, target_id: targetId, operation,
-          request_id: requestId, duration_ms: Date.now() - started, code: failureCode(error) });
+          request_id: requestId, duration_ms: Date.now() - started, code: failureCode(error), ...inspectionErrorDetails(error) });
         throw error;
       }
       audit('operation_finished', { client_id: clientId, target_id: targetId, operation,

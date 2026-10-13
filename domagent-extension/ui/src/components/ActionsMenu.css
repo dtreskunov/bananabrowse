@@ -1,0 +1,15 @@
+.action-menu { position: relative; }
+.action-menu.open .icon-button { background: var(--wash); }
+.action-panel {
+  position: absolute; top: 100%; right: 0; margin-top: 4px; min-width: 200px;
+  max-width: min(280px, calc(100vw - 32px)); z-index: 50;
+  background: var(--surface); color: var(--surface-fg);
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: 0 6px 24px var(--shadow-color); padding: 4px;
+}
+.action-item {
+  display: block; width: 100%; min-height: 36px; padding: 8px 10px;
+  text-align: left; border: 0; background: transparent; color: inherit;
+}
+.action-item:hover:not(:disabled), .action-item:focus-visible { background: var(--wash); }
+.action-item.danger { color: var(--danger); }

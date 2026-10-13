@@ -1,7 +1,7 @@
 {
     "name": "domagent",
     "private": true,
-    "version": "5.0.0-beta.5",
+    "version": "5.0.0-beta.6",
     "description": "MCP server for DOMAgent — let AI agents control your real browser via Chrome or Firefox extension",
     "main": "index.js",
     "type": "module",
@@ -10,7 +10,7 @@
     },
     "scripts": {
         "start": "node index.js",
-        "test": "node --test test/*.test.js ../domagent-extension/test/*.test.js",
+        "test": "node --test test/*.test.js ../domagent-extension/test/*.test.js && npm --prefix ../domagent-extension/ui test",
         "build": "node ../scripts/build-extensions.mjs",
         "test:browser": "playwright test --config ../domagent-extension/playwright.config.cjs",
         "check": "node ../scripts/check.mjs"

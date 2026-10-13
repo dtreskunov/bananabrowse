@@ -1,4 +1,4 @@
-# DomAgent service 5.0.0-beta.5
+# DomAgent service 5.0.0-beta.6
 
 Node 22.13+ authenticated tenant-scoped Streamable HTTP MCP and signed browser
 wire **v5**. Existing `/mcp/<tenant>` credentials/identities and
@@ -165,5 +165,9 @@ succeed.
 
 Run service tests with `node --test test/*.test.js`, syntax checks with
 `npm run check`, and coordinated extension builds with `npm run build`.
+Install the independent UI dependencies with
+`npm --prefix ../domagent-extension/ui ci --ignore-scripts` before extension
+builds or the combined `npm test`. The UI owns its lockfile, Preact/signals,
+TypeScript and esbuild; builds type-check before bundling local CSS and fonts.
 Tests use in-memory DBs and isolated loopback sockets; no production database,
 browser, live migration or deployment is exercised.

@@ -48,15 +48,7 @@ let localMutation = Promise.resolve();
 async function uiAction(message) {
   await ready;
   if (fatal) throw fatal;
-  if (message.type === 'ui.state') {
-    const snapshot = controller.snapshot();
-    const groups = message.windowId === undefined ? [] : await api.tabGroups.query({ windowId: message.windowId });
-    return { ...snapshot, available_groups: groups.slice(0, 20).map(group => ({
-      groupId: group.id, title: group.title || 'Untitled group',
-    })), ...(message.windowId !== undefined ? {
-      workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === message.windowId),
-    } : {}) };
-  }
+  if (message.type === 'ui.state') return uiSnapshot(message.windowId);
   if (message.type === 'ui.configure') {
     let value = message.service_origin.trim();
     if (!value.includes('://')) value = `https://${value}`;
@@ -110,6 +102,21 @@ async function uiAction(message) {
   fail('INVALID_MESSAGE');
 }
 
+async function uiSnapshot(windowId) {
+  const snapshot = controller.snapshot();
+  if (windowId === undefined) return { ...snapshot, available_groups: [] };
+  // Native previews stay on the trusted local UI boundary, never in signed MCP state.
+  const [groups, tabs] = await Promise.all([api.tabGroups.query({ windowId }), api.tabs.query({ windowId })]);
+  return { ...snapshot,
+    available_groups: groups.slice(0, 20).map(group => {
+      const members = tabs.filter(tab => tab.groupId === group.id);
+      return { groupId: group.id, title: group.title || 'Untitled group', tab_count: members.length,
+        tab_titles: members.slice(0, 3).map(tab => (tab.title || 'New tab').slice(0, 160)) };
+    }),
+    workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === windowId),
+  };
+}
+
 api.runtime.onMessage.addListener((message, sender, respond) => {
   if (!isUiSender(sender, api.runtime)) { respond({ ok: false, error: { code: 'NOT_AUTHORIZED' } }); return false; }
   const run = () => uiAction(message);
@@ -137,11 +144,7 @@ api.runtime.onConnect.addListener(port => {
         adapter.registerPanel(windowId, port);
       } else if (message.windowId !== windowId) fail('NOT_AUTHORIZED');
       adapter.touchPanel(windowId, port);
-      const snapshot = controller.snapshot();
-      const groups = await api.tabGroups.query({ windowId });
-      port.postMessage({ type: 'state', value: { ...snapshot,
-        available_groups: groups.slice(0, 20).map(group => ({ groupId: group.id, title: group.title || 'Untitled group' })),
-        workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === windowId) } });
+      port.postMessage({ type: 'state', value: await uiSnapshot(windowId) });
     }).catch(error => { controller.report(error); port.disconnect(); });
   });
   port.onDisconnect.addListener(() => { if (windowId !== undefined) adapter.unregisterPanel(windowId, port); });

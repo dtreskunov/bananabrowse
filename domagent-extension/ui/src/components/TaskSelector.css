@@ -1,0 +1,18 @@
+.task-selector { position: relative; margin-bottom: 18px; }
+.task-select-trigger {
+  display: flex; width: 100%; align-items: center; gap: 8px; padding: 10px 12px;
+  text-align: left; background: var(--surface); border: 1px solid var(--border);
+}
+.task-select-trigger:disabled { opacity: 1; background: var(--surface-raised); }
+.select-copy { min-width: 0; flex: 1; }
+.select-copy > span, .select-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-copy small { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.task-options {
+  position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; padding: 4px; z-index: 30;
+  max-height: 300px; overflow: auto; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 6px 24px var(--shadow-color);
+}
+.task-option { padding: 10px; cursor: pointer; border-radius: var(--radius-md); overflow-wrap: anywhere; }
+.task-option small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+.task-option.highlighted { background: var(--wash); }
+.task-option[aria-selected="true"] { box-shadow: inset 2px 0 var(--primary); }

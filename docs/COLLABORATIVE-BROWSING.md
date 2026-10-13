@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.5 / extension5.0.3 is the current matched release.
+Service5.0.0-beta.6 / extension5.0.4 is the current matched release.
 
 ## Tools
 
@@ -60,7 +60,7 @@ handle. Website-created tabs/popup inheritance is excluded until explicitly adde
 Only grouped metadata is exposed. No focus change unless the user clicks a task
 row/menu/notification. End/close/lease loss leaves tabs/group open.
 Native panel restoration, browser restart and reconnect restore no runtime access.
-Pause cancels backlog; explicit Resume creates a fresh execution activation.
+Pause cancels backlog; explicit Continue creates a fresh execution activation.
 
 Restart diagnostics are separate from authority: discovery includes service_epoch,
 service_started_at, current connection_id and terminal end_reason/ended_at.
@@ -83,13 +83,22 @@ and group movement/window validation still applies.
 GROUP_UNAVAILABLE retires a stale local workspace whose native group was removed
 or moved out of its bound window. Status coloring of a missing group never blocks
 revocation/End, but unrelated API failures remain explicit.
-Recovery controls live outside the tab-row loop: even an empty inactive workspace
-offers valid existing groups and Start a new task group. Resume is shown only when
-the bound group is still listed in the current window; backend membership and
-visibility checks remain authoritative. End removes local session tracking while
+Recovery is independent of tab rows: even an empty inactive workspace offers a
+task selector with count/title previews and New task group. A single local
+Continue/Start reconnects if needed, validates the selected actual native group
+and creates fresh authority. Selection alone does not grant scope. Missing groups
+cannot be resumed; backend membership and visibility checks remain authoritative.
+The UI shows Starting until the fresh activation is acknowledged. Only local UI
+messages carry inactive native-group previews; signed service snapshots and MCP
+never receive unshared titles/counts. End removes local session tracking while
 leaving native group/tabs intact; creating a fresh task uses a new workspace/handle,
 not replay or re-pairing. Historical OUTCOME_UNKNOWN stays in Settings after fresh
 activation resolves the current warning; inspect old outcomes before retrying.
+The compact light/dark Preact sidebar uses an independent typed UI package,
+locally bundled CSS/fonts, one primary action, a keyboard task selector and
+secondary actions/settings/diagnostics in an overflow menu. Historical end
+reasons never overwrite the current healthy active-task status. Connection repair
+alone does not activate a task, and no task action automatically replays a mutation.
 
 System notification plus toolbar pending count announces human assistance.
 Notification delivery failure is explicit; OS suppression cannot prove visibility.

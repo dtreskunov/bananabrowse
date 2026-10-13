@@ -86,6 +86,26 @@ test('v5 identity and workspace signatures bind actual group and explicit tab ha
   assert(!f.calls.some(call => call[0] === 'remove'));
 });
 
+test('local UI reports starting until the fresh activation is acknowledged, including after Resume', async t => {
+  const f = await fixture(t);
+  await f.controller.startWorkspace(10);
+  const workspace = [...f.controller.workspaces.values()][0];
+  assert.equal(f.controller.snapshot().workspaces[0].acknowledged, false);
+  await f.receive({ type: 'workspace.active', ...f.binding, workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  assert.equal(f.controller.snapshot().workspaces[0].acknowledged, true);
+  const activation = workspace.activationId;
+  await f.controller.stopWorkspace(workspace, 'paused');
+  await f.controller.startWorkspace(10);
+  assert.equal(f.controller.snapshot().workspaces[0].acknowledged, false);
+  await f.receive({ type: 'workspace.active', ...f.binding, workspace_id: workspace.id,
+    activation_id: activation, revision: workspace.revision });
+  assert.equal(f.controller.snapshot().workspaces[0].acknowledged, false);
+  await f.receive({ type: 'workspace.active', ...f.binding, workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  assert.equal(f.controller.snapshot().workspaces[0].acknowledged, true);
+});
+
 test('grouped background tabs execute without per-action approval and unknown tabs remain inaccessible', async t => {
   const f = await fixture(t), workspace = await start(f);
   f.tabs.push({ id: 101, windowId: 10, groupId: 1, url: 'https://other.example/', title: 'Other task', status: 'complete' });

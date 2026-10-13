@@ -1,6 +1,8 @@
 # v5 browser and security validation
 
 ```sh
+npm --prefix domagent-mcp ci --ignore-scripts
+npm --prefix domagent-extension/ui ci --ignore-scripts
 npm --prefix domagent-mcp test
 npm --prefix domagent-mcp run build
 npm --prefix domagent-mcp run check
@@ -66,9 +68,18 @@ authorize them or silently create another group.
 
 Missing-group tests preserve revoke-before-cleanup, retirement and explicit
 alternate-group selection even when a native lookup races group deletion.
-Empty-sidebar renderer fixtures in both Chrome and Firefox assert exact recovery
-buttons and selected IDs at320px width with no tab rows and a stale warning.
+Empty-sidebar renderer fixtures in both Chrome and Firefox assert single-action
+recovery and exact selected native IDs at320px width in light/dark themes with
+no tab rows and a stale warning. They check fresh-ack Starting, current vs
+historical status, permission-denial safety, combined reconnect/Continue,
+keyboard task selection, menu/Escape/back focus restoration, focus retention
+across live updates, overflow bounds and locally bundled fonts.
 They mock browser APIs for rendering only, not production authorization.
 Actual Chrome tests exercise native ungroup/removal, End preserving groups/tabs,
 existing group reactivation and fresh task creation. Failed activation/End tests
 surface unrelated API errors without retaining active authority or closing tabs.
+
+The independent UI package also has pure derived-state/decoding/selection tests,
+included in the main `npm test`. `npm --prefix domagent-extension/ui run
+typecheck` checks strict TypeScript without a service build. No frontend dependency,
+import or runtime connection to BananaClaw is needed.

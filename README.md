@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.5**, extensions **5.0.3**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.5).
+Service **5.0.0-beta.6**, extensions **5.0.4**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.6).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -53,10 +53,11 @@ repeated per-action prompts.
   inactive empty summaries only; local Resume is still required.
 - Resolved authorization failures remain diagnostic history, not red current
   errors. A retained same-named group is not automatically authorized; choose
-  its explicit native group ID in the sidebar instead of re-pairing/creating
-  yet another group.
+  the group using its tab count/title preview instead of re-pairing/creating
+  yet another group. Raw native IDs are available in Diagnostics, not the main view.
 - Recovery actions are always visible for an inactive workspace, including when
-  it has zero tab rows: select an existing native group or **Start a new task group**.
+  it has zero tab rows: select an existing native group or **New task group**, then
+  use the single **Continue** / **Start** action.
   End retires local tracking and leaves the old group/tabs intact; Pause keeps it
   available for Resume. A removed/moved group cannot trap End or other selection,
   and real browser API failures still surface explicitly.
@@ -102,6 +103,7 @@ no browser-user account/membership ceremony.
 
 ```sh
 npm --prefix domagent-mcp ci --ignore-scripts
+npm --prefix domagent-extension/ui ci --ignore-scripts
 npm --prefix domagent-mcp test
 npm --prefix domagent-mcp run build
 npm --prefix domagent-mcp run check
@@ -112,6 +114,29 @@ See [service CLI/API](domagent-mcp/README.md),
 [security and deployment](docs/SECURE-PAIRING.md),
 [workspace protocol](docs/COLLABORATIVE-BROWSING.md),
 [browser qualification](domagent-extension/test/README.md).
+
+## Independent extension frontend
+
+The extension uses its own [UI package](domagent-extension/ui/package.json):
+Preact, signals, strict TypeScript and a type-check-first esbuild build. Neutral
+light/dark design tokens, local Figtree fonts, compact task rows, a keyboard task
+selector and an overflow actions menu adapt BananaClaw's UI patterns without any
+cross-project imports, shared dependency tree, backend or runtime requirement.
+Fonts and notices are included in both extension packages; no CDN or remote UI
+assets are used.
+
+The sidebar derives one current status and main action from transport, task and
+fresh-activation acknowledgement. **Continue** can reconnect and activate the
+selected actual native group in one deliberate local click. Reconnect alone,
+native restoration and selecting a group never grant control. Pause remains
+resumable; End retains the tabs. Secondary task actions, connection settings and
+historical diagnostics do not compete with the main action. Unconfirmed past
+actions remain in Diagnostics and must be checked before repeating them.
+
+Run `npm --prefix domagent-extension/ui run typecheck` or `npm --prefix
+domagent-extension/ui test` independently. The coordinated `domagent-mcp` build
+checks UI types and packages both browsers; its test command also runs the UI
+state tests. These commands require only this checkout and its two lockfiles.
 
 Shared-profile scripts can read page data and cause account actions. Pause/End
 cannot undo sent requests, scheduled effects in other contexts or site workers.

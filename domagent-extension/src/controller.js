@@ -112,6 +112,7 @@ export class Controller {
       workspaces: [...this.workspaces.values()].map(workspace => ({
         workspace_id: workspace.id, windowId: workspace.windowId, groupId: workspace.groupId,
         state: workspace.state, end_reason: workspace.endReason || null, ended_at: workspace.endedAt ?? null,
+        acknowledged: workspace.state === 'active' && workspace.ackRevision > 0,
         tabs: [...workspace.tabs.values()].map(tab => ({
           target_id: tab.targetId, tabId: tab.tabId, title: tab.title, url: tab.url,
           page_state: tab.pageState, commands: tab.queue.map(task => ({
@@ -391,6 +392,7 @@ export class Controller {
     }
     if (workspace.state === 'active') return;
     workspace.activationId = crypto.randomUUID();
+    workspace.ackRevision = 0;
     workspace.endReason = null; workspace.endedAt = null;
     workspace.state = 'active'; workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
     try {

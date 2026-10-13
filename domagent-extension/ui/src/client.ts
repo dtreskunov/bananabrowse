@@ -18,7 +18,7 @@ interface BrowserApi {
     getBrowserInfo?: () => Promise<{ name: string; version: string }>;
   };
   windows: { getCurrent(): Promise<{ id?: number }> };
-  permissions: { request(options: { origins: string[]; permissions?: string[] }): Promise<boolean> };
+  permissions: { request(options: { origins?: string[]; permissions?: string[] }): Promise<boolean> };
   sidePanel?: { open(options: { windowId: number }): Promise<void> };
   sidebarAction?: { open(): Promise<void> };
 }
@@ -84,7 +84,7 @@ export async function continueTask(): Promise<void> {
   const selected = selection.value;
   if (!selected) throw new Error('GROUP_UNAVAILABLE');
   // Ask synchronously within the local click gesture, before any connection work.
-  if (!await websitePermission()) throw new Error('PERMISSION_REQUIRED');
+  if (!await taskPermissions()) throw new Error('PERMISSION_REQUIRED');
   await waitForConnection();
   if (selected === 'new') {
     await request('startNew', { windowId });
@@ -106,7 +106,7 @@ export async function configure(domain: string): Promise<void> {
   await request('configure', { service_origin: origin });
 }
 export async function confirmPairing(): Promise<void> {
-  if (!await websitePermission()) throw new Error('PERMISSION_REQUIRED');
+  if (!await taskPermissions()) throw new Error('PERMISSION_REQUIRED');
   await request('confirmPairing');
   await waitForConnection();
   await request('start', { windowId });
@@ -116,9 +116,21 @@ export async function copyCode(code: string): Promise<void> {
   catch { throw new Error('CLIPBOARD_UNAVAILABLE'); }
 }
 export const copyText = copyCode;
-function websitePermission(): Promise<boolean> {
-  return api.permissions.request({ origins: ['http://*/*', 'https://*/*'],
-    ...(api.runtime.getBrowserInfo ? { permissions: ['userScripts'] } : {}) });
+async function taskPermissions(): Promise<boolean> {
+  if (!api.runtime.getBrowserInfo) return api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
+  const permissions = snapshot.value?.permissions;
+  if (!permissions) throw new Error('INVALID_MESSAGE');
+  if (permissions.websites && permissions.scripting) return true;
+  // Firefox requires userScripts alone; choose the request before awaiting to
+  // preserve this click's user gesture. A second category gets a fresh click.
+  const granted = await api.permissions.request(!permissions.scripting
+    ? { permissions: ['userScripts'] } : { origins: ['http://*/*', 'https://*/*'] });
+  if (!granted) return false;
+  await refresh();
+  if (!snapshot.value?.permissions?.websites || !snapshot.value.permissions.scripting) {
+    throw new Error('PERMISSION_STEP_REQUIRED');
+  }
+  return true;
 }
 export async function initialize(): Promise<void> {
   const current = await api.windows.getCurrent();

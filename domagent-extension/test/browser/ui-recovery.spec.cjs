@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '../../..');
 const localRequire = createRequire(path.join(root, 'domagent-mcp/package.json'));
 const { test, expect, chromium, firefox } = localRequire('@playwright/test');
 
-async function fixture(engine, colorScheme, work) {
+async function fixture(engine, colorScheme, work, firefoxPermissions) {
   // Renderer-only fixture: no mocked message can grant real browser authority.
   const assets = path.join(root, 'dist/chrome');
   const server = http.createServer(async (req, res) => {
@@ -25,7 +25,7 @@ async function fixture(engine, colorScheme, work) {
   try {
     browser = await engine.launch({ headless: true });
     const page = await browser.newPage({ viewport: { width: 320, height: 820 }, colorScheme });
-    await page.addInitScript(() => {
+    await page.addInitScript(firefoxPermissions => {
       const snapshot = {
         phase: 'authenticated', identity: { client_label: 'BananaClawz with a long assistant name' }, config: {},
         browser_info: { extension_version: '5.0.3', browser_name: 'firefox', browser_version: '157.0.1' },
@@ -36,6 +36,7 @@ async function fixture(engine, colorScheme, work) {
         available_groups: [{ groupId: 456, title: 'DomAgent - BananaClawz', tab_count: 2, tab_titles: ['Invoices', 'Account'] },
           { groupId: 789, title: 'DomAgent - BananaClawz', tab_count: 1, tab_titles: ['Report'] }],
       };
+      if (firefoxPermissions) snapshot.permissions = { ...firefoxPermissions };
       let render;
       globalThis.fixtureRequests = [];
       globalThis.fixturePermissions = true;
@@ -49,7 +50,18 @@ async function fixture(engine, colorScheme, work) {
         onDisconnect: { addListener() {} } };
       globalThis.chrome = {
         windows: { async getCurrent() { return { id: 1 }; } },
-        permissions: { async request(options) { fixturePermissionRequests.push(options); return fixturePermissions; } },
+        permissions: { async request(options) {
+          fixturePermissionRequests.push(options);
+          if (firefoxPermissions && options.permissions?.includes('userScripts') && options.origins?.length) {
+            throw new Error('Cannot request permission userScripts with another permission');
+          }
+          if (!fixturePermissions) return false;
+          if (firefoxPermissions) {
+            if (options.permissions?.includes('userScripts')) snapshot.permissions.scripting = true;
+            if (options.origins) snapshot.permissions.websites = true;
+          }
+          return true;
+        } },
         sidePanel: { async open(options) { fixturePanelOpens.push(options); } },
         runtime: {
           connect() { return port; }, async openOptionsPage() {},
@@ -72,11 +84,12 @@ async function fixture(engine, colorScheme, work) {
           },
         },
       };
+      if (firefoxPermissions) chrome.runtime.getBrowserInfo = async () => ({ name: 'Firefox', version: '153.0' });
       globalThis.updateFixture = patch => {
         Object.assign(snapshot, patch);
         render?.({ type: 'state', value: structuredClone(snapshot) });
       };
-    });
+    }, firefoxPermissions);
     await page.goto(`http://127.0.0.1:${server.address().port}/panel.html`);
     await work(page, `http://127.0.0.1:${server.address().port}`);
   } finally {
@@ -87,6 +100,55 @@ async function fixture(engine, colorScheme, work) {
 }
 
 for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
+  test(`${name}: Firefox permission upgrade requests userScripts alone and fresh setup uses separate gestures`, async () => {
+    await fixture(engine, 'light', async page => {
+      await page.getByRole('combobox', { name: 'Task tabs' }).click();
+      await page.getByRole('option').nth(1).click();
+      await page.getByRole('button', { name: 'Continue', exact: true }).click();
+      expect(await page.evaluate(() => fixturePermissionRequests)).toEqual([{ permissions: ['userScripts'] }]);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.start')))
+        .toEqual([{ type: 'ui.start', windowId: 1, groupId: 456 }]);
+      await page.evaluate(() => {
+        fixtureRequests.length = 0; fixturePermissionRequests.length = 0;
+        updateFixture({ permissions: { websites: false, scripting: false } });
+      });
+      await page.getByRole('button', { name: 'Continue', exact: true }).click();
+      await expect(page.locator('#error')).toContainText('permissions separately');
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.start'))).toEqual([]);
+      await page.getByRole('button', { name: 'Continue', exact: true }).click();
+      expect(await page.evaluate(() => fixturePermissionRequests)).toEqual([
+        { permissions: ['userScripts'] }, { origins: ['http://*/*', 'https://*/*'] },
+      ]);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.start')))
+        .toEqual([{ type: 'ui.start', windowId: 1, groupId: 456 }]);
+    }, { websites: true, scripting: false });
+  });
+
+  test(`${name}: Firefox pairing waits for both separate permission categories and denial never confirms trust`, async () => {
+    await fixture(engine, 'light', async (page, origin) => {
+      await page.goto(`${origin}/options.html`);
+      await page.evaluate(() => updateFixture({ identity: null, current_error: null, workspaces: [], available_groups: [],
+        pairing: { code: 'ABCD1234', state: 'proposed', expires_at: Date.now() + 300000, proposal: { client_label: 'Atlas' } } }));
+      const confirm = page.getByRole('button', { name: 'Connect and start workspace' });
+      await expect(confirm).toBeVisible();
+      await page.evaluate(() => { fixturePermissions = false; });
+      await confirm.click();
+      await expect(page.locator('#error')).toContainText('permission was declined');
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.confirmPairing'))).toEqual([]);
+      await page.evaluate(() => { fixturePermissions = true; fixturePermissionRequests.length = 0; });
+      await confirm.click();
+      await expect(page.locator('#error')).toContainText('permissions separately');
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.confirmPairing'))).toEqual([]);
+      await confirm.click();
+      await expect(page.getByRole('heading', { name: 'Assistant connected' })).toBeVisible();
+      expect(await page.evaluate(() => fixturePermissionRequests)).toEqual([
+        { permissions: ['userScripts'] }, { origins: ['http://*/*', 'https://*/*'] },
+      ]);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.confirmPairing')))
+        .toEqual([{ type: 'ui.confirmPairing' }]);
+    }, { websites: false, scripting: false });
+  });
+
   test(`${name}: toolbar popup pauses all running groups without depending on dashboard visibility`, async () => {
     await fixture(engine, 'light', async (page, origin) => {
       await page.goto(`${origin}/popup.html`);

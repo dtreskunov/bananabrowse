@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.7**, extensions **5.0.5**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.7).
+Service **5.0.0-beta.8**, extensions **5.0.6**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.8).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -146,7 +146,10 @@ state tests. These commands require only this checkout and its three independent
 
 Firefox requires **153+** and uses Manifest V3. Updating in the same profile
 preserves the extension ID, IndexedDB device keys and pairing; the first Run/
-Continue can request the optional `userScripts` permission. Chrome remains145+;
+Continue can request the optional `userScripts` permission. Firefox requires it
+alone: existing installs normally grant it with one click; when both scripting
+and website access are missing, a second fresh click grants website access.
+No task starts after only the first grant. Chrome remains145+;
 `USER_SCRIPT` additionally needs **Allow user scripts** enabled in the extension's
 browser settings. These are setup permissions, not per-action approvals.
 

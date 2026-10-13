@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "5.0.5",
+  "version": "5.0.6",
   "description": "Work with your assistant in locally activated tab groups and keep track in the native sidebar.",
   "browser_specific_settings": { "gecko": { "id": "domagent-secure@domagent", "strict_min_version": "153.0" } },
   "permissions": ["tabs", "storage", "scripting", "webNavigation", "notifications", "webRequest", "webRequestBlocking", "tabGroups", "contextMenus", "clipboardWrite"],

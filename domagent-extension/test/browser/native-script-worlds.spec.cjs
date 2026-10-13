@@ -64,6 +64,22 @@ test('Firefox153 native user-script API: direct MAIN and isolated source executi
     await rdp.request(watcher.actor, 'watchTargets', { targetType: 'frame' });
     const { target } = await rdp.event(packet => packet.type === 'target-available-form' && packet.target.url === url);
     const evaluate = expression => rdp.evaluate(target.consoleActor, expression);
+    // Invoke the actual parent API with already-granted permissions; this tests
+    // category validation, not a physical dialog or a fabricated user gesture.
+    const permissionResults = await rdp.evaluate(parent.consoleActor, `(async () => {
+      const {ExtensionParent}=ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
+      const extension=ExtensionParent.GlobalManager.getExtension("domagent-native-worlds@example.test");
+      const api=await extension.apiManager.asyncGetAPI("permissions",extension,"addon_parent");
+      const context={extension,cloneScope:globalThis,callOnClose(){}};
+      const permission=api.getAPI(context).permissions;
+      let combined;
+      try {await permission.request({permissions:["userScripts"],origins:["http://*/*"],data_collection:[]});}
+      catch(error) {combined=error.message;}
+      const single=await permission.request({permissions:["userScripts"],origins:[],data_collection:[]});
+      return {combined,single};
+    })()`);
+    expect(permissionResults.combined).toContain('Cannot request permission userScripts with another permission');
+    expect(permissionResults.single).toBe(true);
     const tab = await evaluate(`browser.tabs.create({url:${JSON.stringify(`http://127.0.0.1:${server.address().port}/`)},active:false})`);
     await expect.poll(() => evaluate(`browser.tabs.get(${tab.id}).then(tab=>tab.status)`)).toBe('complete');
     const execute = (world, code) => evaluate(`browser.userScripts.execute(${JSON.stringify({

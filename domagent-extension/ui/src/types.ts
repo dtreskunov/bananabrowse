@@ -50,6 +50,7 @@ export interface Snapshot {
   connection_info?: { service_epoch: string; connection_id: string; service_started_at: number | null } | null;
   active_workspace_count?: number;
   starting_workspace_count?: number;
+  permissions?: { websites: boolean; scripting: boolean };
   pending_human_count?: number;
 }
 
@@ -102,6 +103,8 @@ function isSnapshot(value: unknown): value is Snapshot {
   if (value.history_unavailable !== undefined && typeof value.history_unavailable !== 'boolean') return false;
   if (value.active_workspace_count !== undefined && !number(value.active_workspace_count)) return false;
   if (value.starting_workspace_count !== undefined && !number(value.starting_workspace_count)) return false;
+  if (value.permissions !== undefined && !(object(value.permissions) &&
+      typeof value.permissions.websites === 'boolean' && typeof value.permissions.scripting === 'boolean')) return false;
   if (value.pending_human_count !== undefined && !number(value.pending_human_count)) return false;
   if (value.connection_info != null && !(object(value.connection_info) &&
       string(value.connection_info.service_epoch) && string(value.connection_info.connection_id) &&

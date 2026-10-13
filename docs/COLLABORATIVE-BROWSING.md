@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.7 / extension5.0.5 is the current matched release.
+Service5.0.0-beta.8 / extension5.0.6 is the current matched release.
 Runtime consent policy is `task-group-run-v1`; v5 identity/signature bytes and
 schema3 are unchanged. Earlier5.0.4 extensions retain stricter sidebar gating.
 

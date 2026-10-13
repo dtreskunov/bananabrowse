@@ -108,13 +108,18 @@ async function uiAction(message) {
 
 async function uiSnapshot(windowId) {
   const snapshot = controller.snapshot();
+  const [websites, scripting] = await Promise.all([
+    api.permissions.contains({ origins: ['http://*/*', 'https://*/*'] }),
+    BUILD_BROWSER === 'firefox' ? api.permissions.contains({ permissions: ['userScripts'] }) : Promise.resolve(true),
+  ]);
+  const permissions = { websites, scripting };
   const counts = { active_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active').length,
     starting_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active' && !workspace.acknowledged).length,
     pending_human_count: snapshot.pending_human.length };
-  if (windowId === undefined) return { ...snapshot, ...counts, available_groups: [] };
+  if (windowId === undefined) return { ...snapshot, ...counts, permissions, available_groups: [] };
   // Native previews stay on the trusted local UI boundary, never in signed MCP state.
   const [groups, tabs] = await Promise.all([api.tabGroups.query({ windowId }), api.tabs.query({ windowId })]);
-  return { ...snapshot, ...counts,
+  return { ...snapshot, ...counts, permissions,
     available_groups: groups.slice(0, 20).map(group => {
       const members = tabs.filter(tab => tab.groupId === group.id);
       return { groupId: group.id, title: group.title || 'Untitled group', tab_count: members.length,

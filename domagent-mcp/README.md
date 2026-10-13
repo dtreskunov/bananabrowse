@@ -1,4 +1,4 @@
-# DomAgent service 5.0.0-beta.7
+# DomAgent service 5.0.0-beta.8
 
 Node 22.13+ authenticated tenant-scoped Streamable HTTP MCP and signed browser
 wire **v5**. Existing `/mcp/<tenant>` credentials/identities and

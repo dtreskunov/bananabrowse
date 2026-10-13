@@ -1,550 +1,530 @@
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
-  VERSION, POLICY_ID, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
-  authPayload, grantPayload, verify, navigationUrl, validOperationArgs, validTargetId, waitErrorDetails,
-  validDescription, inspectionErrorDetails, validBrowserInfo,
+  VERSION, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
+  WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
+  authPayload, workspacePayload, verify, navigationUrl, validOperationArgs, validTargetId,
+  validDescription, inspectionErrorDetails, waitErrorDetails, validBrowserInfo,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
 
-const ID = /^[a-zA-Z0-9_-]{8,128}$/;
-const END_REASONS = new Set(['OWNER_PAUSED', 'HANDOFF', 'REVOKED', 'TARGET_CLOSED', 'CAPABILITY_UNAVAILABLE']);
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STATES = new Set(['active','paused','inactive']);
+const PAGE_STATES = new Set(['ready','loading','navigation_only','unavailable']);
+const RESULT_ERRORS = new Set(['HANDOFF_REQUIRED','CAPABILITY_UNAVAILABLE','TARGET_STALE','NOT_AUTHORIZED',
+  'INVALID_ARGUMENTS','OPERATION_FAILED','OUTCOME_UNKNOWN','COMMAND_EXPIRED','COMMAND_CANCELLED','ACTION_DECLINED',
+  'INVALID_MESSAGE','ELEMENT_NOT_FOUND','INVALID_SELECTOR','PAGE_UNAVAILABLE','ELEMENT_AMBIGUOUS','ELEMENT_STALE',
+  'ELEMENT_DISABLED','ELEMENT_READONLY','ELEMENT_NOT_VISIBLE','ELEMENT_OBSCURED','ELEMENT_NOT_EDITABLE',
+  'OPTION_NOT_FOUND','WAIT_TIMEOUT','RESULT_TOO_LARGE','SCRIPT_POLICY_BLOCKED','SCRIPT_SYNTAX_ERROR',
+  'SCRIPT_RUNTIME_ERROR','SCRIPT_SERIALIZATION_ERROR','SCRIPT_EXECUTION_UNAVAILABLE','WORKSPACE_CHANGED',
+  'WORKSPACE_PAUSED','WORKSPACE_INACTIVE','TAB_NOT_IN_WORKSPACE','DOCUMENT_NOT_CONTROLLABLE',
+  'TAB_LIMIT_REACHED','NOTIFICATION_UNAVAILABLE']);
+const validInt = value => Number.isSafeInteger(value) && value >= 0;
 
 export class BridgeServer {
   constructor(store, config) {
-    this.store = store;
-    this.config = config;
+    this.store = store; this.config = config; this.now = config.now || Date.now;
     this.epoch = randomUUID();
-    this.connections = new Map();
-    this.requests = new Map();
-    this.requestCredentials = new Map();
-    this.shareWaiters = new Map();
-    this.denials = new Map();
-    this.grants = new Map();
-    this.calls = new Map();
-    this.sockets = new Set();
+    this.connections = new Map(); this.workspaces = new Map(); this.targets = new Map();
+    this.calls = new Map(); this.waiters = new Set(); this.tombstones = new Map(); this.sockets = new Set();
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
     this.wss.on('connection', (ws, req) => this.connected(ws, req));
-    this.timer = setInterval(() => this.sweep(), HEARTBEAT_MS);
+    this.timer = setInterval(() => this.sweep(), 250);
     this.timer.unref();
   }
   upgrade(req, socket, head) {
     const tenant = /^\/extension\/(t_[A-Za-z0-9_-]{22})$/.exec(req.url || '')?.[1];
     if (!tenant || !this.store.tenant(tenant) || this.sockets.size >= 128 ||
-        !/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(req.headers.origin || '')) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-      audit('ws_rejected', { code: 'NOT_AUTHORIZED' });
-      return;
+      !/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(req.headers.origin || '')) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     this.wss.handleUpgrade(req, socket, head, ws => this.wss.emit('connection', ws, req));
   }
   connected(ws, req) {
     this.sockets.add(ws);
-    const session = {
-      ws, origin: req.headers.origin, tenant_id: req.url.split('/')[2], connection_id: randomUUID(),
-      lastSeen: Date.now(), connectedAt: Date.now(), authenticated: false, device: null, challenge: null,
-      processing: Promise.resolve(), queued: 0,
-    };
-    const timeout = setTimeout(() => {
-      if (!session.authenticated) ws.close(1008, 'AUTH_TIMEOUT');
-    }, 5000);
+    const session = { ws, origin: req.headers.origin, tenant_id: req.url.split('/')[2],
+      connection_id: randomUUID(), lastSeen: this.now(), lastPing: this.now(), authenticated: false,
+      device: null, challenge: null, processing: Promise.resolve(), queued: 0, workspaces: new Set(), usedTargets: new Set() };
+    const timeout = setTimeout(() => { if (!session.authenticated) ws.close(1008, 'AUTH_TIMEOUT'); }, 5000);
     ws.on('message', raw => {
-      if ((!session.authenticated && raw.length > 8192) || ++session.queued > 32) {
-        ws.close(1008, 'MESSAGE_LIMIT');
-        return;
-      }
+      if ((!session.authenticated && raw.length > 8192) || ++session.queued > 32) { ws.close(1008, 'MESSAGE_LIMIT'); return; }
       session.processing = session.processing.then(async () => {
         let message;
-        try { message = JSON.parse(raw.toString()); }
-        catch { throw new Fault('INVALID_MESSAGE'); }
+        try { message = JSON.parse(raw.toString()); } catch { throw new Fault('INVALID_MESSAGE'); }
         requireValue(message && typeof message === 'object' && !Array.isArray(message), 'INVALID_MESSAGE');
         await this.message(session, message);
       }).catch(error => {
-        audit('ws_failure', { device_id: session.device?.id, code: failureCode(error) });
-        this.send(session, { type: 'error', code: failureCode(error) });
-        this.disconnected(session, failureCode(error));
-        ws.close(1008, 'PROTOCOL_FAILURE');
+        const code = failureCode(error);
+        audit('ws_failure', { device_id: session.device?.id, code });
+        this.send(session, { type: 'error', code });
+        if (['WORKSPACE_INACTIVE','WORKSPACE_PAUSED','TARGET_STALE'].includes(code)) return;
+        this.disconnected(session, code); ws.close(1008, code);
       }).finally(() => { session.queued--; });
     });
-    ws.on('close', closeCode => {
-      clearTimeout(timeout);
-      this.sockets.delete(ws);
-      this.disconnected(session, 'SOCKET_CLOSED', closeCode);
-      audit('socket_closed', { device_id: session.device?.id, tenant_id: session.tenant_id,
-        close_code: closeCode, duration_ms: Date.now() - session.connectedAt });
-    });
-    ws.on('error', () => {
-      audit('ws_failure', { device_id: session.device?.id, code: 'CONNECTION_ERROR' });
-      this.disconnected(session, 'CONNECTION_ERROR');
-      ws.terminate();
-    });
+    ws.on('close', () => { clearTimeout(timeout); this.sockets.delete(ws); this.disconnected(session); });
+    ws.on('error', () => { audit('ws_failure', { code: 'CONNECTION_ERROR' }); this.disconnected(session); ws.terminate(); });
   }
   send(session, message) {
     if (session.ws.readyState !== 1) return false;
-    session.ws.send(JSON.stringify({ ...message, tenant_id: session.tenant_id }));
-    return true;
+    session.ws.send(JSON.stringify({ ...message, tenant_id: session.tenant_id })); return true;
   }
   current(session) {
     return session.authenticated && this.connections.get(session.device.id) === session &&
-      Boolean(this.store.device(session.device.id, session.tenant_id));
-  }
-  refreshLiveness(session) {
-    session.lastSeen = Date.now();
-    clearTimeout(session.liveness);
-    session.liveness = setTimeout(() => {
-      this.disconnected(session, 'HEARTBEAT_TIMEOUT');
-      session.ws.terminate();
-    }, LIVENESS_MS);
-    session.liveness.unref();
+      this.store.linked(session.client_id, session.device.id, session.tenant_id) &&
+      this.store.client(session.client_id)?.credential_hash === session.credential_hash;
   }
   async message(session, m) {
     requireValue(m.tenant_id === session.tenant_id, 'NOT_AUTHORIZED', 403);
     if (!session.authenticated) {
       if (m.type === 'hello' && !session.challenge) {
-        requireValue(m.version === VERSION, 'VERSION_UNSUPPORTED');
+        requireValue(m.version === VERSION, 'UPGRADE_REQUIRED');
         requireValue(m.browser_info === undefined || validBrowserInfo(m.browser_info), 'INVALID_MESSAGE');
-        session.browser_info = m.browser_info ? {
-          extension_version: m.browser_info.extension_version, browser_name: m.browser_info.browser_name,
-          browser_version: m.browser_info.browser_version,
-        } : null;
+        session.browser_info = m.browser_info || null;
         const device = this.store.deviceByKey(m.key_id, session.tenant_id);
-        requireValue(device && device.extension_origin === session.origin, 'NOT_AUTHORIZED', 403);
-        session.device = device;
-        session.challenge = {
-          origin: this.config.origin, tenant_id: session.tenant_id, epoch: this.epoch, connection_id: session.connection_id,
-          nonce: token(), key_id: device.key_id,
-        };
-        this.send(session, { type: 'challenge', ...session.challenge });
-        return;
+        const clients = device && this.store.clientsForDevice(device.id, session.tenant_id);
+        requireValue(device && device.extension_origin === session.origin && clients.length === 1, 'NOT_AUTHORIZED', 403);
+        session.device = device; session.client_id = clients[0].id;
+        session.credential_hash = this.store.client(session.client_id).credential_hash;
+        session.challenge = { origin: this.config.origin, tenant_id: session.tenant_id, epoch: this.epoch,
+          connection_id: session.connection_id, nonce: token(), key_id: device.key_id };
+        this.send(session, { type: 'challenge', ...session.challenge }); return;
       }
       requireValue(m.type === 'proof' && session.challenge, 'NOT_AUTHORIZED', 403);
-      const challenge = session.challenge;
-      session.challenge = null;
-      requireValue(await verify(JSON.parse(session.device.public_key), authPayload(challenge), m.signature),
-        'NOT_AUTHORIZED', 403);
-      requireValue(this.store.device(session.device.id, session.tenant_id) && session.ws.readyState === 1,
+      const challenge = session.challenge; session.challenge = null;
+      let verified = false;
+      try { verified = await verify(JSON.parse(session.device.public_key), authPayload(challenge), m.signature); }
+      catch { throw new Fault('NOT_AUTHORIZED', 403); }
+      requireValue(verified && this.store.linked(session.client_id, session.device.id, session.tenant_id) &&
+        this.store.client(session.client_id)?.credential_hash === session.credential_hash && session.ws.readyState === 1,
         'NOT_AUTHORIZED', 403);
       const old = this.connections.get(session.device.id);
-      if (old) {
-        this.disconnected(old, 'REPLACED');
-        old.ws.close(1000, 'REPLACED');
-      }
-      session.authenticated = true;
-      this.refreshLiveness(session);
-      this.connections.set(session.device.id, session);
-      this.send(session, {
-        type: 'authenticated', device_id: session.device.id, owner_id: session.device.owner_id,
-        owner_label: this.store.owner(session.device.owner_id).label,
-        tenant_label: this.store.tenant(session.tenant_id).label,
-        eligible_clients: this.store.clientsForDevice(session.device.id, session.tenant_id),
-        epoch: this.epoch, connection_id: session.connection_id,
-        protected_origins: this.config.protectedOrigins,
-      });
-      audit('device_connected', { device_id: session.device.id, tenant_id: session.tenant_id });
+      if (old) { this.disconnected(old, 'REPLACED'); old.ws.close(1000, 'REPLACED'); }
+      session.authenticated = true; session.lastSeen = this.now(); this.connections.set(session.device.id, session);
+      this.send(session, { type: 'authenticated', device_id: session.device.id, client_id: session.client_id,
+        client_label: this.store.client(session.client_id).label, epoch: this.epoch,
+        connection_id: session.connection_id, protected_origins: this.config.protectedOrigins });
       return;
     }
     requireValue(this.current(session), 'NOT_AUTHORIZED', 403);
-    this.refreshLiveness(session);
+    session.lastSeen = this.now();
     if (m.type === 'pong') return;
-    if (m.type === 'access.request') {
-      this.requestAccess(m.client_id, session.device.id, true, session.tenant_id,
-        'Share this selected browser tab with your assistant', HUMAN_WAIT_MS);
-      return;
-    }
-    if (m.type === 'approval.deny') {
-      const request = this.requests.get(m.request_id);
-      requireValue(request && request.device_id === session.device.id &&
-        request.connection_id === session.connection_id, 'NOT_AUTHORIZED', 403);
-      this.finishRequest(m.request_id, new Fault('ACTION_DECLINED'));
-      this.denials.set(`${request.client_id}:${request.device_id}`, Date.now());
-      audit('access_denied', { device_id: session.device.id, client_id: request.client_id });
-      return;
-    }
-    if (m.type === 'grant.approve') {
-      const r = this.requests.get(m.request_id);
-      const existing = this.grants.get(m.target_id);
-      requireValue(r && r.device_id === session.device.id && r.expires_at > Date.now() &&
-        this.store.client(r.client_id, session.tenant_id)?.credential_hash === this.requestCredentials.get(r.request_id) &&
-        r.connection_id === session.connection_id && r.client_id === m.client_id &&
-        m.policy_id === POLICY_ID && m.nonce === r.nonce &&
-        Number.isSafeInteger(m.tab_id) && m.tab_id >= 0 &&
-        Number.isSafeInteger(m.window_id) && m.window_id >= 0 &&
-        ID.test(m.target_id) &&
-        Array.isArray(m.capabilities) && m.capabilities.length > 0 &&
-        new Set(m.capabilities).size === m.capabilities.length &&
-        m.capabilities.every(op => OPERATIONS.includes(op)), 'INVALID_GRANT');
-      requireValue(!existing || (
-        existing.tenant_id === session.tenant_id && existing.client_id === r.client_id &&
-        existing.device_id === r.device_id && existing.connection_id === session.connection_id &&
-        existing.tab_id === m.tab_id && existing.window_id === m.window_id &&
-        existing.capabilities.length === m.capabilities.length &&
-        m.capabilities.every(op => existing.capabilities.includes(op))
-      ), 'INVALID_GRANT');
-      requireValue(await verify(JSON.parse(session.device.public_key), grantPayload({
-        ...r, origin: this.config.origin, target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities,
-      }), m.signature), 'NOT_AUTHORIZED', 403);
-      requireValue(this.current(session) && this.store.linked(r.client_id, r.device_id),
-        'NOT_AUTHORIZED', 403);
-      requireValue(this.requests.get(r.request_id) === r && r.expires_at > Date.now() &&
-        this.store.client(r.client_id, session.tenant_id)?.credential_hash === this.requestCredentials.get(r.request_id) &&
-        this.grants.get(m.target_id) === existing, 'INVALID_GRANT');
-      if (!existing) {
-        for (const [id, grant] of this.grants) {
-          if (grant.device_id === r.device_id && grant.tab_id === m.tab_id) this.endGrant(id, 'REPLACED');
-        }
-        this.grants.set(m.target_id, {
-          tenant_id: session.tenant_id, client_id: r.client_id, device_id: r.device_id, connection_id: r.connection_id,
-          target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities, queued: 0, tail: Promise.resolve(),
-        });
-      }
-      this.send(session, { type: 'grant.active', client_id: r.client_id, target_id: m.target_id, tab_id: m.tab_id, window_id: m.window_id });
-      this.finishRequest(r.request_id, null, {
-        state: 'active', request_id: r.request_id, target_id: m.target_id, tab_handle: m.target_id,
-        tab_id: m.tab_id, window_id: m.window_id, capabilities: m.capabilities,
-      });
-      audit('grant_activated', { device_id: r.device_id, client_id: r.client_id, target_id: m.target_id });
-      return;
-    }
+    if (m.type === 'workspace.sync') { await this.syncWorkspace(session, m); return; }
     if (m.type === 'command.ready') {
       const call = this.calls.get(m.request_id);
-      if (!call) { audit('approval_discarded', { device_id: session.device.id, code: 'COMMAND_EXPIRED' }); return; }
-      requireValue(call.target_id === m.target_id && call.device_id === session.device.id &&
-        call.connection_id === session.connection_id, 'NOT_AUTHORIZED', 403);
+      if (!call) return;
+      this.checkCallBinding(session, m, call);
       if (call.phase !== 'waiting') return;
-      if (Date.now() >= call.deadline) { call.cancel('COMMAND_EXPIRED'); return; }
-      requireValue(this.store.linked(call.client_id, call.device_id, session.tenant_id) &&
-        this.grants.has(call.target_id), 'NOT_AUTHORIZED', 403);
-      call.execute();
-      return;
-    }
-    if (m.type === 'grant.end') {
-      requireValue(typeof m.target_id === 'string' && ID.test(m.target_id), 'INVALID_GRANT');
-      requireValue(END_REASONS.has(m.reason), 'INVALID_REASON');
-      const grant = this.grants.get(m.target_id);
-      if (!grant) {
-        audit('grant_end_discarded', { device_id: session.device.id, code: 'TARGET_STALE' });
-        return;
-      }
-      requireValue(grant.device_id === session.device.id &&
-        grant.connection_id === session.connection_id, 'NOT_AUTHORIZED', 403);
-      this.endGrant(m.target_id, m.reason);
-      return;
+      if (this.now() >= call.deadline) { call.cancel('COMMAND_EXPIRED'); return; }
+      try { this.checkAuthority(call.workspace, call.target, call.operation, call.credential_hash); }
+      catch (error) { call.cancel(failureCode(error)); return; }
+      call.execute(); return;
     }
     if (m.type === 'result') {
-      requireValue(typeof m.request_id === 'string' && ID.test(m.request_id) &&
-        typeof m.target_id === 'string' && ID.test(m.target_id), 'INVALID_RESULT');
       const call = this.calls.get(m.request_id);
-      if (!call) {
-        audit('result_discarded', { device_id: session.device.id, code: 'TARGET_STALE' });
-        return;
-      }
-      requireValue(call.device_id === session.device.id &&
-        call.connection_id === session.connection_id && call.target_id === m.target_id,
-        'INVALID_RESULT');
-      const grant = this.grants.get(m.target_id);
-      if (!grant || !this.store.linked(grant.client_id, grant.device_id)) {
-        call.reject(new Fault('OUTCOME_UNKNOWN'));
-        this.endGrant(m.target_id, 'REVOKED');
-        audit('result_discarded', { device_id: session.device.id, code: 'REVOKED' });
-        return;
-      }
+      if (!call) { audit('result_discarded', { code: 'TARGET_STALE' }); return; }
+      this.checkCallBinding(session, m, call);
+      try { this.checkAuthority(call.workspace, call.target, m.error ? 'request_handoff' : call.operation, call.credential_hash); }
+      catch (error) { call.cancel(failureCode(error)); return; }
       if (m.error) {
-        const code = ['HANDOFF_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'TARGET_STALE',
-          'NOT_AUTHORIZED', 'INVALID_ARGUMENTS', 'OPERATION_FAILED', 'OUTCOME_UNKNOWN',
-          'COMMAND_EXPIRED', 'COMMAND_CANCELLED', 'ACTION_DECLINED', 'INVALID_MESSAGE',
-          'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE', 'ELEMENT_AMBIGUOUS',
-          'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE',
-          'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT',
-          'RESULT_TOO_LARGE', 'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
-          'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE', 'WORKSPACE_CHANGED'].includes(m.error.code)
-          ? m.error.code : 'OPERATION_FAILED';
+        requireValue(m.error && typeof m.error === 'object', 'INVALID_RESULT');
+        const code = RESULT_ERRORS.has(m.error.code) ? m.error.code : 'OPERATION_FAILED';
         call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error)));
-        if (code === 'OUTCOME_UNKNOWN') this.endGrant(m.target_id, code);
-        else if (code === 'PAGE_UNAVAILABLE') this.endGrant(m.target_id, 'CAPABILITY_UNAVAILABLE');
-      } else {
-        requireValue(call.phase === 'executing', 'ACTION_NOT_APPROVED', 403);
-        requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= 4 * 1024 * 1024,
-          'INVALID_RESULT');
-        call.resolve(m.result);
+        return;
       }
+      requireValue(call.phase === 'executing', 'ACTION_NOT_READY', 403);
+      requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= 4 * 1024 * 1024, 'INVALID_RESULT');
+      if (call.operation === 'create_workspace_tab') {
+        const id = m.result?.target_id, created = this.targets.get(id);
+        requireValue(UUID.test(id || '') && created && created.workspace === call.workspace &&
+          created.activation_id === call.activation_id && !call.initialTargets.has(id), 'INVALID_RESULT');
+        // Receipts cannot invent a grant or change metadata published by a signed snapshot.
+        call.resolve({ target_id: id, tab_handle: id, workspace_id: call.workspace.workspace_id,
+          title: created.title, url: created.url, page_state: created.page_state, capabilities: created.capabilities });
+      } else call.resolve(m.result);
       return;
     }
     throw new Fault('INVALID_MESSAGE');
   }
-  disconnected(session, code = 'SOCKET_CLOSED', closeCode) {
-    clearTimeout(session.liveness);
+  checkCallBinding(session, m, call) {
+    requireValue(call.device_id === session.device.id && call.connection_id === session.connection_id &&
+      call.target_id === m.target_id && (m.workspace_id === undefined || m.workspace_id === call.workspace.workspace_id) &&
+      (m.activation_id === undefined || m.activation_id === call.activation_id), 'NOT_AUTHORIZED', 403);
+  }
+  async syncWorkspace(session, m) {
+    requireValue(UUID.test(m.workspace_id || '') && UUID.test(m.activation_id || '') &&
+      m.client_id === session.client_id && validInt(m.group_id) && validInt(m.window_id) &&
+      STATES.has(m.state) && Number.isSafeInteger(m.revision) && m.revision > 0 &&
+      Number.isSafeInteger(m.lease_ms) && m.lease_ms > 0 && m.lease_ms <= WORKSPACE_LEASE_MS &&
+      Array.isArray(m.tabs) && m.tabs.length <= WORKSPACE_TAB_LIMIT, 'INVALID_WORKSPACE');
+    const seenTargets = new Set(), seenTabs = new Set();
+    for (const tab of m.tabs) {
+      requireValue(tab && UUID.test(tab.target_id || '') && validInt(tab.tab_id) &&
+        typeof tab.title === 'string' && [...tab.title].length <= 160 &&
+        typeof tab.url === 'string' && tab.url.length <= 2048 && PAGE_STATES.has(tab.page_state) &&
+        Array.isArray(tab.capabilities) && tab.capabilities.every(op => OPERATIONS.includes(op)) &&
+        new Set(tab.capabilities).size === tab.capabilities.length &&
+        !seenTargets.has(tab.target_id) && !seenTabs.has(tab.tab_id), 'INVALID_WORKSPACE');
+      seenTargets.add(tab.target_id); seenTabs.add(tab.tab_id);
+      let ordinary = false;
+      try { navigationUrl(tab.url, this.config.protectedOrigins); ordinary = true; }
+      catch {
+        // Privileged documents can be organization-only navigation starting points, never DOM authority.
+        let url;
+        try { url = new URL(tab.url); } catch { throw new Fault('INVALID_WORKSPACE'); }
+        requireValue(!this.config.protectedOrigins.includes(url.origin), 'NOT_AUTHORIZED', 403);
+      }
+      requireValue((ordinary || ['navigation_only','unavailable'].includes(tab.page_state)) &&
+        (!['navigation_only','unavailable'].includes(tab.page_state) || tab.capabilities.every(op => op === 'navigate')),
+        'INVALID_WORKSPACE');
+    }
+    let verified = false;
+    try { verified = await verify(JSON.parse(session.device.public_key), workspacePayload({
+      ...m, origin: this.config.origin, tenant_id: session.tenant_id, epoch: this.epoch, connection_id: session.connection_id,
+    }), m.signature); } catch { throw new Fault('NOT_AUTHORIZED', 403); }
+    requireValue(verified && this.current(session), 'NOT_AUTHORIZED', 403);
+    let workspace = this.workspaces.get(m.workspace_id);
+    if (workspace) {
+      requireValue(workspace.device_id === session.device.id && workspace.connection_id === session.connection_id &&
+        workspace.client_id === session.client_id, 'NOT_AUTHORIZED', 403);
+      requireValue(m.revision > workspace.revision, 'TARGET_STALE');
+      this.expire(workspace);
+      requireValue(!workspace.retiredActivations.has(m.activation_id), 'WORKSPACE_INACTIVE');
+      if (workspace.activation_id === m.activation_id) {
+        requireValue(!(m.state === 'active' && workspace.state !== 'active'), 'WORKSPACE_INACTIVE');
+        requireValue(workspace.group_id === m.group_id && workspace.window_id === m.window_id, 'INVALID_WORKSPACE');
+      } else requireValue(workspace.retiredActivations.size < 128, 'WORKSPACE_LIMIT');
+    } else {
+      requireValue(session.workspaces.size < 8 && this.workspaces.size < 1024, 'WORKSPACE_LIMIT');
+    }
+    for (const id of session.workspaces) {
+      const other = this.workspaces.get(id);
+      requireValue(!other || other === workspace || other.window_id !== m.window_id || other.state === 'inactive',
+        'INVALID_WORKSPACE');
+      for (const tab of m.tabs) {
+        requireValue(!other || other === workspace || ![...other.tabs.values()].some(t => t.tab_id === tab.tab_id),
+          'INVALID_WORKSPACE');
+      }
+    }
+    for (const tab of m.tabs) {
+      const old = this.targets.get(tab.target_id);
+      requireValue((old || !session.usedTargets.has(tab.target_id)) && !this.tombstones.has(tab.target_id) &&
+        (!old || old.workspace === workspace && old.activation_id === m.activation_id && old.tab_id === tab.tab_id),
+        'TARGET_STALE');
+      if (workspace?.activation_id === m.activation_id) {
+        const oldTab = [...workspace.tabs.values()].find(t => t.tab_id === tab.tab_id);
+        requireValue(!oldTab || oldTab.target_id === tab.target_id, 'TARGET_STALE');
+      }
+    }
+    requireValue(session.usedTargets.size + m.tabs.filter(t => !session.usedTargets.has(t.target_id)).length <= 4096,
+      'WORKSPACE_LIMIT');
+    if (!workspace) {
+      workspace = { workspace_id: m.workspace_id, client_id: session.client_id, device_id: session.device.id,
+        tenant_id: session.tenant_id, connection_id: session.connection_id, tabs: new Map(),
+        retiredActivations: new Set(), running: 0, creating: 0, slots: new Set(), leaseTimer: null };
+      this.workspaces.set(m.workspace_id, workspace); session.workspaces.add(m.workspace_id);
+    }
+    if (workspace.activation_id && workspace.activation_id !== m.activation_id) {
+      this.invalidate(workspace, 'WORKSPACE_INACTIVE');
+      workspace.retiredActivations.add(workspace.activation_id);
+    }
+    Object.assign(workspace, { activation_id: m.activation_id, group_id: m.group_id, window_id: m.window_id,
+      revision: m.revision, state: m.state, credential_hash: session.credential_hash, expires_at: this.now() + m.lease_ms });
+    if (m.state !== 'active') this.invalidate(workspace, m.state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
+    else {
+      for (const id of [...workspace.tabs.keys()]) if (!seenTargets.has(id)) this.removeTarget(workspace, id, 'TAB_NOT_IN_WORKSPACE');
+      for (const tab of m.tabs) {
+        let target = workspace.tabs.get(tab.target_id);
+        if (!target) {
+          target = { ...tab, workspace, activation_id: m.activation_id, tail: Promise.resolve(), queued: 0,
+            execution_state: 'idle', queuedControllers: new Set() };
+          workspace.tabs.set(tab.target_id, target); this.targets.set(tab.target_id, target);
+          session.usedTargets.add(tab.target_id);
+        } else Object.assign(target, tab);
+        for (const call of [...this.calls.values()]) {
+          if (call.target === target && !['request_handoff','navigate'].includes(call.operation) &&
+            !target.capabilities.includes(call.operation)) call.cancel('DOCUMENT_NOT_CONTROLLABLE');
+        }
+      }
+    }
+    clearTimeout(workspace.leaseTimer);
+    if (m.state === 'active') {
+      workspace.leaseTimer = setTimeout(() => this.expire(workspace), m.lease_ms);
+      workspace.leaseTimer.unref();
+    }
+    this.send(session, { type: 'workspace.active', workspace_id: m.workspace_id,
+      activation_id: m.activation_id, revision: m.revision });
+    for (const waiter of [...this.waiters]) waiter.check();
+  }
+  expire(workspace) {
+    if (workspace.state === 'active' && this.now() >= workspace.expires_at) {
+      workspace.state = 'inactive'; this.invalidate(workspace, 'WORKSPACE_INACTIVE');
+    }
+  }
+  tombstone(target, reason) {
+    this.tombstones.set(target.target_id, { client_id: target.workspace.client_id, tenant_id: target.workspace.tenant_id,
+      reason, expires: this.now() + 600_000 });
+    while (this.tombstones.size > 4096) this.tombstones.delete(this.tombstones.keys().next().value);
+  }
+  removeTarget(workspace, id, reason) {
+    const target = workspace.tabs.get(id); if (!target) return;
+    this.tombstone(target, reason); this.targets.delete(id); workspace.tabs.delete(id);
+    for (const call of [...this.calls.values()]) if (call.target === target) call.cancel(reason);
+    for (const controller of target.queuedControllers) controller.abort(new Fault(reason));
+  }
+  invalidate(workspace, reason) {
+    clearTimeout(workspace.leaseTimer);
+    for (const id of [...workspace.tabs.keys()]) this.removeTarget(workspace, id, reason);
+    for (const call of [...this.calls.values()]) if (call.workspace === workspace) call.cancel(reason);
+    for (const slot of [...workspace.slots]) slot.cancel(new Fault(reason));
+  }
+  disconnected(session, code = 'BROWSER_OFFLINE') {
     if (!session.device) return;
-    if (session.authenticated) {
-      audit('device_disconnected', { device_id: session.device.id, tenant_id: session.tenant_id,
-        code, close_code: closeCode, duration_ms: Date.now() - session.connectedAt });
-    }
     if (this.connections.get(session.device.id) === session) this.connections.delete(session.device.id);
-    for (const [id, grant] of this.grants) {
-      if (grant.connection_id === session.connection_id) this.endGrant(id, 'BROWSER_OFFLINE');
+    for (const id of session.workspaces) {
+      const workspace = this.workspaces.get(id);
+      if (!workspace || workspace.connection_id !== session.connection_id) continue;
+      workspace.state = 'inactive'; this.invalidate(workspace, code); this.workspaces.delete(id);
     }
-    for (const [id, request] of this.requests) {
-      if (request.connection_id === session.connection_id) this.finishRequest(id, new Fault('BROWSER_OFFLINE'));
-    }
-    session.authenticated = false;
+    session.workspaces.clear(); session.authenticated = false;
+    for (const waiter of [...this.waiters]) waiter.check();
   }
-  endGrant(targetId, reason) {
-    const grant = this.grants.get(targetId);
-    if (!grant) return;
-    this.grants.delete(targetId);
-    const connection = this.connections.get(grant.device_id);
-    if (connection?.connection_id === grant.connection_id) {
-      this.send(connection, { type: 'grant.end', target_id: targetId, reason });
+  checkAuthority(workspace, target, operation, credentialHash = workspace.credential_hash) {
+    this.expire(workspace);
+    requireValue(this.workspaces.get(workspace.workspace_id) === workspace &&
+      this.store.linked(workspace.client_id, workspace.device_id, workspace.tenant_id) &&
+      this.store.client(workspace.client_id)?.credential_hash === credentialHash, 'NOT_AUTHORIZED', 403);
+    requireValue(workspace.state !== 'paused', 'WORKSPACE_PAUSED');
+    requireValue(workspace.state === 'active' && this.now() < workspace.expires_at, 'WORKSPACE_INACTIVE');
+    const session = this.connections.get(workspace.device_id);
+    requireValue(session && this.current(session) && session.connection_id === workspace.connection_id, 'BROWSER_OFFLINE');
+    if (target) {
+      requireValue(this.targets.get(target.target_id) === target && target.activation_id === workspace.activation_id, 'TAB_NOT_IN_WORKSPACE');
+      requireValue(operation === 'request_handoff' || target.capabilities.includes(operation),
+        ['navigation_only','unavailable'].includes(target.page_state) ? 'DOCUMENT_NOT_CONTROLLABLE' : 'CAPABILITY_UNAVAILABLE');
     }
-    for (const call of this.calls.values()) {
-      if (call.target_id === targetId) {
-        call.reject(new Fault(call.phase === 'executing' ? 'OUTCOME_UNKNOWN' : 'NOT_AUTHORIZED'));
-      }
-    }
-    audit('grant_ended', { client_id: grant.client_id, device_id: grant.device_id, target_id: targetId, code: reason });
+    return session;
   }
-  requestAccess(clientId, deviceId, ownerInitiated = false, tenant,
-    description = 'Please choose a tab to share with your assistant', waitMs = HUMAN_WAIT_MS) {
-    const client = this.store.client(clientId, tenant);
-    requireValue(client && this.store.linked(clientId, deviceId, client.tenant_id), 'NOT_AUTHORIZED', 403);
-    const session = this.connections.get(deviceId);
-    requireValue(session && this.current(session), 'BROWSER_OFFLINE', 409);
-    requireValue(validDescription(description) &&
-      Number.isInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
-    for (const request of this.requests.values()) {
-      if (request.client_id === clientId && request.device_id === deviceId && request.expires_at > Date.now()) {
-        return { state: 'pending', request_id: request.request_id };
-      }
-    }
-    requireValue(ownerInitiated ||
-      Date.now() - (this.denials.get(`${clientId}:${deviceId}`) || 0) >= 30_000,
-      'RATE_LIMITED', 429);
-    requireValue(this.requests.size < 1000, 'RATE_LIMITED', 429);
-    const request = {
-      type: 'approval.request', request_id: randomUUID(), client_id: clientId,
-      tenant_id: client.tenant_id,
-      client_label: this.store.client(clientId).label, device_id: deviceId,
-      epoch: this.epoch, connection_id: session.connection_id, nonce: token(),
-      policy_id: POLICY_ID, expires_at: Date.now() + waitMs,
-      wait_timeout_ms: waitMs,
-      description: description.trim(),
-      protected_origins: this.config.protectedOrigins,
-    };
-    this.requests.set(request.request_id, request);
-    this.requestCredentials.set(request.request_id, client.credential_hash);
-    if (!this.send(session, request)) {
-      this.finishRequest(request.request_id, new Fault('BROWSER_OFFLINE'));
-      throw new Fault('BROWSER_OFFLINE', 409);
-    }
-    audit('access_requested', { client_id: clientId, device_id: deviceId, request_id: request.request_id });
-    return { state: 'pending', request_id: request.request_id };
+  ownedWorkspace(clientId, workspaceId, tenant) {
+    const workspace = this.workspaces.get(workspaceId);
+    requireValue(workspace && workspace.client_id === clientId && workspace.tenant_id === tenant &&
+      this.store.linked(clientId, workspace.device_id, tenant), 'NOT_AUTHORIZED', 403);
+    this.expire(workspace); return workspace;
   }
-  finishRequest(id, error, value) {
-    const request = this.requests.get(id);
-    this.requests.delete(id);
-    this.requestCredentials.delete(id);
-    if (error && request) {
-      const session = this.connections.get(request.device_id);
-      if (session?.connection_id === request.connection_id) {
-        this.send(session, { type: 'approval.cancel', request_id: id, reason: error.code });
-      }
-    }
-    for (const waiter of this.shareWaiters.get(id) || []) waiter.finish(error, value);
-    this.shareWaiters.delete(id);
+  workspaceMetadata(workspace) {
+    this.expire(workspace);
+    return { workspace_id: workspace.workspace_id, activation_id: workspace.activation_id, state: workspace.state,
+      tab_count: workspace.state === 'active' ? workspace.tabs.size : 0,
+      window_id: workspace.window_id, group_id: workspace.group_id, revision: workspace.revision };
   }
-  waitAccess(clientId, deviceId, description, waitMs, signal, tenant) {
-    if (signal?.aborted) return Promise.reject(new Fault('COMMAND_CANCELLED'));
-    const pending = this.requestAccess(clientId, deviceId, false, tenant, description, waitMs);
+  listWorkspaces(clientId, tenant) {
+    requireValue(this.store.client(clientId, tenant), 'NOT_AUTHORIZED', 403);
+    return this.store.devicesForClient(clientId, tenant).map(device => {
+      const session = this.connections.get(device.id), connected = Boolean(session && this.current(session));
+      return { device_id: device.id, label: device.label, browser_info: connected ? session.browser_info : null,
+        connection_state: connected ? 'connected' : 'offline',
+        workspaces: [...this.workspaces.values()].filter(w => w.device_id === device.id && w.client_id === clientId)
+          .map(w => this.workspaceMetadata(w)) };
+    });
+  }
+  listTabs(clientId, workspaceId, tenant) {
+    const workspace = this.ownedWorkspace(clientId, workspaceId, tenant);
+    if (workspace.state !== 'active') return [];
+    return [...workspace.tabs.values()].map(t => ({ target_id: t.target_id, tab_handle: t.target_id,
+      title: t.title, url: t.url, capabilities: [...t.capabilities], page_state: t.page_state, execution_state: t.execution_state }));
+  }
+  waitWorkspace(clientId, deviceId, description, timeoutMs = 300_000, signal, tenant) {
+    requireValue(this.store.linked(clientId, deviceId, tenant), 'NOT_AUTHORIZED', 403);
+    requireValue(validDescription(description) && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1000 &&
+      timeoutMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
+    requireValue(this.waiters.size < 256, 'QUEUE_FULL', 429);
     return new Promise((resolve, reject) => {
-      const waiters = this.shareWaiters.get(pending.request_id) || new Set();
-      requireValue(waiters.size < 64, 'QUEUE_FULL', 429);
+      let finished = false;
       const finish = (error, value) => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', abort);
-        waiters.delete(waiter);
+        if (finished) return; finished = true; clearTimeout(timer);
+        signal?.removeEventListener('abort', abort); this.waiters.delete(waiter);
         error ? reject(error) : resolve(value);
       };
-      const cancel = code => {
-        finish(new Fault(code));
-        if (!waiters.size) this.finishRequest(pending.request_id, new Fault(code));
+      const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
+      const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), timeoutMs);
+      const credentialHash = this.store.client(clientId, tenant).credential_hash;
+      const waiter = { check: () => {
+        if (!this.store.linked(clientId, deviceId, tenant) || this.store.client(clientId)?.credential_hash !== credentialHash) {
+          finish(new Fault('NOT_AUTHORIZED', 403)); return;
+        }
+        const workspace = [...this.workspaces.values()].find(w => {
+          this.expire(w); return w.client_id === clientId && w.device_id === deviceId && w.state === 'active';
+        });
+        if (workspace) finish(null, { device_id: deviceId, ...this.workspaceMetadata(workspace) });
+      }, cancel: abort };
+      this.waiters.add(waiter); signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort(); else waiter.check();
+    });
+  }
+  async slot(workspace, deadline, signal) {
+    if (workspace.running < WORKSPACE_CONCURRENCY) { workspace.running++; return; }
+    requireValue(workspace.slots.size < 64, 'QUEUE_FULL', 429);
+    await new Promise((resolve, reject) => {
+      let done = false;
+      const finish = error => {
+        if (done) return; done = true; clearTimeout(timer); workspace.slots.delete(slot);
+        signal?.removeEventListener('abort', abort); error ? reject(error) : resolve();
       };
-      const abort = () => cancel('COMMAND_CANCELLED');
-      const timer = setTimeout(() => cancel('COMMAND_EXPIRED'), waitMs);
-      const waiter = { finish };
-      waiters.add(waiter);
-      this.shareWaiters.set(pending.request_id, waiters);
-      signal?.addEventListener('abort', abort, { once: true });
+      const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
+      const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), Math.max(1, deadline - this.now()));
+      const slot = { cancel: finish, release: () => { workspace.running++; finish(); } };
+      workspace.slots.add(slot); signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort();
     });
   }
-  targets(clientId, tenant) {
-    const client = this.store.client(clientId, tenant);
-    requireValue(client, 'NOT_AUTHORIZED', 403);
-    return this.store.devicesForClient(clientId, client.tenant_id).map(device => {
-      const grants = [...this.grants.values()].filter(g =>
-        g.client_id === clientId && g.device_id === device.id);
-      const grant = grants[0];
-      const pending = [...this.requests.values()].find(r =>
-        r.client_id === clientId && r.device_id === device.id && r.expires_at > Date.now());
-      const connection = this.connections.get(device.id);
-      const connected = Boolean(connection && this.current(connection));
-      let state = 'approval_required';
-      if (grant) state = 'active';
-      else if (!connected) state = 'offline';
-      else if (pending) state = 'pending';
-      return {
-        device_id: device.id, label: device.label,
-        tenant_id: device.tenant_id,
-        state,
-        connection_state: connected ? 'connected' : 'offline',
-        browser_info: connected ? connection.browser_info : null,
-        sharing_state: grant ? 'active' : 'none',
-        pending_request_id: pending?.request_id ?? null,
-        target_id: grant?.target_id ?? null, capabilities: grant?.capabilities ?? [],
-        shared_tabs: grants.map(g => ({ target_id: g.target_id, tab_handle: g.target_id,
-          tab_id: g.tab_id, window_id: g.window_id, capabilities: g.capabilities })),
-      };
-    });
+  releaseSlot(workspace) {
+    workspace.running--; const first = workspace.slots.values().next().value; first?.release();
   }
   async operate(clientId, targetId, operation, args, signal, tenant,
-    description = 'Perform the requested action in this shared browser tab', waitMs = HUMAN_WAIT_MS) {
-    requireValue(validTargetId(targetId), 'INVALID_ARGUMENTS');
-    requireValue((OPERATIONS.includes(operation) || operation === 'request_handoff') &&
-      args && typeof args === 'object' && !Array.isArray(args),
-      'INVALID_ARGUMENTS');
-    requireValue(validOperationArgs(operation, args), 'INVALID_ARGUMENTS');
-    const grant = this.grants.get(targetId);
-    requireValue(grant && grant.client_id === clientId && (!tenant || grant.tenant_id === tenant) &&
-      this.store.linked(clientId, grant.device_id, grant.tenant_id),
-      'NOT_AUTHORIZED', 403);
-    requireValue(operation === 'request_handoff' || grant.capabilities.includes(operation), 'CAPABILITY_UNAVAILABLE');
-    requireValue(validDescription(description) &&
-      Number.isInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
-    if (operation === 'navigate') {
-      try { navigationUrl(args.url, this.config.protectedOrigins); }
-      catch {
-        this.endGrant(targetId, 'HANDOFF_REQUIRED');
-        throw new Fault('HANDOFF_REQUIRED');
-      }
+    description, waitMs = 300_000) {
+    requireValue(validTargetId(targetId) && (OPERATIONS.includes(operation) || operation === 'request_handoff') &&
+      validOperationArgs(operation, args) && validDescription(description), 'INVALID_ARGUMENTS');
+    requireValue(Number.isSafeInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
+    const target = this.targets.get(targetId);
+    if (!target || target.workspace.client_id !== clientId || target.workspace.tenant_id !== tenant) {
+      const tombstone = this.tombstones.get(targetId);
+      requireValue(!tombstone || tombstone.client_id !== clientId || tombstone.tenant_id !== tenant ||
+        tombstone.expires <= this.now(), tombstone?.reason || 'TAB_NOT_IN_WORKSPACE');
+      throw new Fault('NOT_AUTHORIZED', 403);
     }
-    requireValue(grant.queued < 32, 'QUEUE_FULL', 429);
-    const deadline = Date.now() + waitMs;
-    grant.queued++;
-    const previous = grant.tail;
-    let release;
-    grant.tail = new Promise(resolve => { release = resolve; });
+    const workspace = target.workspace;
+    this.checkAuthority(workspace, target, operation);
+    if (operation === 'navigate') {
+      try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
+    }
+    requireValue(target.queued < 32, 'QUEUE_FULL', 429);
+    requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
+    const deadline = this.now() + (operation === 'request_handoff' ? waitMs : EXECUTION_MS);
+    const credentialHash = this.store.client(clientId).credential_hash;
+    const queued = new AbortController();
+    target.queuedControllers.add(queued);
+    signal = signal ? AbortSignal.any([signal, queued.signal]) : queued.signal;
+    const previous = target.tail; let release;
+    const mine = new Promise(resolve => { release = resolve; });
+    // A cancelled tail must not let its successor overtake an earlier running call.
+    target.tail = previous.then(() => mine); target.queued++;
+    let hasSlot = false;
     try {
-      await new Promise((resolve, reject) => {
-        const finish = error => {
-          clearTimeout(timer);
-          signal?.removeEventListener('abort', abort);
-          error ? reject(error) : resolve();
-        };
-        const abort = () => finish(new Fault('COMMAND_CANCELLED'));
-        const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), Math.max(1, deadline - Date.now()));
-        signal?.addEventListener('abort', abort, { once: true });
-        previous.then(() => finish(), error => finish(error));
-        if (signal?.aborted) abort();
-      });
-      requireValue(!signal?.aborted && Date.now() < deadline, 'COMMAND_EXPIRED');
-      requireValue(this.grants.get(targetId) === grant && this.store.linked(clientId, grant.device_id, grant.tenant_id),
-        'NOT_AUTHORIZED', 403);
-      const session = this.connections.get(grant.device_id);
-      requireValue(session?.connection_id === grant.connection_id && this.current(session), 'BROWSER_OFFLINE');
-      const requestId = randomUUID();
-      const started = Date.now();
-      let result;
-      try {
-        result = await new Promise((resolve, reject) => {
-          const finish = (error, value) => {
-            clearTimeout(timeout);
-            signal?.removeEventListener('abort', abort);
-            this.calls.delete(requestId);
-            error ? reject(error) : resolve(value);
-          };
-          const cancel = code => {
-            this.send(session, { type: 'command.cancel', request_id: requestId, target_id: targetId, reason: code });
-            const executing = this.calls.get(requestId)?.phase === 'executing';
-            finish(new Fault(executing ? 'OUTCOME_UNKNOWN' : code));
-            if (executing) this.endGrant(targetId, 'OUTCOME_UNKNOWN');
-          };
-          const abort = () => cancel('COMMAND_CANCELLED');
-          let timeout = setTimeout(() => cancel('COMMAND_EXPIRED'), Math.max(1, deadline - Date.now()));
-          signal?.addEventListener('abort', abort, { once: true });
-          this.calls.set(requestId, {
-            target_id: targetId, client_id: clientId, device_id: grant.device_id, connection_id: grant.connection_id,
-            phase: 'waiting', deadline, cancel,
-            resolve: value => finish(null, value), reject: error => finish(error),
-            execute: () => {
-              const call = this.calls.get(requestId);
-              call.phase = 'executing';
-              audit('action_execution_started', { client_id: clientId, target_id: targetId,
-                request_id: requestId, operation, duration_ms: Date.now() - started });
-              clearTimeout(timeout);
-              timeout = setTimeout(() => cancel('OUTCOME_UNKNOWN'), EXECUTION_MS);
-              if (!this.send(session, { type: 'command.execute', request_id: requestId,
-                target_id: targetId, expires_at: Date.now() + EXECUTION_MS,
-                execution_timeout_ms: EXECUTION_MS })) cancel('BROWSER_OFFLINE');
-            },
-          });
-          if (signal?.aborted) { abort(); return; }
-          if (!this.send(session, {
-            type: 'command', request_id: requestId, target_id: targetId,
-            client_id: clientId, operation, args, epoch: this.epoch, connection_id: grant.connection_id,
-            description: description.trim(), expires_at: deadline,
-            wait_timeout_ms: Math.max(1, deadline - Date.now()),
-          })) {
-            this.endGrant(targetId, 'BROWSER_OFFLINE');
-          }
-        });
-      } catch (error) {
-        audit('operation_finished', { client_id: clientId, target_id: targetId, operation,
-          request_id: requestId, duration_ms: Date.now() - started, code: failureCode(error), ...inspectionErrorDetails(error) });
-        throw error;
-      }
-      audit('operation_finished', { client_id: clientId, target_id: targetId, operation,
-        request_id: requestId, duration_ms: Date.now() - started, code: 'OK' });
-      return result;
+      await this.waitTail(previous, deadline, signal);
+      this.checkAuthority(workspace, target, operation, credentialHash);
+      if (operation !== 'request_handoff') { await this.slot(workspace, deadline, signal); hasSlot = true; }
+      this.checkAuthority(workspace, target, operation, credentialHash);
+      requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
+      return await this.dispatch(workspace, target, operation, args, description, deadline, signal, credentialHash);
     } finally {
-      grant.queued--;
-      release();
+      target.queued--; target.queuedControllers.delete(queued); release(); if (hasSlot) this.releaseSlot(workspace);
     }
   }
+  waitTail(previous, deadline, signal) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = error => {
+        if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+        error ? reject(error) : resolve();
+      };
+      const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
+      const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), Math.max(1, deadline - this.now()));
+      signal?.addEventListener('abort', abort, { once: true });
+      previous.then(() => finish(), finish); if (signal?.aborted) abort();
+    });
+  }
+  async createTab(clientId, workspaceId, args, description, signal, tenant) {
+    requireValue(UUID.test(workspaceId || '') && validDescription(description) && args && typeof args === 'object' &&
+      Object.keys(args).every(k => k === 'url') && (args.url === undefined || typeof args.url === 'string'), 'INVALID_ARGUMENTS');
+    if (args.url !== undefined) {
+      try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
+    }
+    const workspace = this.ownedWorkspace(clientId, workspaceId, tenant);
+    this.checkAuthority(workspace, null, 'create_workspace_tab');
+    requireValue(workspace.tabs.size + workspace.creating < WORKSPACE_TAB_LIMIT, 'TAB_LIMIT_REACHED');
+    const credentialHash = workspace.credential_hash, activation = workspace.activation_id;
+    const deadline = this.now() + EXECUTION_MS; workspace.creating++;
+    let hasSlot = false;
+    try {
+      await this.slot(workspace, deadline, signal); hasSlot = true;
+      this.checkAuthority(workspace, null, 'create_workspace_tab', credentialHash);
+      requireValue(workspace.activation_id === activation, 'WORKSPACE_INACTIVE');
+      requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
+      return await this.dispatch(workspace, null, 'create_workspace_tab', args, description, deadline, signal, credentialHash);
+    } finally { workspace.creating--; if (hasSlot) this.releaseSlot(workspace); }
+  }
+  dispatch(workspace, target, operation, args, description, deadline, signal, credentialHash) {
+    const session = this.checkAuthority(workspace, target, operation, credentialHash);
+    requireValue(this.calls.size < 1024 && this.now() < deadline, 'COMMAND_EXPIRED');
+    const requestId = randomUUID(), targetId = target?.target_id || workspace.workspace_id;
+    const activation = workspace.activation_id;
+    return new Promise((resolve, reject) => {
+      let finished = false, timer;
+      const finish = (error, value) => {
+        if (finished) return; finished = true; clearTimeout(timer);
+        signal?.removeEventListener('abort', abort); this.calls.delete(requestId);
+        if (target) target.execution_state = 'idle';
+        error ? reject(error) : resolve(value);
+      };
+      const call = {
+        workspace, target, target_id: targetId, activation_id: activation, operation, client_id: workspace.client_id,
+        device_id: workspace.device_id, connection_id: workspace.connection_id, credential_hash: credentialHash,
+        initialTargets: new Set(workspace.tabs.keys()), phase: 'waiting', deadline,
+        resolve: value => finish(null, value), reject: error => finish(error),
+        cancel: code => {
+          this.send(session, { type: 'command.cancel', request_id: requestId, target_id: targetId,
+            workspace_id: workspace.workspace_id, activation_id: activation, reason: code });
+          finish(new Fault(call.phase === 'executing' && operation !== 'request_handoff' ? 'OUTCOME_UNKNOWN' : code));
+        },
+        execute: () => {
+          if (call.phase !== 'waiting') return;
+          call.phase = 'executing'; clearTimeout(timer);
+          const human = operation === 'request_handoff';
+          if (target) target.execution_state = human ? 'waiting_for_human' : 'running';
+          const executionDeadline = human ? deadline : this.now() + EXECUTION_MS;
+          timer = setTimeout(() => call.cancel(human ? 'COMMAND_EXPIRED' : 'OUTCOME_UNKNOWN'),
+            Math.max(1, executionDeadline - this.now()));
+          if (!this.send(session, { type: 'command.execute', request_id: requestId, target_id: targetId,
+            workspace_id: workspace.workspace_id, activation_id: activation, epoch: this.epoch,
+            connection_id: workspace.connection_id, client_id: workspace.client_id,
+            expires_at: executionDeadline, execution_timeout_ms: human ? Math.max(1, deadline - this.now()) : EXECUTION_MS })) {
+            call.cancel('BROWSER_OFFLINE');
+          }
+        },
+      };
+      this.calls.set(requestId, call);
+      if (target) target.execution_state = operation === 'request_handoff' ? 'waiting_for_human' : 'running';
+      timer = setTimeout(() => call.cancel('COMMAND_EXPIRED'), Math.max(1, deadline - this.now()));
+      const abort = () => call.cancel(signal?.reason instanceof Fault ? signal.reason.code : 'COMMAND_CANCELLED');
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
+      if (!this.send(session, { type: 'command', request_id: requestId, target_id: targetId,
+        workspace_id: workspace.workspace_id, activation_id: activation, client_id: workspace.client_id,
+        operation, args, epoch: this.epoch, connection_id: workspace.connection_id, description,
+        expires_at: deadline, wait_timeout_ms: Math.max(1, deadline - this.now()) })) call.cancel('BROWSER_OFFLINE');
+    });
+  }
   reconcile() {
-    for (const [id, grant] of this.grants) {
-      if (!this.store.linked(grant.client_id, grant.device_id)) this.endGrant(id, 'REVOKED');
+    for (const session of [...this.connections.values()]) {
+      if (!this.current(session)) { this.disconnected(session, 'REVOKED'); session.ws.close(1008, 'REVOKED'); }
     }
-    for (const [id, request] of this.requests) {
-      if (!this.store.linked(request.client_id, request.device_id) ||
-          this.store.client(request.client_id)?.credential_hash !== this.requestCredentials.get(id) ||
-          request.expires_at < Date.now()) {
-        this.finishRequest(id, new Fault(request.expires_at < Date.now() ? 'COMMAND_EXPIRED' : 'NOT_AUTHORIZED'));
-      }
-    }
-    for (const session of this.connections.values()) {
-      if (!this.store.device(session.device.id)) {
-        this.disconnected(session, 'REVOKED');
-        session.ws.close(1008, 'REVOKED');
-      }
-    }
+    for (const workspace of this.workspaces.values()) this.expire(workspace);
+    for (const waiter of [...this.waiters]) waiter.check();
   }
   sweep() {
     this.reconcile();
-    for (const [id, time] of this.denials) {
-      if (Date.now() - time >= 30_000) this.denials.delete(id);
-    }
-    for (const session of this.connections.values()) {
-      if (Date.now() - session.lastSeen > LIVENESS_MS) {
-        this.disconnected(session, 'HEARTBEAT_TIMEOUT');
-        session.ws.terminate();
-      } else {
-        this.send(session, { type: 'ping' });
+    for (const [id, row] of this.tombstones) if (row.expires <= this.now()) this.tombstones.delete(id);
+    for (const session of [...this.connections.values()]) {
+      if (this.now() - session.lastSeen >= LIVENESS_MS) { this.disconnected(session); session.ws.terminate(); }
+      else if (this.now() - session.lastPing >= HEARTBEAT_MS) {
+        session.lastPing = this.now(); this.send(session, { type: 'ping' });
       }
     }
   }
   close() {
     clearInterval(this.timer);
-    for (const session of this.connections.values()) this.disconnected(session, 'SERVICE_STOPPED');
+    for (const session of [...this.connections.values()]) this.disconnected(session, 'SERVICE_STOPPED');
+    for (const waiter of [...this.waiters]) waiter.cancel();
     for (const ws of this.sockets) ws.terminate();
     this.wss.close();
   }

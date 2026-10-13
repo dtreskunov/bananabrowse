@@ -424,10 +424,19 @@ export class BrowserAdapter {
       check();
       await this.assertWorkspace(grant);
       try {
+        if (grant.navigation && !grant.navigation.document) {
+          const current = await this.api.tabs.get(grant.tabId);
+          if ((current.pendingUrl || current.url) === grant.navigation.from &&
+              grant.navigation.from !== grant.navigation.url) {
+            throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
+          }
+        }
         const page = await this.inspect(grant.tabId, grant.protected_origins, allowBlank);
         const navigation = grant.navigation;
-        if (navigation && page.document_nonce === navigation.document && (
-          navigation.from === navigation.url || page.url !== navigation.url
+        if (navigation && (
+          navigation.document ? page.document_nonce === navigation.document &&
+            (navigation.from === navigation.url || page.url !== navigation.url) :
+            page.url === navigation.from && page.url !== navigation.url
         )) {
           throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
         }
@@ -455,8 +464,9 @@ export class BrowserAdapter {
     await this.assertWorkspace(grant);
     if (['wait_for_page', 'request_handoff'].includes(operation)) {
       const tab = await this.api.tabs.get(grant.tabId);
-      navigationUrl(tab.pendingUrl || tab.url, grant.protected_origins);
-      return { summary: actionSummary(operation, args, { title: tab.title, url: tab.pendingUrl || tab.url }) };
+      const url = grant.navigation?.url || tab.pendingUrl || tab.url;
+      navigationUrl(url, grant.protected_origins);
+      return { summary: actionSummary(operation, args, { title: tab.title, url }) };
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
     let target;

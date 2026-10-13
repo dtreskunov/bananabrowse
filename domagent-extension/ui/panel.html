@@ -1,26 +1,16 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DomAgent workspace</title>
-  <link rel="stylesheet" href="ui.css">
-  <script src="ui.js" defer></script>
-</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DomAgent workspace</title><link rel="stylesheet" href="ui.css"><script src="ui.js" defer></script></head>
 <body class="panel">
-  <h1>DomAgent workspace</h1>
-  <p id="status" role="status">Getting ready…</p>
-  <p id="identity"></p>
-  <p id="error" role="alert"></p>
-  <button id="options" type="button">Settings</button>
-  <button id="connect" type="button">Try again</button>
-  <button id="disconnect" type="button">Disconnect</button>
-  <button id="share-selected" type="button">Share selected tab</button>
-  <div id="share-clients"></div>
-  <p class="warning">This uses your normal website logins, not an isolated profile. Sharing moves the actual selected tab into its own window. Stop closes it and loses unsaved state. Prior requests, account changes and site background workers cannot be undone.</p>
-  <section><h2>Your connections</h2><div id="connections"></div></section>
-  <section><h2>Sharing requests</h2><div id="requests"></div></section>
-  <section><h2>Your workspaces</h2><div id="targets"></div></section>
-  <section><h2>Commands and observed events</h2><div id="activity"></div></section>
-</body>
-</html>
+<h1>DomAgent</h1><p id="status" role="status">Getting ready...</p>
+<p id="error" role="alert"></p><div id="targets"></div>
+<details><summary>Recent activity</summary><div id="activity"></div></details>
+<details><summary>Settings and connection</summary><p id="identity"></p>
+<div id="connections"></div>
+<button id="options" type="button">Pairing settings</button>
+<button id="connect" type="button">Reconnect</button><button id="disconnect" type="button">Disconnect</button></details>
+<p class="warning">Grouped tabs can be controlled in the background, including page scripts.
+Your normal logins are used. Closing this sidebar ends control and leaves tabs open.
+Prior requests/account changes cannot be undone.</p>
+</body></html>

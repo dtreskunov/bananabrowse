@@ -1,168 +1,56 @@
-# Extension validation (protocol v4, single-tab-workspace-v1)
-
-Actual-service Chrome and native Firefox shift server action timestamps two
-minutes ahead while retaining the bounded relative budgets. Trusted extension UI
-approvals, allow-all and human Done must still complete without a socket reset.
-Controller tests also cover a server behind the browser and malformed execution
-budgets. Physical toolbar/sidebar gestures remain an operator acceptance check.
-
-With the pinned service dependencies already installed, from the repository root:
+# v5 browser and security validation
 
 ```sh
-node --test domagent-extension/test/*.test.js
-node scripts/build-extensions.mjs
-podman run --rm --shm-size=512m -e PLAYWRIGHT_SKIP_BROWSER_GC=1 \
-  -v "$PWD:/workspace" -w /workspace/domagent-mcp \
+npm --prefix domagent-mcp test
+npm --prefix domagent-mcp run build
+npm --prefix domagent-mcp run check
+podman run --rm --userns=keep-id --ipc=host \
+  -v "$PWD:/work:rw" -w /work/domagent-mcp \
   mcr.microsoft.com/playwright:v1.58.2-noble npm run test:browser
 ```
 
-The suite uses only disposable profiles and TLS fixtures inside
-`domagent-extension/.browser-artifacts/`. It does not install host browser
-libraries, change live services, or weaken production certificate handling.
-The Chromium and Firefox engines and image must already be available.
+Disposable fixtures only: Chrome145.0.7632.6 and native Firefox146.0.1.
+Native platform gates exercise real Chrome onOpened/onClosed and panel-port
+disconnect, Firefox isOpen after browser show/hide, and native group creation.
+Auto-opened Firefox install sidebar is not consent.
 
-## Automated coverage
+Actual service integrations prove domain-only reverse pairing and signed device
+authentication, explicit Start, grouped background operations with an unrelated
+foreground tab, create tab, caller-scoped handles, Pause/End/native closure leaving
+tabs intact, and persisted Firefox keys without restored runtime authority.
+Refused inspection can downgrade the same handle to navigation-only with safe
+diagnostics; navigating away does not require a new per-action prompt.
 
-- Real Chromium protocol fixture: signed tenant-bound enrollment and handshake,
-  local sharing approval of an existing selected tab, MAIN-only script execution without
-  extension APIs, page operations, screenshot PNGs, CSP behavior, protected
-  requests/redirects, stop/reapproval, and IndexedDB identity after restart.
-- Actual-service Chromium: real `Store` and `createApp`, anonymous setup request,
-  browser fragment-token exchange and HttpOnly flow, authenticated setup form,
-  once-shown operator settings, public connection link, automatic installation
-  wizard, server approval form, automatic proof/connection without a local
-  second confirmation, and no grant before separate local sharing approval.
-  Same-origin/different-tenant credentials, devices and targets are isolated.
-  Switching kills old grants and preserves independent keys.
-- Native Firefox RDP: real temporary WebExtension and actual service, signed
-  pairing, selected-tab sharing, protected redirects, page controls and text,
-  optional-operation failures, CSP refusal, guarded human completion after
-  navigation, and full process restart with persisted identity and no grants.
-- Unattended Firefox: all extension pages are closed, extension-target debugger
-  observation is released, and no extension UI is polled for 65 seconds. The
-  same authenticated connection must remain online with no shared tab.
-- Named page indicators, page-local Stop sharing, extraction exclusion,
-  `clear_overlays` preserving the indicator, and independent toolbar status.
-- Unit tests cover strict missing-tenant rejection, nonextractable per-pair
-  keys, legacy records, connection binding, old-document queued actions, bounded
-  human waits, staged ready/execute permits, cancellation/stop without retries,
-  sender/tab/frame/document/nonce binding, synthetic positive clicks, and
-  install-versus-update behavior.
-- Actual-service collaboration: toolbar notification and trusted request descriptions,
-  existing-tab selection and selecting a different normal-window tab afterward,
-  per-action approvals, forged page approval/allow-all/Done rejection, human
-  login/navigation without grant loss, Done/Cancel, grant-scoped allow-all,
-  stale-document rejection and wait-timeout cancellation.
-- Page actions run through actual HTTP MCP and the packaged Chrome
-  and native Firefox extensions: document-scoped snapshots, field-value redaction,
-  open-shadow-root references, ambiguous selectors, disabled/readonly/obscured
-  controls, element replacement, new-snapshot invalidation, navigation expiry,
-  fill/select/check/key/scroll, and explicit loaded-page results. Adapter unit
-  tests mock deadlines and verify cancellation cannot execute a waiting action.
-- Compact-output coverage checks default/maximum UTF-8 budgets including MCP
-  wrapper escaping, multibyte/control-character text, surrogate boundaries,
-  full-row truncation, oversized script rejection, focused snapshots and
-  server-side enforcement against oversized older-extension responses.
-  Chrome/native Firefox qualify specific script syntax/runtime errors; native
-  Firefox verifies page CSP refusal is distinct from unsupported capability.
-- Latest feedback regressions reproduce the sharing banner covering text input
-  on a narrow page in Chrome and Firefox, then verify text/tel/email/search
-  actions while preserving a site's obstruction checks. Actual extensions fill
-  and submit a local form, verify the HTML POST echo under the same grant,
-  inspect title/non-rendered metadata and viewport/control flags, and preserve
-  detailed readiness timeout causes. Native Firefox also checks JSON POST
-  navigation: a supported document remains readable, or a browser-refused
-  document ends sharing without changing the response URL or repeating POST.
-- Inspector tests cover collapsed 610px responsive controls, desktop layout,
-  missing/ambiguous/stale targets, value redaction and unchanged focus/scroll.
-  Approval tests require operation-derived details even with one-character or
-  long nonsense explanations, delay positive decisions until preparation,
-  reject replaced controls under bound approvals, and discard cancelled previews.
-  Firefox JSON viewing is explicitly enabled; successful POST injection must
-  report application/json and expose the fixture response under the same grant.
-- Reliability coverage enforces exact 39/40/500/501-character and whitespace
-  description boundaries; real server/extension re-sharing preserves the exact
-  handle and queues while rejecting binding/capability changes. Readiness tests
-  include immediately requested snapshots after navigate, transient inspection
-  injection failure, cancellation and persistent renderer refusal. Chrome/native
-  Firefox operate opacity-zero styled checkboxes via their visible labels and
-  verify no overlay/disabled/replacement bypass. Inspector reports bounded hiding
-  ancestors and explicit reveal candidates without focus/scroll/value changes.
-  Full service/browser smoke tests have a four-minute total budget for these
-  additional cases; individual operation timeouts are unchanged.
-- Browser diagnostics cover manifest/Firefox version reporting, current
-  tenant-scoped metadata and null legacy/offline peers. Inspection failure codes
-  never include browser exception text or private URLs. The optional public
-  httpbin case submits the actual `/forms/post` form once with fictitious data.
-  Set `DOMAGENT_JSON_VIEWER=0` alongside `DOMAGENT_PUBLIC_HTTPBIN=1` to qualify the
-  viewer-disabled path; the default keeps it enabled. Initial native addon install
-  can time out in the harness; a fresh isolated run is required, not a silent skip.
+Retained page fixtures cover strict selectors/refs, actionability waits, redacted
+snapshots, control/associated-label replacements and site-obstruction checks,
+HTML POST response, compact-output Unicode/escaping bounds, inspector hiding/
+reveal metadata and no native-keystroke/CSP workaround.
 
-The extended Playwright Firefox Juggler test remains explicitly skipped by
-default: the supplied 1.58.2 engine crashes on extension documents at
-`FrameTree.js:543`. The native Firefox test runs by default; its assertions
-are not skipped. For diagnostics only:
+Unit/service tests cover adoption receipts/proposals/replay/revocation, local/static
+operator auth and CSRF, explicit schema migration preserving durable identities/
+disabled state, client isolation, signed workspace revisions/lease expiry,
+cross-tab capacity and per-tab scheduling/cancellation, no privilege rebind,
+protected-navigation guard retention, and late cancelled creation cleanup across
+fresh activations. A focused independent security follow-up confirmed both
+identified teardown races were addressed with regressions.
+
+Chrome headless without pre-granted hosts exercises genuine permissions.request
+denial and confirms no pairing/workspace authority:
 
 ```sh
-# Inside the same container, /workspace/domagent-mcp:
-DOMAGENT_FIREFOX_JUGGLER=1 npm run test:browser -- --grep 'real firefox'
+# same disposable container, optional-host failure path
+DOMAGENT_OPTIONAL_PERMISSIONS=1 npm run test:browser -- --grep 'v5 Chrome actual'
 ```
 
-The native run uses Firefox's own RDP, not Juggler. Its console cannot synthesize
-a physical permission gesture, so trusted options-page runtime messages drive
-configuration, sharing and decisions with fixture hosts pre-granted. Synthetic
-page messages never authorize a positive decision. Its only Stop is negative and
-requires a trusted click. Native RDP reads long-string grips with bounded,
-complete retrieval as private history increases UI state size.
-Server approval uses
-the real Store; Chrome exercises both server browser forms. Both sides still
-perform actual signed enrollment and WSS authentication.
+Positive Firefox optional-host grants are supplied through the browser's native
+permission store in the disposable RDP fixture, not broadened manifests. This
+qualifies permission-state behavior, not a physical permission-dialog gesture.
+Physical optional-host dialogs, notifications outside the browser/DND, menu
+appearance, narrow sidebar layout and all minimum browser builds remain operator
+acceptance tasks. Native notifications successful creation is not proof a user
+saw them. No test installs libraries into the user's browser or mutates accounts.
 
-Firefox 146.0.1 in this image does not expose `tabs.captureTab`; screenshots are
-not advertised and explicitly return `CAPABILITY_UNAVAILABLE`, never substitute
-the visible tab. Page CSP can deny evaluation without disabling text/navigation.
-Candidate minimum browser versions still require separate release qualification.
-
-## Physical acceptance limits
-
-Headless fixture manifests pre-grant HTTP(S) hosts. The Chrome setup test records
-the real UI permission calls: onboarding requests only the connection server;
-broad website permission is requested later by **Share this tab with …**. This does **not**
-qualify the browser's visible permission/notification prompt UX.
-
-With the released browser build, manually verify in supported Chrome and Firefox:
-
-1. Installation opens the one-link wizard; updating an existing identity does
-   not open it. Decline then accept the server-only permission prompt.
-2. The public link starts focused sign-in/approval and automatically connects.
-   No tabs are shared and no general website permission is requested yet.
-3. A request notifies/marks the toolbar without opening a remote popup. Visit
-   an existing or new normal-window website tab and choose **Share this tab with …**
-   from the native panel/toolbar. The actual tab moves with its current document
-   and unsaved state. Decline then accept website permission. There are no
-   capability checkboxes; only the explicitly selected tab gets fixed page APIs.
-4. Confirm native panel Approve/Allow all/Done are never webpage controls.
-   Confirm the named page border/banner and toolbar, keyboard-accessible
-   **Stop sharing**, navigation reinstallation, and tab closure after Stop. A website
-   may hide or imitate DOM decoration; browser-owned controls remain independent.
-   Add/move a tab or open a popup: sharing must revoke without adopting it.
-   Closing an ended owned tab must leave unrelated tabs/windows intact.
-   Verify metadata-only bounded history and its explicit persistence warnings.
-5. Switch connections with active sharing, disconnect, suspend/restart, and
-   verify fresh local approval is required. No old target works.
-   Approve/Decline/Allow-all apply per tab; human Done/Cancel retain sharing even
-   after normal login navigation. Stop cancels waiting actions immediately and
-   leaves the user-owned tab open.
-6. Qualify Firefox capture availability and CSP-denied evaluation, real
-   notifications, and browser-policy refusal on the operator's own browser.
-7. Leave the popup and settings closed for at least two minutes with no shared
-   tab. The browser must remain connected and deliver a subsequent local request.
-   The persistent Firefox background avoids event-page suspension without fake
-   API traffic or automatically restored control.
-
-Shared tabs use the same website sessions, not a network sandbox or isolated
-profile. Password/CAPTCHA presence does not revoke sharing or block ordinary
-inspection. Protected service/IdP origins remain prohibited. Stop cannot undo
-requests, account changes, or already scheduled page JavaScript. Human waiting
-is bounded at 600 seconds; actual execution starts only after the server permit
-and has its own 25-second deadline. Side effects are never retried.
+The old v4 extended Juggler consent test was retired with that protocol, not
+silently used as proof of v5 parity. Firefox coverage is its actual native RDP
+engine; page-helper-only tests run both engines. No published browser-profile
+specific POST bug is considered fixed merely by these disposable results.

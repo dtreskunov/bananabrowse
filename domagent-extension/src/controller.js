@@ -1,68 +1,70 @@
 import {
-  VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS, authPayload, enrollmentPayload, extensionOrigin,
-  connectionUrl, grantPayload, parseConnectionUrl, serviceOrigin, sign, startPayload, statusPayload, tenantId, waitErrorDetails,
-  validDescription, inspectionErrorDetails, validBrowserInfo,
+  VERSION, POLICY_ID, LIVENESS_MS, WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
+  authPayload, workspacePayload, serviceOrigin, tenantId, sign, pairingStartPayload, pairingStatusPayload,
+  pairingConfirmPayload, pairingCancelPayload, validBrowserInfo, validDescription, OPERATIONS,
+  navigationUrl, inspectionErrorDetails, waitErrorDetails, validOperationArgs,
 } from '../../shared/protocol.js';
-import {
-  MAX_MESSAGE_BYTES, MAX_QUEUE, boundedResult, checkBinding,
-  errorCode, fail, id, localDeadline, originList, protectedUnion, text, validateCommand,
-} from './security.js';
+import { boundedResult, checkBinding, errorCode, fail, id, originList, protectedUnion } from './security.js';
 import { ActivityHistory } from './activity.js';
 
-export const LOCAL_END_REASONS = new Set([
-  'OWNER_PAUSED', 'HANDOFF', 'REVOKED', 'TARGET_CLOSED', 'CAPABILITY_UNAVAILABLE',
-]);
-const END_REASONS = new Set([...LOCAL_END_REASONS, 'OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'REPLACED']);
-const followsNavigation = operation => ['request_handoff', 'wait_for_page'].includes(operation);
-const canRefreshReadPreview = message =>
-  ['get_page_snapshot', 'get_text', 'get_interactive_elements', 'inspect_element', 'get_screenshot'].includes(message.operation) &&
-  !message.args.ref && !message.args.document;
-
 export class Controller {
-  constructor({ adapter, keys, storage, inventoryStorage, extensionUrl,
-    fetcher = (...args) => globalThis.fetch(...args), Socket = WebSocket,
-    now = () => Date.now(), notify = () => {}, changed = () => {} }) {
-    Object.assign(this, { adapter, keys, storage, inventoryStorage, fetcher, Socket, now, notify, changed });
+  constructor({ adapter, keys, storage, extensionUrl, Socket = WebSocket,
+    fetcher = (...args) => fetch(...args), now = () => Date.now(), changed = () => {},
+    notify = async () => {}, clearNotification = async () => {} }) {
+    Object.assign(this, { adapter, keys, storage, Socket, fetcher, now, changed, notify, clearNotification });
     const url = new URL(extensionUrl);
-    this.extension_origin = extensionOrigin(`${url.protocol}//${url.host}`);
-    this.config = { service_origin: '', local_protected_origins: [], enabled: false };
+    this.extension_origin = `${url.protocol}//${url.host}`;
+    this.config = { service_origin: '', enabled: false, local_protected_origins: [] };
     this.record = null;
+    this.pairing = null;
     this.savedConnections = [];
-    this.enrollmentPolling = false;
-    this.lastEnrollmentPoll = 0;
+    this.connection = null;
     this.socket = null;
     this.generation = 0;
-    this.connection = null;
     this.phase = 'disconnected';
     this.lastPing = 0;
-    this.pending = new Map();
-    this.grants = new Map();
-    this.inventory = [];
+    this.workspaces = new Map();
     this.failures = [];
-    this.approving = new Set();
-    this.busyTabs = new Set();
-    this.teardowns = new Set();
-    this.reconnectAttempts = 0;
-    this.timer = null;
-    this.reconnectTimer = null;
-    this.history = new ActivityHistory(storage, () => {
-      this.report(Object.assign(new Error('HISTORY_UNAVAILABLE'), { code: 'HISTORY_UNAVAILABLE' }));
-    });
-    this.eligibleClients = [];
-    this.toolbarIntent = null;
-    this.browserInfo = null;
-    this.adapter.onTabEvent = (...args) => this.tabEvent(...args);
+    this.syncing = false;
+    this.notificationTasks = new Map();
+    this.endingTasks = new Set();
+    this.history = new ActivityHistory(storage, () => this.report(new Error('HISTORY_UNAVAILABLE')));
     this.adapter.onWarning = error => this.report(error);
-    this.adapter.onRequestClosed = requestId => {
-      if (this.pending.has(requestId)) {
-        try { this.deny(requestId); } catch (error) { this.report(error); }
+    this.adapter.onPanelClosed = windowId => {
+      for (const workspace of this.workspaces.values()) {
+        if (workspace.windowId === windowId) void this.stopWorkspace(workspace, 'inactive').catch(error => this.report(error));
+      }
+    };
+    this.adapter.onGroupsChanged = () => { void this.refresh().catch(error => this.report(error)); };
+    this.adapter.onTabEvent = (tabId, event) => {
+      for (const workspace of this.workspaces.values()) {
+        const tab = [...workspace.tabs.values()].find(tab => tab.tabId === tabId);
+        if (!tab) continue;
+        if (event === 'closed' || event === 'detached' || event === 'protected_pending') {
+          this.dropTab(workspace, tab, 'TAB_NOT_IN_WORKSPACE', event === 'protected_pending');
+          void this.sync(workspace).catch(error => this.report(error));
+        } else if (event === 'navigation') {
+          tab.documentGeneration++;
+          tab.pageState = 'loading';
+          for (const task of [...tab.queue]) {
+            if (task.executing) continue;
+            if (!['wait_for_page', 'request_handoff'].includes(task.message.operation)) {
+              const freshRead = !task.executing && !task.ready &&
+                ['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element', 'get_screenshot'].includes(task.message.operation) &&
+                !task.message.args.ref && !task.message.args.document;
+              if (freshRead) task.documentGeneration = tab.documentGeneration;
+              else this.finishTask(workspace, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : 'TARGET_STALE' });
+            }
+          }
+        }
       }
     };
   }
 
   report(error) {
-    console.error('DomAgent:', errorCode(error));
-    this.failures = [...this.failures.slice(-4), errorCode(error)];
+    const code = errorCode(error);
+    console.error('DomAgent:', code);
+    this.failures = [...this.failures.slice(-4), code];
     this.changed();
   }
 
@@ -71,965 +73,665 @@ export class Controller {
     if (!validBrowserInfo(this.browserInfo)) fail('INVALID_MESSAGE');
     await this.history.load();
     const saved = await this.storage.get(['config', 'savedConnections']);
-    // No inventory survives a background/browser restart; identity is not authority.
-    this.inventory = [];
-    await this.adapter.initialize([]);
-    this.savedConnections = (Array.isArray(saved.savedConnections) ? saved.savedConnections : [])
-      .filter(pair => {
-        try { return parseConnectionUrl(pair.connection_url).tenant_id === pair.tenant_id; } catch { return false; }
-      }).slice(0, 32);
-    if (saved.config?.service_origin && saved.config?.tenant_id) {
-      this.config = { service_origin: serviceOrigin(saved.config.service_origin),
-        tenant_id: tenantId(saved.config.tenant_id),
-        connection_url: connectionUrl(saved.config.service_origin, saved.config.tenant_id),
-        local_protected_origins: originList(saved.config.local_protected_origins || []),
-        enabled: saved.config.enabled === true };
-      this.record = await this.keys.get(this.config.service_origin, this.config.tenant_id);
+    this.savedConnections = Array.isArray(saved.savedConnections) ? saved.savedConnections.slice(0, 32) : [];
+    if (saved.config?.service_origin) {
+      this.config = { ...saved.config, service_origin: serviceOrigin(saved.config.service_origin),
+        local_protected_origins: originList(saved.config.local_protected_origins || []) };
+      if (this.config.tenant_id) this.record = await this.keys.get(this.config.service_origin, tenantId(this.config.tenant_id));
     }
-    this.timer = setInterval(() => this.tick(), 1000);
+    await this.adapter.initialize();
+    this.timer = setInterval(() => { void this.tick().catch(error => this.report(error)); }, 1000);
     if (this.config.enabled && this.record?.identity) this.connect();
     this.changed();
   }
 
   protectedOrigins() {
-    return protectedUnion(this.config.service_origin, this.config.local_protected_origins,
-      this.record?.protected_origins || []);
+    return this.config.service_origin ? protectedUnion(this.config.service_origin,
+      this.config.local_protected_origins, this.record?.protected_origins || []) : [];
   }
 
   snapshot() {
     return {
-      config: this.config, phase: this.phase, identity: this.record?.identity || null,
-      key_id: this.record?.key_id || null,
-      saved_connections: this.savedConnections,
-      enrollment: this.record?.enrollment || null,
-      protected_origins: this.config.service_origin ? this.protectedOrigins() : [],
-      capabilities: this.adapter.capabilities(),
-      eligible_clients: this.eligibleClients,
-      activity: this.history.entries,
-      history_unavailable: this.history.unavailable,
-      browser_info: this.browserInfo,
-      workspaces: this.adapter.workspaceList?.() || [],
-      pending: [...this.pending.values()].map(request => ({
-        request_id: request.request_id, client_id: request.client_id, client_label: request.client_label,
-        tenant_id: request.tenant_id,
-        description: request.description, expires_at: request.expires_at, policy_id: request.policy_id,
-      })),
-      targets: [...this.grants.values()].map(grant => ({
-        client_id: grant.client_id, client_label: grant.client_label,
-        tabId: grant.tabId, target_id: grant.target_id, state: grant.state,
-        allow_all: grant.allowAll === true,
-        windowId: grant.windowId,
-        indicator_unavailable: grant.indicatorUnavailable === true,
-        commands: grant.queue.map(queued => ({
-          request_id: queued.message.request_id, operation: queued.message.operation,
-          description: queued.message.description, expires_at: queued.deadline, state: queued.state,
-          summary: queued.preview?.summary || [], preparing: queued.preparing === true,
+      config: this.config, phase: this.phase, browser_info: this.browserInfo,
+      identity: this.record?.identity || null, saved_connections: this.savedConnections,
+      pairing: this.pairing ? { code: this.pairing.code, expires_at: this.pairing.expires_at,
+        state: this.pairing.state, proposal: this.pairing.proposal } : null,
+      failures: this.failures, activity: this.history.entries, history_unavailable: this.history.unavailable,
+      workspaces: [...this.workspaces.values()].map(workspace => ({
+        workspace_id: workspace.id, windowId: workspace.windowId, groupId: workspace.groupId,
+        state: workspace.state, tabs: [...workspace.tabs.values()].map(tab => ({
+          target_id: tab.targetId, tabId: tab.tabId, title: tab.title, url: tab.url,
+          page_state: tab.pageState, commands: tab.queue.map(task => ({
+            request_id: task.message.request_id, operation: task.message.operation,
+            description: task.message.description, human: task.human, executing: task.executing,
+          })),
         })),
       })),
-      failures: this.failures,
+      pending_human: [...this.notificationTasks.values()].map(({ workspace, tab, task }) => ({
+        request_id: task.message.request_id, workspace_id: workspace.id, tabId: tab.tabId,
+        description: task.message.description,
+      })),
     };
   }
 
   async configure(value) {
-    const pair = value.connection_url ? parseConnectionUrl(value.connection_url) : {
-      origin: serviceOrigin(value.service_origin), tenant_id: tenantId(value.tenant_id),
-      connection_url: connectionUrl(value.service_origin, value.tenant_id),
-    };
-    const origin = pair.origin;
-    const saved = this.savedConnections.find(connection => connection.connection_url === pair.connection_url);
-    const local = originList(value.local_protected_origins ?? saved?.local_protected_origins ?? []);
+    let candidate = value.service_origin.trim();
+    if (!candidate.includes('://')) candidate = `https://${candidate}`;
+    const origin = serviceOrigin(candidate);
     await this.disconnect();
-    this.config = { service_origin: origin, tenant_id: pair.tenant_id,
-      connection_url: pair.connection_url, local_protected_origins: local, enabled: false };
-    this.record = await this.keys.get(origin, pair.tenant_id);
+    this.config = { service_origin: origin, enabled: false,
+      local_protected_origins: originList(value.local_protected_origins || []) };
+    this.record = null;
+    this.pairing = null;
     await this.storage.set({ config: this.config });
     this.changed();
-    return this.snapshot();
   }
 
-  async switchConnection(connection) {
-    if (!this.savedConnections.some(pair => pair.connection_url === connection)) fail('NOT_AUTHORIZED');
-    await this.configure({ connection_url: connection });
-    await this.enable();
-    return this.snapshot();
-  }
-
-  async saveConnection(record = this.record) {
-    if (!record?.identity) return;
-    const pair = { connection_url: record.connection_url, tenant_id: record.tenant_id,
-      origin: record.origin, label: record.identity.tenant_label,
-      local_protected_origins: this.record === record ? this.config.local_protected_origins
-        : this.savedConnections.find(saved => saved.connection_url === record.connection_url)?.local_protected_origins || [] };
-    this.savedConnections = [...this.savedConnections.filter(saved => saved.connection_url !== pair.connection_url), pair].slice(-32);
-    await this.storage.set({ savedConnections: this.savedConnections });
-  }
-
-  async api(path, body) {
-    const response = await this.fetcher(`${this.config.service_origin}/api/tenants/${tenantId(this.config.tenant_id)}/enrollment/${path}`, {
+  async api(action, body) {
+    if (body) {
+      const fields = action === 'start'
+        ? ['request_id', 'key_id', 'public_key', 'extension_origin', 'pairing_code', 'receipt', 'nonce', 'label', 'signature']
+        : action === 'confirm' ? ['request_id', 'key_id', 'receipt', 'signature', 'proposal_id', 'tenant_id', 'client_id', 'nonce']
+          : ['request_id', 'key_id', 'receipt', 'signature'];
+      body = Object.fromEntries(fields.filter(key => Object.hasOwn(body, key)).map(key => [key, body[key]]));
+    }
+    const response = await this.fetcher(`${this.config.service_origin}/api/pairing/${action}`, {
       method: body ? 'POST' : 'GET', credentials: 'omit', redirect: 'error', cache: 'no-store',
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10_000),
+      headers: { 'X-DomAgent-Extension-Origin': this.extension_origin,
+        ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10000),
     });
-    if (!response.ok) fail('NOT_AUTHORIZED');
     const raw = await response.text();
-    if (raw.length > 32_768) fail('INVALID_MESSAGE');
-    return JSON.parse(raw);
+    if (raw.length > 16384) fail('INVALID_MESSAGE');
+    const value = JSON.parse(raw);
+    if (!response.ok) fail(value.error || 'PAIRING_UNAVAILABLE');
+    return value;
   }
 
-  async enroll(label) {
-    if (!this.record || this.connection) fail('NOT_AUTHORIZED');
-    await this.disconnect();
-    const origin = this.config.service_origin;
-    const record = this.record;
+  async beginPairing() {
+    if (!this.config.service_origin || this.connection) fail('NOT_AUTHORIZED');
+    if (this.pairing) await this.cancelPairing();
+    const record = await this.keys.pending(this.config.service_origin);
     const challenge = await this.api('challenge');
-    const tenant = this.config.tenant_id;
-    if (challenge.origin !== origin || challenge.tenant_id !== tenant) fail('NOT_AUTHORIZED');
-    text(challenge.nonce, 256);
-    const request = { origin, tenant_id: tenant, nonce: challenge.nonce, key_id: record.key_id,
-      public_key: record.public_key, extension_origin: this.extension_origin, label: text(label, 100) };
-    const signature = await sign(record.privateKey, startPayload(request));
-    const enrollment = await this.api('start', { ...request, origin: undefined, signature });
-    id(enrollment.enrollment_id);
-    const verification = new URL(enrollment.verification_url);
-    if (enrollment.tenant_id !== tenant || verification.origin !== origin ||
-        verification.pathname !== `/pair/${tenant}` || verification.username || verification.password ||
-        verification.hash || verification.search !== `?enrollment=${enrollment.enrollment_id}` ||
-        !enrollment.verification_url.startsWith('https://') ||
-        !Number.isFinite(enrollment.expires_at) || enrollment.expires_at <= this.now()) fail('INVALID_MESSAGE');
-    if (this.record !== record || this.config.service_origin !== origin || this.config.tenant_id !== tenant) fail('NOT_AUTHORIZED');
-    record.enrollment = { enrollment_id: enrollment.enrollment_id,
-      tenant_id: tenant,
-      verification_url: enrollment.verification_url, expires_at: enrollment.expires_at, state: 'pending' };
-    await this.keys.save(record);
+    if (challenge.origin !== this.config.service_origin || typeof challenge.nonce !== 'string') fail('INVALID_MESSAGE');
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+    const code = [...crypto.getRandomValues(new Uint8Array(8))].map(value => alphabet[value % 32]).join('');
+    const receipt = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+      .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+    const request = { origin: this.config.service_origin, request_id: crypto.randomUUID(), key_id: record.key_id,
+      public_key: record.public_key, extension_origin: this.extension_origin, label: 'My browser',
+      pairing_code: code, receipt, nonce: challenge.nonce };
+    request.signature = await sign(record.privateKey, pairingStartPayload(request));
+    const result = await this.api('start', request);
+    if (result.request_id !== request.request_id || !Number.isFinite(result.expires_at) ||
+        result.expires_at <= this.now() || result.expires_at > this.now() + 300000) fail('INVALID_MESSAGE');
+    this.pairing = { ...request, record, code: `${code.slice(0, 4)}-${code.slice(4)}`, expires_at: result.expires_at, state: 'pending' };
     this.changed();
-    return record.enrollment;
   }
 
-  async enrollmentStatus() {
-    const record = this.record;
-    const origin = this.config.service_origin;
-    const enrollment = record?.enrollment;
-    if (!enrollment || enrollment.expires_at <= this.now()) fail('ENROLLMENT_EXPIRED');
-    const request = { origin, tenant_id: record.tenant_id, enrollment_id: enrollment.enrollment_id };
-    const signature = await sign(record.privateKey, statusPayload(request));
-    const status = await this.api('status', { tenant_id: record.tenant_id, enrollment_id: request.enrollment_id, signature });
-    if (this.record !== record || status.enrollment_id !== enrollment.enrollment_id ||
-        status.tenant_id !== record.tenant_id ||
-        !['pending', 'approved'].includes(status.state)) fail('NOT_AUTHORIZED');
-    if (status.state === 'approved') {
-      if (status.key_id !== record.key_id || status.extension_origin !== this.extension_origin ||
-          !Number.isFinite(status.expires_at) || status.expires_at <= this.now()) fail('NOT_AUTHORIZED');
-      id(status.owner_id);
-      text(status.owner_label);
-      text(status.tenant_label, 80);
-      text(status.nonce);
-      originList(status.protected_origins);
-      record.enrollment = { ...status, verification_url: enrollment.verification_url };
-      await this.keys.save(record);
-      await this.confirmEnrollment(record);
+  async pairingStatus() {
+    const pairing = this.pairing;
+    if (!pairing || pairing.expires_at <= this.now()) fail('PAIRING_UNAVAILABLE');
+    const proof = { origin: this.config.service_origin, request_id: pairing.request_id,
+      key_id: pairing.key_id, receipt: pairing.receipt };
+    const result = await this.api('status', { ...proof,
+      signature: await sign(pairing.record.privateKey, pairingStatusPayload(proof)) });
+    if (this.pairing !== pairing) return;
+    if (!['pending', 'proposed', 'confirmed'].includes(result.state)) fail('INVALID_MESSAGE');
+    pairing.state = result.state;
+    if (result.state === 'proposed') {
+      const proposal = result.proposed || result;
+      id(proposal.proposal_id); tenantId(proposal.tenant_id); id(proposal.client_id); id(proposal.nonce);
+      if (typeof proposal.client_label !== 'string' || [...proposal.client_label].length > 80) fail('INVALID_MESSAGE');
+      pairing.proposal = { proposal_id: proposal.proposal_id, tenant_id: proposal.tenant_id,
+        client_id: proposal.client_id, client_label: proposal.client_label, nonce: proposal.nonce };
     }
     this.changed();
-    return record.enrollment || record.identity;
   }
 
-  async confirmEnrollment(expectedRecord = this.record) {
-    await this.disconnect();
-    const record = this.record;
-    if (record !== expectedRecord) fail('NOT_AUTHORIZED');
-    const origin = this.config.service_origin;
-    const status = record?.enrollment;
-    if (!status || status.state !== 'approved' || status.expires_at <= this.now()) fail('ENROLLMENT_EXPIRED');
-    const signature = await sign(record.privateKey, enrollmentPayload({ ...status, origin }));
-    const identity = await this.api('confirm', { tenant_id: record.tenant_id, enrollment_id: status.enrollment_id, signature });
-    if (this.record !== record || identity.key_id !== record.key_id ||
-        identity.tenant_id !== record.tenant_id ||
-        identity.owner_id !== status.owner_id) fail('NOT_AUTHORIZED');
+  async confirmPairing() {
+    const pairing = this.pairing;
+    if (!pairing?.proposal || pairing.expires_at <= this.now()) fail('PAIRING_UNAVAILABLE');
+    const proof = { ...pairing.proposal, origin: this.config.service_origin, request_id: pairing.request_id,
+      key_id: pairing.key_id, receipt: pairing.receipt };
+    const identity = await this.api('confirm', { ...proof,
+      signature: await sign(pairing.record.privateKey, pairingConfirmPayload(proof)) });
+    if (this.pairing !== pairing || identity.tenant_id !== proof.tenant_id ||
+        identity.client_id !== proof.client_id) fail('NOT_AUTHORIZED');
     id(identity.device_id);
-    text(identity.owner_label);
-    text(identity.tenant_label, 80);
-    record.protected_origins = protectedUnion(origin, record.protected_origins,
-      status.protected_origins, identity.protected_origins);
-    record.identity = { device_id: identity.device_id, owner_id: identity.owner_id,
-      owner_label: identity.owner_label, tenant_id: identity.tenant_id, tenant_label: identity.tenant_label };
-    record.enrollment = null;
+    const record = await this.keys.bind(pairing.record, identity);
+    record.protected_origins = protectedUnion(this.config.service_origin, identity.protected_origins);
     await this.keys.save(record);
-    if (this.record !== record) fail('NOT_AUTHORIZED');
-    await this.saveConnection(record);
-    if (this.record !== record) fail('NOT_AUTHORIZED');
-    await this.enable();
+    this.record = record;
+    this.config = { ...this.config, tenant_id: identity.tenant_id, enabled: true };
+    this.savedConnections = [...this.savedConnections.filter(saved => saved.tenant_id !== identity.tenant_id ||
+      saved.origin !== this.config.service_origin), { origin: this.config.service_origin,
+      tenant_id: identity.tenant_id, label: identity.client_label }].slice(-32);
+    await this.storage.set({ config: this.config, savedConnections: this.savedConnections });
+    this.pairing = null;
+    this.connect();
     this.changed();
-    return record.identity;
+  }
+
+  async cancelPairing() {
+    const pairing = this.pairing;
+    if (!pairing) return;
+    const proof = { origin: this.config.service_origin, request_id: pairing.request_id,
+      key_id: pairing.key_id, receipt: pairing.receipt };
+    await this.api('cancel', { ...proof,
+      signature: await sign(pairing.record.privateKey, pairingCancelPayload(proof)) });
+    this.pairing = null;
+    this.changed();
   }
 
   async enable() {
-    if (!this.record?.identity || this.record.identity.tenant_id !== this.config.tenant_id) fail('NOT_AUTHORIZED');
+    if (!this.record?.identity) fail('NOT_AUTHORIZED');
     this.config.enabled = true;
     await this.storage.set({ config: this.config });
-    this.reconnectAttempts = 0;
+    this.connect();
+  }
+
+  async switchConnection(origin, tenant) {
+    if (!this.savedConnections.some(saved => saved.origin === origin && saved.tenant_id === tenant)) fail('NOT_AUTHORIZED');
+    await this.disconnect();
+    const record = await this.keys.get(origin, tenant);
+    if (!record.identity) fail('NOT_AUTHORIZED');
+    this.config = { ...this.config, service_origin: origin, tenant_id: tenant, enabled: true };
+    this.record = record;
+    this.workspaces.clear();
+    await this.storage.set({ config: this.config });
     this.connect();
   }
 
   connect() {
-    if (this.socket || !this.config.enabled || !this.record?.identity ||
-        this.record.identity.tenant_id !== this.config.tenant_id) return;
-    clearTimeout(this.reconnectTimer);
+    if (this.socket || !this.config.enabled || !this.record?.identity) return;
     const generation = ++this.generation;
-    const socket = new this.Socket(`${this.config.service_origin.replace('https:', 'wss:')}/extension/${tenantId(this.config.tenant_id)}`);
-    this.socket = socket;
-    this.phase = 'connecting';
-    this.lastPing = this.now();
+    const socket = new this.Socket(`${this.config.service_origin.replace('https:', 'wss:')}/extension/${this.config.tenant_id}`);
+    this.socket = socket; this.phase = 'connecting'; this.lastPing = this.now();
     let messages = Promise.resolve();
     socket.onopen = () => {
       if (!this.current(socket, generation)) return;
       this.phase = 'authenticating';
-      socket.send(JSON.stringify({ type: 'hello', version: VERSION, tenant_id: this.config.tenant_id, key_id: this.record.key_id,
-        ...(this.browserInfo ? { browser_info: this.browserInfo } : {}) }));
-      this.changed();
+      socket.send(JSON.stringify({ type: 'hello', version: VERSION, tenant_id: this.config.tenant_id,
+        key_id: this.record.key_id, browser_info: this.browserInfo }));
     };
     socket.onmessage = event => {
-      if (!this.current(socket, generation)) return;
       messages = messages.then(() => this.receive(event.data, socket, generation)).catch(error => {
-        this.report(error);
-        if (this.current(socket, generation)) this.loseConnection(socket, generation);
+        this.report(error); this.loseConnection(socket, generation);
       });
     };
-    socket.onclose = () => this.loseConnection(socket, generation);
-    socket.onerror = () => {
-      if (this.current(socket, generation)) {
-        this.report(new Error('BROWSER_OFFLINE'));
-        this.loseConnection(socket, generation);
-      }
-    };
+    socket.onclose = socket.onerror = () => this.loseConnection(socket, generation);
     this.changed();
   }
 
-  current(socket, generation) {
-    return this.socket === socket && this.generation === generation;
-  }
-
+  current(socket, generation) { return this.socket === socket && this.generation === generation; }
   send(message) {
-    if (!this.connection || this.socket?.readyState !== 1 ||
-        this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
+    if (!this.connection || this.socket?.readyState !== 1 || this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
     this.socket.send(JSON.stringify({ ...message, tenant_id: this.config.tenant_id }));
   }
 
   async receive(raw, socket, generation) {
     if (!this.current(socket, generation)) return;
-    if (this.now() - this.lastPing >= LIVENESS_MS) {
-      this.loseConnection(socket, generation);
-      fail('BROWSER_OFFLINE');
-    }
-    if (typeof raw !== 'string' || new TextEncoder().encode(raw).length > MAX_MESSAGE_BYTES) fail('INVALID_MESSAGE');
+    if (typeof raw !== 'string' || raw.length > 4 * 1024 * 1024) fail('INVALID_MESSAGE');
     const message = JSON.parse(raw);
-    if (!message || typeof message !== 'object') fail('INVALID_MESSAGE');
     if (message.tenant_id !== this.config.tenant_id) fail('NOT_AUTHORIZED');
-    if (message.type === 'error') {
-      text(message.code);
-      if (message.code === 'COMMAND_EXPIRED') fail('COMMAND_EXPIRED');
-      fail('NOT_AUTHORIZED');
-    }
     if (message.type === 'challenge') {
       if (this.phase !== 'authenticating' || message.origin !== this.config.service_origin ||
           message.key_id !== this.record.key_id) fail('NOT_AUTHORIZED');
-      id(message.epoch);
-      id(message.connection_id);
-      text(message.nonce);
-      this.phase = 'proving';
-      this.challenge = message;
+      id(message.epoch); id(message.connection_id); id(message.nonce);
+      this.challenge = message; this.phase = 'proving';
       const signature = await sign(this.record.privateKey, authPayload(message));
-      if (this.current(socket, generation)) socket.send(JSON.stringify({ type: 'proof', tenant_id: this.config.tenant_id, signature }));
+      if (this.current(socket, generation)) socket.send(JSON.stringify({ type: 'proof',
+        tenant_id: this.config.tenant_id, signature }));
       return;
     }
     if (message.type === 'authenticated') {
-      const record = this.record;
-      const identity = record.identity;
-      if (this.phase !== 'proving' || message.device_id !== identity.device_id ||
-          message.owner_id !== identity.owner_id) fail('NOT_AUTHORIZED');
-      checkBinding(message, this.challenge);
-      text(message.owner_label);
-      text(message.tenant_label, 80);
-      record.protected_origins = protectedUnion(this.config.service_origin,
-        record.protected_origins, message.protected_origins);
-      identity.tenant_label = message.tenant_label;
-      await this.keys.save(record);
+      if (this.phase !== 'proving' || message.device_id !== this.record.identity.device_id) fail('NOT_AUTHORIZED');
+      checkBinding(message, this.challenge); id(message.client_id);
+      if (typeof message.client_label !== 'string' || !message.client_label ||
+          [...message.client_label].length > 80) fail('INVALID_MESSAGE');
+      this.connection = { epoch: message.epoch, connection_id: message.connection_id, tenant_id: message.tenant_id,
+        client_id: message.client_id, client_label: message.client_label };
+      this.record.protected_origins = protectedUnion(this.config.service_origin, message.protected_origins);
+      this.record.identity = { ...this.record.identity, client_id: message.client_id, client_label: message.client_label };
+      await this.keys.save(this.record);
       if (!this.current(socket, generation)) return;
-      await this.saveConnection(record);
-      if (!this.current(socket, generation)) return;
-      this.connection = { tenant_id: message.tenant_id, epoch: message.epoch, connection_id: message.connection_id };
-      if (!Array.isArray(message.eligible_clients) || message.eligible_clients.length > 32) fail('INVALID_MESSAGE');
-      this.eligibleClients = message.eligible_clients.map(client => {
-        id(client.id);
-        text(client.label, 100);
-        return { id: client.id, label: client.label };
-      });
-      this.phase = 'authenticated';
-      this.lastPing = this.now();
-      this.reconnectAttempts = 0;
-      this.history.record('connected');
-      this.changed();
+      this.phase = 'authenticated'; this.lastPing = this.now(); this.history.record('connected'); this.changed();
       return;
     }
-    if (!this.connection || this.phase !== 'authenticated') fail('NOT_AUTHORIZED');
-    if (message.type === 'ping') {
-      this.lastPing = this.now();
-      this.send({ type: 'pong' });
-    } else if (message.type === 'approval.request') {
-      const record = this.record;
-      checkBinding(message, this.connection);
-      id(message.request_id);
-      id(message.client_id);
-      text(message.client_label);
-      if (!validDescription(message.description)) fail('INVALID_MESSAGE');
-      text(message.nonce);
-      message.expires_at = localDeadline(message, 'wait_timeout_ms', HUMAN_WAIT_MS, this.now());
-      if (message.policy_id !== POLICY_ID || !Number.isFinite(message.expires_at) ||
-          message.expires_at <= this.now() || message.expires_at > this.now() + HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
-      if (this.pending.size >= 32 || this.pending.has(message.request_id)) fail('INVALID_MESSAGE');
-      const protectedOrigins = protectedUnion(this.config.service_origin,
-        record.protected_origins, message.protected_origins);
-      if (protectedOrigins.some(origin => !this.protectedOrigins().includes(origin))) {
-        // Newly protected origins must never wait behind a still-active old filter.
-        await Promise.all([...this.grants.values()].map(grant => this.end(grant.target_id, 'OWNER_PAUSED')));
+    if (!this.connection) fail('NOT_AUTHORIZED');
+    if (message.type === 'ping') { this.lastPing = this.now(); this.send({ type: 'pong' }); return; }
+    if (message.type === 'workspace.active') {
+      const workspace = this.workspaces.get(message.workspace_id);
+      if (workspace && workspace.activationId === message.activation_id && message.revision === workspace.revision) {
+        workspace.ackRevision = message.revision;
+        this.changed();
       }
-      if (!this.current(socket, generation)) return;
-      record.protected_origins = protectedOrigins;
-      await this.keys.save(record);
-      if (!this.current(socket, generation)) return;
-      this.pending.set(message.request_id, message);
-      this.history.record('sharing_requested', { request_id: message.request_id, client_id: message.client_id });
-      this.notify('Sharing request', `${message.client_label} would like to use a tab.`);
-      void this.adapter.requestWindow?.(message.request_id).then(() => {
-        if (!this.pending.has(message.request_id)) return this.adapter.closeRequestWindow?.(message.request_id);
-      }).catch(() => this.report(new Error('INDICATOR_UNAVAILABLE')));
-      this.changed();
-      const intent = this.toolbarIntent;
-      if (intent && intent.client_id === message.client_id && intent.generation === this.generation &&
-          intent.deadline > this.now()) {
-        this.toolbarIntent = null;
-        void this.approve(message.request_id, intent.tabId).catch(error => this.report(error));
-      }
-    } else if (message.type === 'approval.cancel') {
-      id(message.request_id);
-      this.pending.delete(message.request_id);
-      void this.adapter.closeRequestWindow?.(message.request_id);
-      for (const grant of this.grants.values()) {
-        if (grant.request_id === message.request_id && grant.state === 'awaiting_ack') {
-          void this.end(grant.target_id, 'OWNER_PAUSED');
-        }
-      }
-      this.changed();
-    } else if (message.type === 'grant.active') {
-      const grant = this.grants.get(message.target_id);
-      if (!grant || !['awaiting_ack', 'active'].includes(grant.state) ||
-          message.client_id !== grant.client_id || message.tab_id !== grant.tabId ||
-          message.window_id !== grant.windowId) fail('NOT_AUTHORIZED');
-      if (grant.state === 'awaiting_ack' && grant.ackDeadline <= this.now()) {
-        await this.end(grant.target_id, 'OWNER_PAUSED');
-        fail('APPROVAL_REQUIRED');
-      }
-      checkBinding(grant, this.connection);
-      grant.state = 'active';
-      this.history.record('sharing_started', { target_id: grant.target_id, client_id: grant.client_id });
-      void this.updateIndicator(grant);
-      this.changed();
-    } else if (message.type === 'grant.end') {
-      id(message.target_id);
-      let reason = 'REVOKED';
-      if (message.reason === 'HANDOFF_REQUIRED') reason = 'HANDOFF';
-      else if (END_REASONS.has(message.reason)) reason = message.reason;
-      await this.end(message.target_id, reason, false);
-    } else if (message.type === 'command') {
-      // Commands queue independently; the heartbeat/teardown stream never waits for page work.
-      this.enqueue(message);
-    } else if (message.type === 'command.execute') {
-      this.executeReady(message);
-    } else if (message.type === 'command.cancel') {
-      this.cancelCommand(message);
-    } else {
-      fail('INVALID_MESSAGE');
+      return;
     }
-  }
-
-  async approve(requestId, tabId) {
-    const request = this.pending.get(requestId);
-    if (!request || this.approving.has(requestId)) fail('APPROVAL_REQUIRED');
-    checkBinding(request, this.connection);
-    if (request.expires_at <= this.now()) fail('APPROVAL_REQUIRED');
-    if (!Number.isSafeInteger(tabId) || tabId < 0) fail('INVALID_ARGUMENT');
-    if (this.busyTabs.has(tabId)) fail('APPROVAL_REQUIRED');
-    const capabilities = [...this.adapter.capabilities()];
-    this.approving.add(requestId);
-    this.busyTabs.add(tabId);
-    const generation = this.generation;
-    let grant;
-    let reused = false;
-    const checkApproval = () => {
-      if (this.generation !== generation || request.expires_at <= this.now() ||
-          !this.pending.has(requestId) || (grant && this.grants.get(grant.target_id) !== grant)) {
-        fail('APPROVAL_REQUIRED');
+    if (message.type === 'command') { this.enqueue(message); return; }
+    if (message.type === 'command.execute') { void this.executeReady(message).catch(error => this.report(error)); return; }
+    if (message.type === 'command.cancel') {
+      for (const workspace of this.workspaces.values()) for (const tab of [null, ...workspace.tabs.values()]) {
+        const task = (tab?.queue || workspace.tasks).find(task => task.message.request_id === message.request_id);
+        if (task) this.finishTask(workspace, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : 'COMMAND_CANCELLED' });
       }
-      if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-      checkBinding(request, this.connection);
-    };
-    try {
-      const tab = await this.adapter.selectedTabById(tabId);
-      checkApproval();
-      await this.adapter.inspect(tab.id, this.protectedOrigins());
-      checkApproval();
-      grant = [...this.grants.values()].find(existing => existing.tabId === tab.id);
-      if (grant && (grant.client_id !== request.client_id || grant.state !== 'active')) fail('APPROVAL_REQUIRED');
-      reused = Boolean(grant);
-      if (!grant) grant = { ...request, target_id: crypto.randomUUID(), tabId: tab.id, state: 'preparing',
-        capabilities: [...capabilities], protected_origins: this.protectedOrigins(),
-        documentGeneration: 0, queue: [], running: false, generation };
-      this.grants.set(grant.target_id, grant);
-      checkApproval();
-      if (!reused) {
-        grant.windowId = await this.adapter.createWorkspace(tab.id);
-        checkApproval();
-        await this.adapter.protect(tab.id, grant.protected_origins);
-        checkApproval();
-        await this.adapter.inspect(tab.id, grant.protected_origins);
-        checkApproval();
-        await this.adapter.attach(tab.id);
-        checkApproval();
-      } else {
-        await this.adapter.assertWorkspace(grant);
-        checkApproval();
-      }
-      const signature = await sign(this.record.privateKey, grantPayload({
-        ...request, origin: this.config.service_origin, target_id: grant.target_id, tab_id: tab.id,
-        window_id: grant.windowId, capabilities,
-      }));
-      checkApproval();
-      if (!reused) grant.state = 'awaiting_ack';
-      grant.ackDeadline = this.now() + 10_000;
-      this.send({ type: 'grant.approve', request_id: requestId, client_id: request.client_id,
-        target_id: grant.target_id, tab_id: tab.id, window_id: grant.windowId,
-        policy_id: POLICY_ID, nonce: request.nonce, capabilities, signature });
-      this.pending.delete(requestId);
-      void this.adapter.closeRequestWindow?.(requestId);
-      this.changed();
-    } catch (error) {
-      if (grant && !reused && grant.client_id === request.client_id) {
-        this.grants.delete(grant.target_id);
-        try {
-          await this.adapter.release(grant.tabId);
-        } catch (cleanupError) {
-          this.report(cleanupError);
-        }
-      }
-      throw error;
-    } finally {
-      this.approving.delete(requestId);
-      this.busyTabs.delete(tabId);
+      return;
     }
+    if (message.type === 'workspace.end') {
+      const workspace = this.workspaces.get(message.workspace_id);
+      if (workspace) await this.stopWorkspace(workspace, 'inactive');
+      return;
+    }
+    if (message.type === 'error') fail(message.code || 'NOT_AUTHORIZED');
+    fail('INVALID_MESSAGE');
   }
 
-  deny(requestId) {
-    if (!this.pending.has(requestId)) fail('APPROVAL_REQUIRED');
-    this.send({ type: 'approval.deny', request_id: requestId });
-    this.pending.delete(requestId);
-    void this.adapter.closeRequestWindow?.(requestId);
-    this.changed();
-  }
-
-  async shareSelected(tabId, clientId) {
+  async startWorkspace(windowId) {
     if (!this.connection) fail('BROWSER_OFFLINE');
-    const active = [...this.grants.values()].find(grant => grant.tabId === tabId);
-    if (active) return;
-    if (clientId !== undefined && !this.eligibleClients.some(client => client.id === clientId)) fail('NOT_AUTHORIZED');
-    const pending = [...this.pending.values()].filter(request => clientId === undefined || request.client_id === clientId);
-    const clients = this.eligibleClients.filter(client => clientId === undefined || client.id === clientId);
-    if (pending.length > 1 || clients.length > 1) fail('APPROVAL_REQUIRED');
-    if (pending.length === 1) return this.approve(pending[0].request_id, tabId);
-    const client = clients[0];
-    if (!client) fail('NOT_AUTHORIZED');
-    await this.adapter.selectedTabById(tabId);
-    this.toolbarIntent = { client_id: client.id, tabId, generation: this.generation,
-      deadline: this.now() + 10_000 };
-    this.send({ type: 'access.request', client_id: client.id });
+    if (!await this.adapter.panelOpen(windowId)) fail('PANEL_OPEN_REQUIRED');
+    await this.adapter.permissions();
+    await Promise.all([...this.endingTasks]);
+    let workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
+    if (!workspace) {
+      const created = await this.adapter.makeGroup(windowId, this.connection.client_label);
+      workspace = { id: crypto.randomUUID(), groupId: created.groupId, windowId,
+        activationId: crypto.randomUUID(), state: 'inactive', revision: 0, ackRevision: 0,
+        tabs: new Map(), excluded: new Set(), previouslyExcluded: new Set(), tasks: [], running: 0, seen: new Set() };
+      this.workspaces.set(workspace.id, workspace);
+    }
+    if (workspace.state === 'active') return;
+    workspace.activationId = crypto.randomUUID();
+    workspace.state = 'active'; workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
+    await this.refreshWorkspace(workspace);
+    await this.sync(workspace);
+    await this.adapter.api.tabGroups.update(workspace.groupId, { color: 'blue', collapsed: false });
+    this.changed();
   }
 
-  async end(targetId, reason, announce = true, retainProtection = false, close = false) {
-    if (!END_REASONS.has(reason)) fail('INVALID_ARGUMENT');
-    const grant = this.grants.get(targetId);
-    if (!grant) return;
-    // Disable authority synchronously, before any browser/API cleanup awaits.
-    this.grants.delete(targetId);
-    grant.state = 'ended';
-    this.history.record('sharing_ended', { target_id: targetId, client_id: grant.client_id, code: reason });
-    void this.adapter.closeActionWindow?.(targetId);
-    const indicatorToken = grant.indicatorCleanupToken || grant.indicatorToken;
-    grant.indicatorToken = null;
-    this.changed();
-    for (const queued of grant.queue.splice(0)) {
-      queued.cancelled = true;
-      queued.abort?.();
-      this.history.record(queued.state === 'executing' ? 'failed' : 'cancelled', {
-        target_id: targetId, request_id: queued.message.request_id, operation: queued.message.operation,
-        code: queued.state === 'executing' ? 'OUTCOME_UNKNOWN' : 'APPROVAL_REQUIRED',
-      });
-      this.result(queued.message, { code: queued.state === 'executing' ? 'OUTCOME_UNKNOWN' : 'APPROVAL_REQUIRED' });
-      this.releasePreview(grant, queued);
-    }
-    if (announce && this.connection) {
-      try {
-        this.send({ type: 'grant.end', target_id: targetId,
-          reason: LOCAL_END_REASONS.has(reason) ? reason : 'HANDOFF' });
-      } catch (error) {
-        this.report(error);
-      }
-    }
-    this.busyTabs.add(grant.tabId);
-    let closeError;
-    if (close) {
-      try { await this.adapter.closeWorkspace(grant.tabId, grant.windowId); }
-      catch (error) { closeError = error; this.report(error); }
-    }
-    const cleanup = this.adapter.release(grant.tabId, { retainProtection, indicatorToken });
-    this.teardowns.add(cleanup);
-    try {
-      await cleanup;
-    } catch (error) {
-      this.report(error);
-    } finally {
-      this.teardowns.delete(cleanup);
-      // An in-progress approval still owns this tab until its own finally block.
-      this.busyTabs.delete(grant.tabId);
-    }
-    if (reason === 'HANDOFF') this.notify('Human handoff required',
-      'This protected page cannot be shared. Prior/scheduled JavaScript is not undone.');
-    else if (['OUTCOME_UNKNOWN', 'BROWSER_OFFLINE', 'CAPABILITY_UNAVAILABLE'].includes(reason)) {
-      this.notify('Browser control ended',
-        `${reason}. New access is stopped. Close the workspace to end its document scripts; sent requests and site background workers cannot be undone.`);
-    }
-    this.changed();
-    if (closeError) throw closeError;
+  async sync(workspace) {
+    if (!this.connection) return;
+    const connection = this.connection;
+    const message = {
+      origin: this.config.service_origin, ...connection, workspace_id: workspace.id,
+      activation_id: workspace.activationId, group_id: workspace.groupId, window_id: workspace.windowId,
+      state: workspace.state, revision: ++workspace.revision,
+      lease_ms: WORKSPACE_LEASE_MS,
+      tabs: workspace.state === 'active' ? [...workspace.tabs.values()].sort((a, b) => a.tabId - b.tabId).map(tab => ({
+        target_id: tab.targetId, tab_id: tab.tabId, title: tab.title, url: tab.url,
+        page_state: tab.pageState, capabilities: tab.pageState === 'navigation_only' || tab.pageState === 'unavailable'
+          ? ['navigate'] : [...this.adapter.capabilities()],
+      })) : [],
+    };
+    const signature = await sign(this.record.privateKey, workspacePayload(message));
+    if (this.connection !== connection || this.workspaces.get(workspace.id) !== workspace ||
+        workspace.revision !== message.revision || workspace.state !== message.state ||
+        workspace.activationId !== message.activation_id) return;
+    this.send({ ...message, type: 'workspace.sync', signature });
+    return message.revision;
   }
 
-  async updateIndicator(grant) {
-    if (grant.state !== 'active' || this.grants.get(grant.target_id) !== grant || !this.adapter.indicator) return;
-    const token = crypto.randomUUID();
-    const documentGeneration = grant.documentGeneration;
-    grant.indicatorToken = token;
-    grant.indicatorCleanupToken = token;
-    try {
-      const document = await this.adapter.indicator(grant.tabId, {
-        target_id: grant.target_id, token, label: grant.client_label,
-        command: grant.queue[0] ? {
-          request_id: grant.queue[0].message.request_id, description: grant.queue[0].message.description,
-          operation: grant.queue[0].message.operation, state: grant.queue[0].state,
-          summary: grant.queue[0].preview?.summary || [],
-          preparing: grant.queue[0].preparing === true,
-        } : null,
-      });
-      if (!document) {
-        if (grant.indicatorToken === token) {
-          grant.indicatorToken = null;
-          grant.indicatorUnavailable = false;
-          this.changed();
+  async refreshWorkspace(workspace) {
+    if (workspace.refreshing) return workspace.refreshing;
+    const work = this.scanWorkspace(workspace);
+    workspace.refreshing = work;
+    try { await work; } finally { if (workspace.refreshing === work) workspace.refreshing = null; }
+  }
+
+  async scanWorkspace(workspace) {
+    if (workspace.state !== 'active') return;
+    const activation = workspace.activationId;
+    if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive'); return; }
+    const group = await this.adapter.api.tabGroups.get(workspace.groupId);
+    if (group.windowId !== workspace.windowId) { await this.stopWorkspace(workspace, 'inactive'); return; }
+    const tabs = await this.adapter.api.tabs.query({ groupId: workspace.groupId });
+    for (const [tabId, tab] of workspace.tabs) {
+      if (!tabs.some(current => current.id === tabId)) this.dropTab(workspace, tab, 'TAB_NOT_IN_WORKSPACE');
+    }
+    for (const excluded of workspace.excluded) {
+      if (!tabs.some(tab => tab.id === excluded)) workspace.previouslyExcluded.add(excluded);
+    }
+    for (const current of tabs) {
+      if (workspace.tabs.has(current.id)) {
+        const tab = workspace.tabs.get(current.id);
+        const currentUrl = current.pendingUrl || current.url || '';
+        if (/^https?:/.test(currentUrl)) {
+          try { navigationUrl(currentUrl, this.protectedOrigins()); }
+          catch {
+            this.dropTab(workspace, tab, 'HANDOFF_REQUIRED');
+            continue;
+          }
+          if (this.adapter.browserName === 'chrome' && !this.adapter.attached.has(tab.tabId)) {
+            await this.adapter.attach(tab.tabId);
+          }
         }
+        tab.title = (current.title || 'Untitled').slice(0, 160);
+        const navigatingOld = tab.navigation && currentUrl === tab.navigation.from && currentUrl !== tab.navigation.url;
+        if (!navigatingOld) tab.url = currentUrl.slice(0, 2048);
+        if (navigatingOld) continue;
+        if (!/^https?:/.test(currentUrl)) tab.pageState = 'navigation_only';
+        else if ((tab.pageState === 'loading' || tab.pageState === 'navigation_only') && current.status === 'complete') {
+          tab.pageState = 'ready';
+        }
+        continue;
+      }
+      if (this.adapter.createdTabs.has(current.id)) workspace.excluded.add(current.id);
+      if (workspace.previouslyExcluded.has(current.id)) {
+        workspace.excluded.delete(current.id); this.adapter.createdTabs.delete(current.id);
+      }
+      if (workspace.excluded.has(current.id)) continue;
+      if (workspace.tabs.size >= WORKSPACE_TAB_LIMIT) { this.report(new Error('TAB_LIMIT_REACHED')); continue; }
+      const url = current.pendingUrl || current.url || '';
+      let ordinary = false;
+      try { navigationUrl(url, this.protectedOrigins()); ordinary = true; }
+      catch {
+        if (/^https?:/.test(url)) continue;
+      }
+      const tab = { targetId: crypto.randomUUID(), tabId: current.id, groupId: workspace.groupId,
+        windowId: workspace.windowId, title: (current.title || 'Untitled').slice(0, 160), url: url.slice(0, 2048),
+        pageState: ordinary ? (current.status === 'loading' ? 'loading' : 'ready') : 'navigation_only',
+        protected_origins: this.protectedOrigins(), queue: [], documentGeneration: 0 };
+      await this.adapter.protect(tab.tabId, tab.protected_origins);
+      if (ordinary) await this.adapter.attach(tab.tabId);
+      if (workspace.state !== 'active' || workspace.activationId !== activation ||
+          !await this.adapter.panelOpen(workspace.windowId)) {
+        await this.adapter.release(tab.tabId);
         return;
       }
-      if (this.grants.get(grant.target_id) !== grant || grant.documentGeneration !== documentGeneration ||
-          grant.indicatorToken !== token) {
-        await this.adapter.removeIndicator?.(grant.tabId, token);
-        return;
-      }
-      grant.indicatorDocument = document;
-      grant.indicatorUnavailable = false;
-      this.changed();
-    } catch {
-      if (this.grants.get(grant.target_id) === grant && grant.documentGeneration === documentGeneration &&
-          grant.indicatorToken === token) {
-        grant.indicatorUnavailable = true;
-        this.report(new Error('INDICATOR_UNAVAILABLE'));
-      }
+      workspace.tabs.set(tab.tabId, tab);
+      this.adapter.controlledTabs?.add(tab.tabId);
+      this.history.record('sharing_started', { target_id: tab.targetId, client_id: this.connection?.client_id });
     }
   }
 
-  pageGrant(message, sender, extensionId) {
-    const grant = this.grants.get(message?.target_id);
-    if (message?.type !== 'page.stop' || sender?.id !== extensionId || sender.frameId !== 0 ||
-        !grant || grant.state !== 'active' || sender.tab?.id !== grant.tabId ||
-        !grant.indicatorToken || message.token !== grant.indicatorToken ||
-        !grant.indicatorDocument || sender.url !== grant.indicatorDocument.url ||
-        (grant.indicatorDocument.documentId && sender.documentId !== grant.indicatorDocument.documentId)) fail('NOT_AUTHORIZED');
-    return grant;
-  }
-
-  stopFromPage(message, sender, extensionId) {
-    if (message?.type !== 'page.stop') fail('NOT_AUTHORIZED');
-    return this.end(this.pageGrant(message, sender, extensionId).target_id, 'OWNER_PAUSED', true, false, true);
-  }
-
-  decisionFromPage(message, sender, extensionId) {
-    fail('NOT_AUTHORIZED');
-  }
-
-  result(message, error, result) {
-    if (!this.connection || message.epoch !== this.connection.epoch ||
-        message.tenant_id !== this.connection.tenant_id ||
-        message.connection_id !== this.connection.connection_id) return;
+  async refresh() {
+    if (this.syncing) return;
+    this.syncing = true;
     try {
-      this.send({ type: 'result', request_id: message.request_id, target_id: message.target_id,
-        ...(error ? { error } : { result }) });
-    } catch (sendError) {
-      this.report(sendError);
+      for (const workspace of this.workspaces.values()) {
+        try {
+          await this.refreshWorkspace(workspace);
+          if (workspace.state === 'active') {
+            workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
+            await this.sync(workspace);
+          }
+        } catch (error) {
+          await this.stopWorkspace(workspace, 'inactive');
+          this.report(error);
+        }
+      }
+    } finally { this.syncing = false; this.changed(); }
+  }
+
+  dropTab(workspace, tab, code, retainProtection = false) {
+    workspace.tabs.delete(tab.tabId);
+    this.adapter.controlledTabs?.delete(tab.tabId);
+    for (const task of [...tab.queue]) this.finishTask(workspace, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : code });
+    const cleanup = this.adapter.release(tab.tabId, { retainProtection }).catch(error => this.report(error));
+    this.endingTasks.add(cleanup); void cleanup.finally(() => this.endingTasks.delete(cleanup));
+    this.history.record('sharing_ended', { target_id: tab.targetId, code });
+  }
+
+  async stopWorkspace(workspace, state = 'inactive') {
+    workspace.state = state; workspace.localLease = 0;
+    for (const tab of [...workspace.tabs.values()]) this.dropTab(workspace, tab,
+      state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
+    for (const task of [...workspace.tasks]) this.finishTask(workspace, null, task,
+      { code: task.executing ? 'OUTCOME_UNKNOWN' : state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE' });
+    this.changed();
+    await this.sync(workspace);
+    await this.adapter.api.tabGroups.update(workspace.groupId, { color: 'grey' });
+  }
+
+  check(workspace, tab, task, after = false) {
+    if (workspace.state !== 'active') fail(workspace.state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
+    if (workspace.localLease <= this.now() || !this.connection) fail('WORKSPACE_INACTIVE');
+    if (task.message.activation_id !== workspace.activationId || task.message.workspace_id !== workspace.id) fail('WORKSPACE_INACTIVE');
+    if (task.cancelled || (tab && workspace.tabs.get(tab.tabId) !== tab)) fail('TAB_NOT_IN_WORKSPACE');
+    if (task.deadline <= this.now()) fail(task.executing ? 'OUTCOME_UNKNOWN' : 'COMMAND_EXPIRED');
+    if (tab && task.documentGeneration !== tab.documentGeneration &&
+        !['wait_for_page', 'request_handoff'].includes(task.message.operation) &&
+        !(after && ['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'].includes(task.message.operation))) {
+      fail('TARGET_STALE');
     }
+    checkBinding(task.message, this.connection);
   }
 
   enqueue(message) {
-    let grant;
+    const workspace = this.workspaces.get(message.workspace_id);
+    let tab, task;
     try {
-      message = { ...message, expires_at: localDeadline(message, 'wait_timeout_ms', HUMAN_WAIT_MS, this.now()) };
-      grant = this.grants.get(message.target_id);
-      if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-      validateCommand(message, grant, this.connection, this.protectedOrigins(), this.now());
-      if (grant.queue.length >= MAX_QUEUE) fail('QUEUE_FULL');
-      if (grant.seen?.has(message.request_id)) fail('INVALID_MESSAGE');
-      grant.seen ||= new Set();
-      if (grant.seen.size >= 10_000) fail('QUEUE_FULL');
-      grant.seen.add(message.request_id);
-      grant.queue.push({ message, deadline: message.expires_at, state: 'pending',
-        documentGeneration: grant.documentGeneration });
-      this.history.record('command_requested', { target_id: grant.target_id, request_id: message.request_id,
-        client_id: grant.client_id, operation: message.operation });
-      this.present(grant);
-    } catch (error) {
-      this.result(message, { code: errorCode(error) });
-    }
-  }
-
-  present(grant) {
-    const queued = grant.queue[0];
-    if (queued?.state === 'pending' && !queued.preview && this.adapter.prepareAction) {
-      if (!queued.preparing) {
-        queued.preparing = true;
-        void this.prepareQueued(grant, queued);
-      }
-    }
-    if (queued?.state === 'pending' && !queued.preparing && grant.allowAll && queued.message.operation !== 'request_handoff') {
-      try { this.decide(grant.target_id, queued.message.request_id, 'approve', true); }
-      catch (error) { this.report(error); }
-    }
-    if (queued?.state === 'pending' && grant.presentedRequest !== queued.message.request_id) {
-      grant.presentedRequest = queued.message.request_id;
-      void this.adapter.actionWindow?.(grant.target_id).catch(() => this.report(new Error('INDICATOR_UNAVAILABLE')));
-    } else if (!queued) {
-      grant.presentedRequest = null;
-      void this.adapter.closeActionWindow?.(grant.target_id);
-    }
-    void this.updateIndicator(grant);
-    this.changed();
-  }
-
-  async prepareQueued(grant, queued) {
-    const preparingGeneration = grant.documentGeneration;
-    try {
-      const check = () => {
-        if (this.grants.get(grant.target_id) !== grant || !grant.queue.includes(queued) || queued.cancelled) fail('APPROVAL_REQUIRED');
-        if (queued.deadline <= this.now()) fail('COMMAND_EXPIRED');
-        if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-      };
-      const preview = await this.adapter.prepareAction(grant, queued.message.operation, queued.message.args, check);
-      if (this.grants.get(grant.target_id) !== grant || !grant.queue.includes(queued) ||
-          queued.cancelled || (!followsNavigation(queued.message.operation) &&
-          grant.documentGeneration !== queued.documentGeneration)) {
-        await this.adapter.releaseAction?.(grant, preview);
-        return;
-      }
-      if (canRefreshReadPreview(queued.message) && grant.documentGeneration !== preparingGeneration) {
-        await this.adapter.releaseAction?.(grant, preview);
-        queued.preparing = false;
-        this.present(grant);
-        return;
-      }
-      queued.preview = preview;
-      queued.preparing = false;
-      this.present(grant);
-    } catch (error) {
-      queued.preparing = false;
-      if (this.grants.get(grant.target_id) === grant && grant.queue.includes(queued)) {
-        if (canRefreshReadPreview(queued.message) && grant.documentGeneration !== preparingGeneration &&
-            ['TARGET_STALE', 'PAGE_UNAVAILABLE', 'WAIT_TIMEOUT'].includes(errorCode(error))) {
-          this.present(grant);
-          return;
-        }
-        this.finishQueued(grant, queued, { code: errorCode(error), ...inspectionErrorDetails(error) });
-        if (errorCode(error) === 'PAGE_UNAVAILABLE') {
-          await this.end(grant.target_id, 'CAPABILITY_UNAVAILABLE');
-        }
-      }
-    }
-  }
-
-  decide(targetId, requestId, action, automatic = false) {
-    const grant = this.grants.get(targetId);
-    const queued = grant?.queue[0];
-    if (!grant || grant.state !== 'active' || queued?.message.request_id !== requestId ||
-        queued.state !== 'pending' || (queued.preparing && action !== 'decline')) fail('APPROVAL_REQUIRED');
-    if (!['approve', 'decline', 'allow_all', 'done'].includes(action)) fail('INVALID_ARGUMENT');
-    const human = queued.message.operation === 'request_handoff';
-    if ((human && !['done', 'decline'].includes(action)) ||
-        (!human && action === 'done')) fail('INVALID_ARGUMENT');
-    if (action === 'decline') {
-      this.history.record('declined', { target_id: targetId, request_id: requestId, operation: queued.message.operation });
-      this.finishQueued(grant, queued, { code: 'ACTION_DECLINED' });
-      return;
-    }
-    try {
-      validateCommand(queued.message, grant, this.connection, this.protectedOrigins(), this.now());
-      if (!followsNavigation(queued.message.operation) && queued.documentGeneration !== grant.documentGeneration) fail('TARGET_STALE');
-      if (followsNavigation(queued.message.operation)) queued.documentGeneration = grant.documentGeneration;
-      if (action === 'allow_all') grant.allowAll = true;
-      this.history.record(automatic ? 'auto_approved' : 'approved',
-        { target_id: targetId, request_id: requestId, operation: queued.message.operation,
-          ...(action === 'allow_all' ? { code: 'ALLOW_ALL_ENABLED' } : {}) });
-      queued.state = 'ready';
-      this.send({ type: 'command.ready', request_id: requestId, target_id: targetId });
-      this.present(grant);
-    } catch (error) {
-      this.finishQueued(grant, queued, { code: errorCode(error) });
-    }
-  }
-
-  finishQueued(grant, queued, error, value) {
-    if (queued.cancelled || !grant.queue.includes(queued)) return;
-    grant.queue.splice(grant.queue.indexOf(queued), 1);
-    this.result(queued.message, error, value);
-    this.history.record(error ? 'failed' : 'completed', { target_id: grant.target_id,
-      request_id: queued.message.request_id, operation: queued.message.operation, code: error?.code });
-    this.releasePreview(grant, queued);
-    this.present(grant);
-  }
-
-  releasePreview(grant, queued) {
-    if (queued.previewReleased) return;
-    queued.previewReleased = true;
-    void this.adapter.releaseAction?.(grant, queued.preview).catch(error => this.report(error));
-  }
-
-  cancelCommand(message) {
-    id(message.request_id);
-    id(message.target_id);
-    const grant = this.grants.get(message.target_id);
-    const queued = grant?.queue.find(item => item.message.request_id === message.request_id);
-    if (!queued) return;
-    this.history.record('cancelled', { target_id: grant.target_id, request_id: message.request_id,
-      operation: queued.message.operation });
-    if (queued.state === 'executing') {
-      void this.end(grant.target_id, 'OUTCOME_UNKNOWN');
-    } else {
-      queued.cancelled = true;
-      grant.queue.splice(grant.queue.indexOf(queued), 1);
-      this.releasePreview(grant, queued);
-      this.present(grant);
-    }
-  }
-
-  executeReady(message) {
-    id(message.request_id);
-    id(message.target_id);
-    const grant = this.grants.get(message.target_id);
-    const queued = grant?.queue[0];
-    // Late execute after local cancellation/stop never revives authority.
-    if (!queued || queued.message.request_id !== message.request_id) return;
-    if (queued.state !== 'ready') fail('APPROVAL_REQUIRED');
-    let deadline;
-    try {
-      deadline = localDeadline(message, 'execution_timeout_ms', EXECUTION_MS, this.now());
-      if (deadline > this.now() + EXECUTION_MS) fail('INVALID_MESSAGE');
-    } catch (error) {
-      this.report(error);
-      this.finishQueued(grant, queued, { code: errorCode(error) });
-      return;
-    }
-    if (queued.deadline <= this.now() || deadline <= this.now()) {
-      this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
-      return;
-    }
-    if (!followsNavigation(queued.message.operation) &&
-        queued.documentGeneration !== grant.documentGeneration) {
-      this.finishQueued(grant, queued, { code: 'TARGET_STALE' });
-      return;
-    }
-    queued.executionDeadline = deadline;
-    queued.state = 'executing';
-    this.present(grant);
-    void this.runCommand(grant, queued);
-  }
-
-  async runCommand(grant, queued) {
-    const { message } = queued;
-    let timer;
-    const checkCurrent = (after = false) => {
-      if (queued.cancelled || this.grants.get(grant.target_id) !== grant ||
-          this.generation !== grant.generation) fail('APPROVAL_REQUIRED');
-      if (this.now() - this.lastPing >= LIVENESS_MS) fail('BROWSER_OFFLINE');
-      checkBinding(message, this.connection);
-      if (this.now() >= queued.executionDeadline) fail('OUTCOME_UNKNOWN');
-      if (!followsNavigation(message.operation) &&
-          (!after || !['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'].includes(message.operation)) &&
-          grant.documentGeneration !== queued.documentGeneration) fail('TARGET_STALE');
-    };
-    try {
-      checkCurrent();
-      this.history.record('execution_started', { target_id: grant.target_id, request_id: message.request_id,
+      if (!workspace || workspace.activationId !== message.activation_id ||
+          message.client_id !== this.connection.client_id || workspace.ackRevision === 0) fail('WORKSPACE_INACTIVE');
+      if (!validDescription(message.description)) fail('INVALID_ARGUMENT');
+      id(message.request_id);
+      if (workspace.seen.has(message.request_id)) fail('INVALID_MESSAGE');
+      if (workspace.seen.size >= 4096) fail('QUEUE_FULL');
+      const create = message.operation === 'create_workspace_tab';
+      if (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)) fail('INVALID_ARGUMENT');
+      tab = create ? null : [...workspace.tabs.values()].find(tab => tab.targetId === message.target_id);
+      if (!create && !tab) fail('TAB_NOT_IN_WORKSPACE');
+      if (create) {
+        if (message.target_id !== workspace.id || Object.keys(message.args).some(key => key !== 'url')) fail('INVALID_ARGUMENT');
+        if (message.args.url !== undefined && typeof message.args.url !== 'string') fail('INVALID_ARGUMENT');
+        if (message.args.url) navigationUrl(message.args.url, this.protectedOrigins());
+      } else if (!validOperationArgs(message.operation, message.args)) fail('INVALID_ARGUMENT');
+      const duration = message.wait_timeout_ms;
+      if (!Number.isSafeInteger(duration) || duration <= 0 || duration > 600000) fail('INVALID_MESSAGE');
+      task = { message, human: message.operation === 'request_handoff', deadline: this.now() + duration,
+        documentGeneration: tab?.documentGeneration, executing: false, cancelled: false };
+      this.check(workspace, tab, task);
+      const queue = tab?.queue || workspace.tasks;
+      if (queue.length >= 16 || queue.some(old => old.message.request_id === message.request_id)) fail('QUEUE_FULL');
+      queue.push(task);
+      workspace.seen.add(message.request_id);
+      this.history.record('command_requested', { target_id: message.target_id, request_id: message.request_id,
         operation: message.operation });
-      if (message.operation === 'request_handoff') {
-        this.finishQueued(grant, queued, null, { state: 'completed', user_confirmed: true });
+      if (task.human) {
+        this.notificationTasks.set(message.request_id, { workspace, tab, task });
+        void this.groupColor(workspace).catch(error => this.report(error));
+        void this.notify(message.request_id).catch(error => {
+          this.report(error);
+          this.finishTask(workspace, tab, task, { code: 'NOTIFICATION_UNAVAILABLE' });
+        });
+      }
+      this.drain(workspace); this.changed();
+    } catch (error) { this.result(message, { code: errorCode(error) }); }
+  }
+
+  drain(workspace) {
+    if (workspace.state !== 'active' || workspace.running >= WORKSPACE_CONCURRENCY) return;
+    for (const tab of [null, ...workspace.tabs.values()]) {
+      const task = (tab?.queue || workspace.tasks)[0];
+      if (!task || task.preparing || task.ready || task.executing || task.human) continue;
+      task.preparing = true;
+      void this.prepare(workspace, tab, task).catch(error => this.report(error));
+    }
+  }
+
+  async prepare(workspace, tab, task) {
+    try {
+      this.check(workspace, tab, task);
+      if (!await this.adapter.panelOpen(workspace.windowId)) fail('WORKSPACE_INACTIVE');
+      if (tab) {
+        task.preview = await this.adapter.prepareAction(tab, task.message.operation, task.message.args,
+          () => this.check(workspace, tab, task));
+        this.check(workspace, tab, task);
+        if (task.documentGeneration !== tab.documentGeneration && task.message.operation !== 'wait_for_page') fail('TARGET_STALE');
+      }
+      task.ready = true;
+      this.send({ type: 'command.ready', request_id: task.message.request_id, target_id: task.message.target_id });
+    } catch (error) {
+      if (tab && error.code === 'PAGE_UNAVAILABLE') {
+        this.finishTask(workspace, tab, task, { code: 'DOCUMENT_NOT_CONTROLLABLE', ...inspectionErrorDetails(error) });
+        tab.pageState = 'unavailable'; await this.sync(workspace);
         return;
       }
-      const execution = this.adapter.execute(grant, message.operation, message.args, checkCurrent, queued.preview);
-      const timeout = new Promise((_, reject) => {
-        queued.abort = () => reject(new Error('APPROVAL_REQUIRED'));
-        timer = setTimeout(() => reject(new Error('OUTCOME_UNKNOWN')),
-          Math.max(1, queued.executionDeadline - this.now()));
-      });
-      const value = await Promise.race([execution, timeout]);
-      checkCurrent(true);
-      this.finishQueued(grant, queued, null, boundedResult(value));
+      this.finishTask(workspace, tab, task, { code: error.code === 'PAGE_UNAVAILABLE'
+        ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error) });
+    } finally { task.preparing = false; }
+  }
+
+  async decide(requestId, action) {
+    const entry = this.notificationTasks.get(requestId);
+    if (!entry) fail('COMMAND_EXPIRED');
+    const { workspace, tab, task } = entry;
+    this.check(workspace, tab, task);
+    if (action === 'cancel') return this.finishTask(workspace, tab, task, { code: 'ACTION_DECLINED' });
+    if (action !== 'done' || tab.queue[0] !== task) fail('INVALID_ARGUMENT');
+    task.ready = true;
+    this.send({ type: 'command.ready', request_id: requestId, target_id: tab.targetId });
+  }
+
+  async executeReady(message) {
+    for (const workspace of this.workspaces.values()) {
+      for (const tab of [null, ...workspace.tabs.values()]) {
+        const task = (tab?.queue || workspace.tasks)[0];
+        if (!task || task.message.request_id !== message.request_id || task.message.target_id !== message.target_id) continue;
+        if (!task.ready || task.executing || (!task.human && workspace.running >= WORKSPACE_CONCURRENCY)) {
+          this.finishTask(workspace, tab, task, { code: 'QUEUE_FULL' }); return;
+        }
+        if (!Number.isSafeInteger(message.execution_timeout_ms) || message.execution_timeout_ms > (task.human ? 600000 : 25000) ||
+            message.execution_timeout_ms <= 0) fail('INVALID_MESSAGE');
+        task.deadline = this.now() + message.execution_timeout_ms;
+        task.executing = true;
+        if (!task.human) workspace.running++;
+        let timer;
+        try {
+          this.check(workspace, tab, task);
+          if (!await this.adapter.panelOpen(workspace.windowId)) fail('WORKSPACE_INACTIVE');
+          this.check(workspace, tab, task);
+          this.history.record('execution_started', { request_id: message.request_id, operation: task.message.operation });
+          const operation = task.human ? Promise.resolve({ state: 'completed', user_confirmed: true }) :
+            tab ? this.adapter.execute(tab, task.message.operation, task.message.args,
+              after => this.check(workspace, tab, task, after), task.preview) : this.createTab(workspace, task);
+          const timeout = new Promise((_, reject) => {
+            task.abort = () => reject(Object.assign(new Error('OUTCOME_UNKNOWN'), { code: 'OUTCOME_UNKNOWN' }));
+            timer = setTimeout(task.abort, message.execution_timeout_ms);
+          });
+          const value = await Promise.race([operation, timeout]);
+          this.check(workspace, tab, task, true);
+          if (tab && task.message.operation === 'navigate') await this.sync(workspace);
+          this.finishTask(workspace, tab, task, null, boundedResult(value));
+        } catch (error) {
+          if (tab && error.code === 'PAGE_UNAVAILABLE') {
+            this.finishTask(workspace, tab, task, { code: 'DOCUMENT_NOT_CONTROLLABLE', ...inspectionErrorDetails(error) });
+            tab.pageState = 'unavailable'; await this.sync(workspace);
+          }
+          this.finishTask(workspace, tab, task, { code: error.code === 'PAGE_UNAVAILABLE'
+            ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error), ...waitErrorDetails(error) });
+        } finally {
+          clearTimeout(timer); task.abort = null;
+          if (!task.human) workspace.running--;
+          this.drain(workspace); this.changed();
+        }
+      }
+    }
+  }
+
+  async createTab(workspace, task) {
+    if (workspace.tabs.size + (workspace.creating || 0) >= WORKSPACE_TAB_LIMIT) fail('TAB_LIMIT_REACHED');
+    workspace.creating = (workspace.creating || 0) + 1;
+    let created;
+    try { created = await this.adapter.api.tabs.create({ windowId: workspace.windowId, url: 'about:blank', active: false }); }
+    catch (error) { workspace.creating--; throw error; }
+    try {
+      this.check(workspace, null, task);
+      this.adapter.createdTabs.add(created.id);
+      await this.adapter.api.tabs.group({ groupId: workspace.groupId, tabIds: [created.id] });
+      this.check(workspace, null, task);
+      this.adapter.createdTabs.delete(created.id);
+      workspace.excluded.delete(created.id);
+      await this.refreshWorkspace(workspace);
+      this.check(workspace, null, task);
+      const tab = workspace.tabs.get(created.id);
+      if (!tab) fail('TAB_NOT_IN_WORKSPACE');
+      if (task.message.args.url) await this.adapter.execute(tab, 'navigate', { url: task.message.args.url },
+        () => this.check(workspace, null, task));
+      const revision = await this.sync(workspace);
+      const deadline = this.now() + 3000;
+      while (workspace.ackRevision < revision) {
+        this.check(workspace, null, task);
+        if (this.now() >= deadline) fail('OUTCOME_UNKNOWN');
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return { target_id: tab.targetId, tab_handle: tab.targetId, workspace_id: workspace.id };
     } catch (error) {
-      const code = errorCode(error);
-      if (!queued.cancelled && this.grants.get(grant.target_id) === grant) {
-        // Invalidate authority before advancing another queued action.
-        if (code === 'OUTCOME_UNKNOWN' || code === 'PAGE_UNAVAILABLE') {
-          this.result(message, { code, ...inspectionErrorDetails(error) });
-          grant.queue.splice(grant.queue.indexOf(queued), 1);
-          await this.end(grant.target_id, code === 'PAGE_UNAVAILABLE' ? 'CAPABILITY_UNAVAILABLE' : 'OUTCOME_UNKNOWN');
-        } else {
-          this.finishQueued(grant, queued, { code, ...waitErrorDetails(error), ...inspectionErrorDetails(error) });
-          if (code === 'WORKSPACE_CHANGED') await this.end(grant.target_id, 'OWNER_PAUSED');
-        }
-      }
+      const tab = workspace.tabs.get(created.id);
+      if (tab) this.dropTab(workspace, tab, 'TAB_NOT_IN_WORKSPACE');
+      await this.adapter.api.tabs.remove(created.id);
+      throw error;
     } finally {
-      clearTimeout(timer);
-      queued.abort = null;
-      this.releasePreview(grant, queued);
+      workspace.creating--;
     }
   }
 
-  tabEvent(tabId, type, url) {
-    if (this.toolbarIntent?.tabId === tabId && type !== 'complete') this.toolbarIntent = null;
-    for (const grant of this.grants.values()) {
-      if (grant.tabId !== tabId) continue;
-      if (type === 'navigation') {
-        this.history.record('navigation', { target_id: grant.target_id });
-        grant.documentGeneration++;
-        grant.indicatorToken = null;
-        grant.indicatorDocument = null;
-        let refresh = false;
-        for (const queued of [...grant.queue]) {
-          if (queued.state !== 'executing' && !followsNavigation(queued.message.operation)) {
-            if (queued.state === 'pending' && canRefreshReadPreview(queued.message)) {
-              this.releasePreview(grant, queued);
-              queued.preview = null;
-              queued.previewReleased = false;
-              queued.documentGeneration = grant.documentGeneration;
-              refresh = true;
-            } else this.finishQueued(grant, queued, { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
-          }
-        }
-        if (url) {
-          let protectedPage = true;
-          let protectedOrigin = false;
-          try {
-            const page = new URL(url);
-            protectedOrigin = this.protectedOrigins().includes(page.origin);
-            protectedPage = !['http:', 'https:'].includes(page.protocol) || protectedOrigin;
-          } catch (error) {
-            this.report(error);
-          }
-          if (protectedPage) {
-            void this.end(grant.target_id, 'HANDOFF', true, protectedOrigin);
-          }
-        }
-        if (refresh && this.grants.get(grant.target_id) === grant) this.present(grant);
-      } else if (type === 'complete') {
-        void this.updateIndicator(grant);
-      } else {
-        if (type === 'workspace_changed') this.history.record('workspace_changed', { target_id: grant.target_id });
-        let reason = 'OWNER_PAUSED';
-        if (type === 'protected_pending') reason = 'HANDOFF';
-        else if (type === 'closed') reason = 'TARGET_CLOSED';
-        void this.end(grant.target_id, reason, true, type === 'protected_pending');
-      }
-    }
+  finishTask(workspace, tab, task, error, value) {
+    if (task.cancelled) return;
+    task.cancelled = true; task.abort?.();
+    const queue = tab?.queue || workspace.tasks;
+    const index = queue.indexOf(task);
+    if (index >= 0) queue.splice(index, 1);
+    this.result(task.message, error, value);
+    this.notificationTasks.delete(task.message.request_id);
+    void this.groupColor(workspace).catch(error => this.report(error));
+    void this.clearNotification(task.message.request_id).catch(error => this.report(error));
+    if (tab && task.preview) void this.adapter.releaseAction(tab, task.preview).catch(error => this.report(error));
+    this.history.record(error ? 'failed' : 'completed', { request_id: task.message.request_id,
+      operation: task.message.operation, code: error?.code });
+    this.drain(workspace); this.changed();
   }
 
-  tick() {
-    const enrollment = this.record?.enrollment;
-    if (enrollment && !this.enrollmentPolling && enrollment.expires_at > this.now() &&
-        this.now() - this.lastEnrollmentPoll >= 2000) {
-      this.enrollmentPolling = true;
-      this.lastEnrollmentPoll = this.now();
-      void this.enrollmentStatus().catch(error => {
-        if (this.record?.enrollment === enrollment) this.report(error);
-      }).finally(() => { this.enrollmentPolling = false; });
-    }
-    if (this.socket && this.now() - this.lastPing >= LIVENESS_MS) {
-      this.loseConnection(this.socket, this.generation);
-    }
-    for (const [requestId, request] of this.pending) {
-      if (request.expires_at <= this.now()) {
-        this.pending.delete(requestId);
-        void this.adapter.closeRequestWindow?.(requestId);
-        this.changed();
-      }
-    }
-    for (const grant of this.grants.values()) {
-      for (const queued of [...grant.queue]) {
-        if (queued.state !== 'executing' && queued.deadline <= this.now()) {
-          this.finishQueued(grant, queued, { code: 'COMMAND_EXPIRED' });
-        }
-      }
-      if (grant.state === 'awaiting_ack' && grant.ackDeadline <= this.now()) {
-        void this.end(grant.target_id, 'OWNER_PAUSED');
-      }
-    }
+  result(message, error, value) {
+    if (!this.connection || message.connection_id !== this.connection.connection_id) return;
+    try { this.send({ type: 'result', request_id: message.request_id, target_id: message.target_id,
+      ...(error ? { error } : { result: value }) }); }
+    catch (failure) { this.report(failure); }
   }
 
-  loseConnection(socket, generation, reconnect = true) {
+  async groupColor(workspace) {
+    const human = [...this.notificationTasks.values()].some(entry => entry.workspace === workspace);
+    let color = 'grey';
+    if (workspace.state === 'active') color = human ? 'yellow' : 'blue';
+    await this.adapter.api.tabGroups.update(workspace.groupId, { color });
+  }
+
+  async tick() {
+    if (this.socket && this.now() - this.lastPing >= LIVENESS_MS) this.loseConnection(this.socket, this.generation);
+    if (this.pairing && !this.polling && this.pairing.expires_at > this.now()) {
+      this.polling = true;
+      try { await this.pairingStatus(); } finally { this.polling = false; }
+    }
+    for (const workspace of this.workspaces.values()) for (const tab of workspace.tabs.values()) {
+      for (const task of [...tab.queue]) if (task.deadline <= this.now()) {
+        this.finishTask(workspace, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : 'COMMAND_EXPIRED' });
+      }
+    }
+    if (this.connection) await this.refresh();
+  }
+
+  loseConnection(socket, generation) {
     if (!this.current(socket, generation)) return;
-    this.socket = null;
-    this.connection = null;
-    this.challenge = null;
-    this.phase = 'disconnected';
-    this.toolbarIntent = null;
-    this.eligibleClients = [];
-    this.history.record('disconnected');
-    this.generation++;
-    for (const requestId of this.pending.keys()) void this.adapter.closeRequestWindow?.(requestId);
-    this.pending.clear();
-    for (const grant of [...this.grants.values()]) void this.end(grant.target_id, 'BROWSER_OFFLINE', false);
-    socket.close();
-    if (reconnect && this.config.enabled && this.reconnectAttempts < 6) {
-      const delay = Math.min(30_000, 1000 * 2 ** this.reconnectAttempts++);
-      this.reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.connection = null; this.socket = null; this.phase = 'disconnected'; this.generation++;
+    for (const workspace of this.workspaces.values()) {
+      void this.stopWorkspace(workspace, 'inactive').catch(error => this.report(error));
     }
-    this.changed();
+    socket.close(); this.history.record('disconnected'); this.changed();
+    if (this.config.enabled) this.reconnectTimer = setTimeout(() => this.connect(), 2000);
   }
 
   async disconnect() {
-    this.config.enabled = false;
-    clearTimeout(this.reconnectTimer);
-    const ending = [...this.grants.values()].map(grant =>
-      this.end(grant.target_id, 'BROWSER_OFFLINE', false, false, true));
-    if (this.socket) this.loseConnection(this.socket, this.generation, false);
-    else this.generation++;
-    for (const requestId of this.pending.keys()) void this.adapter.closeRequestWindow?.(requestId);
-    this.pending.clear();
-    await Promise.all(ending);
-    await Promise.allSettled([...this.teardowns]);
+    this.config.enabled = false; clearTimeout(this.reconnectTimer);
+    if (this.socket) this.loseConnection(this.socket, this.generation);
+    for (const workspace of this.workspaces.values()) await this.stopWorkspace(workspace, 'inactive');
+    await Promise.all([...this.endingTasks]);
     await this.storage.set({ config: this.config });
     this.changed();
   }
 
   dispose() {
-    clearInterval(this.timer);
-    clearTimeout(this.reconnectTimer);
-    if (this.socket) this.loseConnection(this.socket, this.generation, false);
+    clearInterval(this.timer); clearTimeout(this.reconnectTimer);
+    this.config.enabled = false;
+    if (this.socket) this.loseConnection(this.socket, this.generation);
   }
 }

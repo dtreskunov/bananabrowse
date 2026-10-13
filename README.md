@@ -1,190 +1,103 @@
-# DomAgent collaborative browsing beta
+# DomAgent grouped browser workspaces
 
-Share a browser tab you choose with an MCP application. DomAgent is an independent
-tenant-scoped service with OIDC sign-in and Chrome/Firefox extensions. It does not
-depend on a particular agent application or credential manager.
+An independent, client-isolated MCP service and Chrome/Firefox extension.
+Work on real browser tabs in the background while the user browses elsewhere.
+Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
-## Install and connect
+## Version and upgrade
 
-Download your browser's compiled ZIP from
-[v4.3.0-beta.3](https://github.com/dtreskunov/domagent/releases/tag/v4.3.0-beta.3)
-and extract all files.
+Service **5.0.0-beta.1**, extensions **5.0.0**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.1).
+Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
+Never disable production browser signature/security checks.
 
-- Firefox: `about:debugging#/runtime/this-firefox` -> **Load Temporary Add-on** ->
-  extracted `manifest.json`. Unsigned temporary installs disappear on restart;
-  do not disable signature verification.
-- Chrome: `chrome://extensions` -> Developer mode -> **Load unpacked** ->
-  extracted directory.
+This is a breaking upgrade from the single-tab v4 approval model. Migrate existing
+schema2 explicitly, preserve IDs/keys/credentials and update the extension in place.
+See [migration](docs/V5-MIGRATION.md). Old browser wire versions are rejected.
 
-Installation opens the one-link setup wizard. Paste your public
-`https://your-server/join/<tenant>` link, sign in on the page opened by the
-extension, and approve. The browser connects automatically. No tab is shared yet.
+## Fresh install
 
-Multiple saved connections have one active connection. Firefox uses a persistent
-MV2 background page; Chrome uses an MV3 worker. Neither requires the popup to
-stay open to keep the browser online.
+1. Install the compiled extension and enter the HTTPS DomAgent service domain.
+2. Tell your **already configured, authenticated** MCP agent the short pairing
+   code displayed by the extension. No browser-user DomAgent login is required.
+3. The agent calls `adopt_browser`. Confirm the proposed client locally using
+   **Connect and start workspace**. Browser website permission prompts still apply.
+4. Work starts in a fresh blank tab inside a named `DomAgent - <client>` group,
+   with the native sidebar as a dashboard. Blank/browser-owned pages are
+   navigation-only; no privileged injection is attempted.
 
-## Share a tab you choose
+If the browser does not allow opening its panel after asynchronous setup, click
+the toolbar to start. Pairing itself creates no authority until the native panel
+is open and the workspace explicitly activated.
 
-An agent request notifies/marks the toolbar; remote code cannot open native
-panels without a browser gesture. Click the toolbar to open trusted controls and
-share the selected actual website tab with an unambiguous linked application.
-The tab moves into its own normal window, preserving its document/unsaved state.
-You can also review requests in the native panel. Each tab/window has one handle;
-additional tabs, popups or moving the tab revoke control rather than adopting them.
+The code is an expiring invitation, not an MCP credential. Application provisioning
+and credential-vault configuration remain separate; never paste durable tokens in
+chat or extension settings.
 
-Every action includes an unverified explanation and operation-derived details.
-Review them in Chrome's side panel or Firefox's sidebar, outside the webpage:
+## Grouped-tab consent
 
-**Approve** executes the exact action once. **Decline** rejects it.
-**Allow all while sharing** accepts supported ordinary-page actions for that
-client/tab until sharing ends. There is no capability checklist, no automatic
-user-tab adoption, and no permission for unshared tabs or browser-profile export.
+An **active workspace + open DomAgent sidebar + actual group membership** grants
+access. Ordinary page actions, including arbitrary JavaScript, execute without
+repeated per-action prompts.
 
-The user can interact with the tab at the same time. Human assistance such as
-sign-in uses **Done / Cancel / Stop sharing**, keeping the tab shared while the
-agent waits. Password/CAPTCHA detection no longer automatically revokes control.
-User navigation invalidates stale queued actions, not the sharing relationship.
-Do not automatically retry an uncertain mutation.
+- User-added existing tabs become available; remove them to revoke.
+- The agent can create new background task tabs, up to eight per workspace.
+- Website-created/inherited popups are excluded until explicitly added.
+- Unrelated tabs are not exposed. Two executions across tabs, one per tab.
+- Pause cancels unstarted work. Resume never replays old mutations.
+- Closing/replacing the native sidebar, End, disconnect or stale visibility
+  lease ends authority within its bounded lease; **tabs remain open**.
+- Browser/worker restart restores identity only. Explicit Resume is required.
+- Toolbar/sidebar and supported native tab menus add/remove the clicked tab.
+- Moving a task to its own window is optional and pauses until revalidated.
 
-**Stop sharing** immediately disables authority/pending work and closes the
-controlled tab, losing unsaved state. Explicit Disconnect closes controlled tabs
-too. Unexpected failures/revocations leave the response for manual inspection.
-Local private history keeps at most 200 metadata-only commands/observed events;
-it is not a full audit of arbitrary JavaScript effects. A page
-border/banner is a useful visual cue, not an unspoofable security boundary;
-extension toolbar and native panel state remain independent. No positive
-consent controls exist in webpage DOM; `page.decision` is always rejected.
+Human assistance uses a global system notification and pending toolbar count.
+The user's click takes them to the task; explicit Done/Cancel completes it.
+OS notifications may be suppressed; API delivery failure is explicit.
 
-## MCP application setup
+## MCP surface and limits
 
-Validate `/.well-known/domagent`, create a pending agent setup request with
-`POST /api/setup-requests`, and show the returned short-lived approval link.
-Users authenticated by the configured OIDC provider register automatically.
-Approval creates a separate tenant/client and shows its credential once to the
-operator; status receipts return only public connection/MCP URLs.
+21 tools: adoption, browser/workspace discovery/wait, workspace tab listing and
+creation, human handoff, and the existing 15 page operations.
+Every operation addresses an explicit opaque tab handle; never a current-tab
+default or raw CDP method.
 
-Use the application's own secure credential-management workflow for
-`https://your-server/mcp/<tenant>`. Credentials are tenant-scoped and never
-belong in chat. Device WSS is `/extension/<tenant>`.
+Useful explanations are required: at least 40 trimmed Unicode code points,
+at most 500 raw code points. Routine page calls have no human-approval timeout;
+element/page readiness and bounded execution/cancellation still apply.
 
-`request_browser_access` now waits for the user to share a tab.
-Sharing, all page operations and `request_handoff` require `description`:
-at least 40 characters after trimming, maximum 500. Describe useful intent;
-length alone is not a consent security proof.
-Human waits default to five minutes, configurable up to ten; execution then
-has a separate 25-second budget. Configure actual MCP client, proxy, and network
-timeouts accordingly. A 600-second client timeout is suitable for the default
-300-second human wait, not a full 600-second wait plus execution.
-Tool-call responses stream SSE with heartbeat comments during human waits;
-initialization/discovery remain JSON-compatible. Use an MCP-aware client.
+Snapshots/reads default to 4000 characters, 50 elements, 16KiB textual MCP content
+wrapper; hard limit64KiB and inspector4KiB. Truncation is explicit. Scripts and
+mutation receipts fail oversized rather than returning partial JSON.
+Ref/document bindings, actionability checks, DOM-only input and CSP refusals remain.
 
-See [collaborative protocol details](docs/COLLABORATIVE-BROWSING.md).
+Uninspectable viewers report `DOCUMENT_NOT_CONTROLLABLE` with safe diagnostics
+and reduced navigation capability; they do not justify a privileged bypass or
+repeating a POST. Protected management origins and invalid destinations remain
+prohibited. No new URL/site allowlists. The user's earlier httpbin permission
+refusal remains an open platform/profile-specific acceptance case, not claimed
+universally fixed.
 
-### Structured snapshots and reliable browser actions
+## Self-hosting and administration
 
-Service 4.1.0-beta.1 and extension 4.1.0 add `get_page_snapshot` with document-scoped element
-references and redacted field values. Actions support unique CSS selectors or
-snapshot references, readiness waits, and explicit stale/disabled/obscured errors.
-New tools include `select_option`, `set_checked`, `press_key`, `scroll`, and
-`wait_for_page`. Top-level pages and open shadow roots are supported; iframe and
-closed-shadow-root control remain out of scope.
-
-Input remains DOM-based in both browsers. `press_key` dispatches page keyboard
-events, not native keystrokes or browser default actions. The approval model and
-wire protocol remain unchanged. Install the updated extension ZIP linked above
-and explicitly share a tab again; existing pairing identities are retained.
-See [operation semantics and examples](docs/COLLABORATIVE-BROWSING.md#structured-snapshots-and-reliable-page-actions).
-
-Service 4.1.0-beta.2 and extension 4.1.1 make reads compact by default: 4000 text characters, 50
-elements, and a 16 KiB serialized text-result budget with a 64 KiB hard maximum.
-Explicit truncation flags prevent partial results being mistaken for complete
-pages. Focused snapshots/selectors and bounded opt-in limits replace repeated
-whole-page dumps. Script syntax, runtime, serialization and policy failures are
-reported separately. Install the updated release ZIP above to use focused
-snapshot arguments and the specific script errors. The server enforces output
-budgets even with an older extension.
-
-Service 4.1.0-beta.3 and extensions 4.1.2 fix sharing-banner
-obstruction of text inputs, add viewport/control-state metadata and bounded
-HTML title extraction, reject malformed target handles, and include safe
-last-readiness causes in timeout errors. Local form POST echo tests verify
-values and retained sharing on supported response pages. Install the updated
-ZIP above in the existing extension installation, reload it and explicitly
-share a tab again; no identity or credential reset is needed.
-
-Extension `4.0.1` uses bounded local approval/execution budgets instead of requiring
-the laptop's clock to match the server. This fixes a valid Allow/Allow-all action
-being rejected as an invalid future deadline. Update both the server and extension;
-existing tenant identities and credentials are unchanged.
-
-## Service and development
-
-Service 4.3.0-beta.3 / extension 4.3.3 adds connected `browser_info` version
-diagnostics and fixed `injection_reason` codes to distinguish permission,
-restricted-renderer, frame-loss, helper failure and unknown inspection refusal.
-Browser metadata is self-reported, not a package attestation or authorization.
-The reported user-side httpbin POST refusal is not yet explained: disposable
-Firefox tests read the actual form's JSON response with its viewer both enabled
-and disabled. This release improves diagnosis, not a claim that all renderers
-are supported. No page-policy bypass, submission replay or grant renewal is added.
-Extension 4.3.2 was reported by the user but was not published from this checkout;
-4.3.3 avoids reusing that version. Update in place without resetting keys.
-
-Service 4.2.0-beta.1 / extension 4.2.0 adds read-only `inspect_element`
-diagnostics (hard limit 4 KiB), viewport dimensions in snapshots, and
-operation-derived local approval summaries. Resolved controls are bound to the
-exact document/element so re-rendered replacements cannot inherit approval.
-Entered values and script source are hidden in summaries; the explanation
-remains explicitly unverified.
-
-Service 4.3.0-beta.2 / extension 4.3.1 fixes freshly approved re-sharing
-of the same exact handle without losing its connection or command queue.
-Navigation inspection waits for a settled document and retries only benign
-inspection, never mutations or POSTs. Safe `inspection_stage` diagnostics explain
-where readiness failed; persistent renderer refusal remains fail-closed.
-Styled checkbox/radio inputs can use exact bound visible labels. Inspector metadata
-identifies hiding ancestors and explicit `aria-controls` reveal candidates without
-changing focus, scrolling or revealing field values.
-Update both service and extension for these improvements; wire version remains 4.
-The new 40-character trimmed description minimum is a deliberate validation change.
-Existing short callers must supply useful explanations; no credential/key reset
-is needed. Unapproved reads can refresh their preview as navigation settles, but
-approved work, explicit document/ref requests and mutations never silently rebind.
-
-The native Firefox tests explicitly enable JSON viewing and verify local JSON
-POST responses. A public httpbin POST was also verified with fictitious data
-using the actual extension. JSON content type alone is not a reproduced
-incompatibility in the tested Firefox build; uninspectable browser-generated
-documents remain fail-closed, with no privileged bypass or automatic POST retry.
-
-Node 22.13+:
+Node22.13+. Operator CLI provisions separately revocable clients/devices.
+Remote administration is disabled unless a strong static operator secret is
+configured via protected environment or restricted file. No OIDC runtime and
+no browser-user account/membership ceremony.
 
 ```sh
 npm --prefix domagent-mcp ci --ignore-scripts
-npm run build
-npm run check
-npm test
+npm --prefix domagent-mcp test
+npm --prefix domagent-mcp run build
+npm --prefix domagent-mcp run check
+DOMAGENT_DB=/private/path/domagent.db node domagent-mcp/admin.js client create "Atlas"
 ```
 
-Start `node index.js` in the MCP package after configuring the canonical HTTPS
-origin and this service's own OIDC client/issuer. Place the plaintext backend
-behind a trusted TLS proxy. See [deployment/security](docs/SECURE-PAIRING.md)
-and [2.x tenant migration](docs/TENANT-MIGRATION.md).
+See [service CLI/API](domagent-mcp/README.md),
+[security and deployment](docs/SECURE-PAIRING.md),
+[workspace protocol](docs/COLLABORATIVE-BROWSING.md),
+[browser qualification](domagent-extension/test/README.md).
 
-**Protocol v4 is a coordinated server/extension upgrade.** Existing tenant databases,
-credentials and device identities remain; no reset is needed. Old v3 live proofs
-and grants cannot authorize the new service. Update the extensions and reconnect,
-then explicitly share again. Beta.2 (2.x) databases still require explicit migration.
-
-Browser screenshot support remains limited by the actual target-specific API;
-the tested Firefox build does not expose it. Page CSP may deny scripts. No
-privileged fallback or visible-tab screenshot is provided. This is an unsigned
-private beta; physical permission prompts and all advertised browser versions
-remain acceptance gates.
-
-The dedicated window uses the normal profile and preserves opener relationships;
-it is not cookie/account isolation or a sandbox. Shared tabs use existing website sign-ins and can expose private page content,
-readable cookies/storage, and network/account actions. Human login does not promise
-secret isolation, especially under allow-all scripts. Pause/stop cannot undo effects
-or JavaScript already scheduled. Protected DomAgent/IdP management origins stay blocked.
+Shared-profile scripts can read page data and cause account actions. Pause/End
+cannot undo sent requests, scheduled effects in other contexts or site workers.
+Metadata history is a bounded commands/observed-events log, not a complete audit.

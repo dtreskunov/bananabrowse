@@ -1,48 +1,12 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DomAgent — connect your browser</title>
-  <link rel="stylesheet" href="ui.css">
-  <script src="ui.js" defer></script>
-</head>
-<body>
-  <h1 id="heading">Connect your browser</h1>
-  <p id="status" role="status">Getting ready…</p>
-  <p id="identity"></p>
-  <p id="error" role="alert"></p>
-  <form id="config">
-    <label>Connection link <input id="connection-link" type="url" required placeholder="https://example.org/join/…" autocomplete="off"></label>
-    <p>Paste the link your assistant or administrator gave you.</p>
-    <button type="submit">Continue</button>
-    <details>
-      <summary>Additional website protection</summary>
-      <label>Never share these websites, one address per line
-        <textarea id="protected" rows="3" placeholder="https://login.example.org"></textarea>
-      </label>
-      <p>Your connection website and its sign-in websites are always protected.</p>
-      <ul id="protections"></ul>
-    </details>
-  </form>
-  <div id="enrollment"></div>
-  <button id="done" type="button" hidden>Close setup</button>
-  <section>
-    <h2>Your connections</h2>
-    <div id="connections"></div>
-    <button id="add-connection" type="button">Add connection</button>
-    <button id="connect" type="button">Try again</button>
-    <button id="disconnect" type="button">Disconnect</button>
-    <p>Switching or disconnecting stops sharing. Sharing never restarts by itself.</p>
-  </section>
-  <section><h2>Sharing requests</h2><div id="requests"></div></section>
-  <section><h2>Your tabs</h2><div id="targets"></div></section>
-  <details class="warning">
-    <summary>What sharing means</summary>
-    <p>You select an existing or new website tab using the toolbar. Only that tab is shared; your browser profile is not an API. Shared tabs use your website sign-ins and can reveal private information.</p>
-    <p>Actions, including page scripts, need your approval. Allow all while sharing applies only to ordinary actions in that tab until sharing ends. Page scripts can make network or account changes.</p>
-    <p>You can navigate, sign in and interact normally. Human assistance asks for Done or Cancel and does not end sharing. Stop sharing stops new actions, not scripts or requests already started, and leaves your tab open.</p>
-    <p>The banner can be hidden or imitated, but its approval handler requires a real user gesture. Check the trusted extension toolbar, popup or settings as a fallback. A lost connection or browser restart stops all sharing.</p>
-  </details>
-</body>
-</html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect DomAgent</title><link rel="stylesheet" href="ui.css"><script src="ui.js" defer></script></head>
+<body><h1>Connect DomAgent</h1><p id="status" role="status">Getting ready...</p>
+<p id="error" role="alert"></p><p id="identity"></p>
+<form id="config"><label>Service domain<input id="domain" required placeholder="domagent.example.org"></label>
+<button type="submit">Continue</button></form><section id="pairing"></section>
+<button id="open-panel" type="button">Open workspace sidebar</button>
+<p>Connect using the code shown here. No DomAgent account login is needed.
+Your assistant must already have its own authenticated MCP connection.</p>
+</body></html>

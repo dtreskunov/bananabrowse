@@ -27,7 +27,7 @@ domagent/
 │   ├── chrome/         <- Chrome manifest and installation guide
 │   ├── firefox/        <- Firefox manifest and installation guide
 │   └── test/           <- Unit and real-browser tests
-├── domagent-mcp/        <- OIDC dashboard, HTTP MCP, authenticated WSS
+├── domagent-mcp/        <- Local/static operator admin, HTTP MCP, authenticated WSS
 ├── shared/             <- Signing protocol and semantic operations
 ├── deployment/         <- Independent service deployment examples
 └── dist/               <- Generated browser packages (not committed)

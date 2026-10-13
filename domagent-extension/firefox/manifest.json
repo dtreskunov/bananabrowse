@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "name": "DomAgent Secure Pairing",
-  "version": "4.3.3",
+  "version": "5.0.0",
   "description": "Share selected browser tabs with your assistant and approve actions while collaborating.",
-  "browser_specific_settings": { "gecko": { "id": "domagent-secure@domagent", "strict_min_version": "128.0" } },
-  "permissions": ["tabs", "storage", "scripting", "webNavigation", "notifications", "webRequest", "webRequestBlocking"],
+  "browser_specific_settings": { "gecko": { "id": "domagent-secure@domagent", "strict_min_version": "146.0" } },
+  "permissions": ["tabs", "storage", "scripting", "webNavigation", "notifications", "webRequest", "webRequestBlocking", "tabGroups", "contextMenus"],
   "optional_permissions": ["http://*/*", "https://*/*"],
   "background": { "scripts": ["background.js"], "persistent": true },
   "browser_action": { "default_title": "DomAgent — share selected tab" },

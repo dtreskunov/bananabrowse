@@ -1,412 +1,79 @@
-# Collaborative tab-sharing protocol
+# Grouped workspace protocol v5
 
-Service 4.3.0-beta.3 and extensions 4.3.3 use wire version 4 and policy
-`single-tab-workspace-v1`. Each handle owns one actual website tab in a dedicated
-normal window, with browser-owned side-panel consent controls.
-Tenant identity and OIDC setup remain independent of calling applications.
+Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
+ceremony. Persistent identity and runtime browser authority are separate.
+Service5.0.0-beta.1 / extension5.0.0 is a matched breaking upgrade.
 
-## Sharing
+## Tools
 
-`request_browser_access({device_id, description, wait_timeout_seconds?})` waits
-for a signed extension response describing the actual user-selected tab.
-The server coalesces concurrent requests for the same client/device, with bounded
-waiters and expiry. Cancelling the last waiter removes its request/prompt.
-No active tab is automatically shared when a request arrives.
+- `adopt_browser({pairing_code})`: authenticated proposal, final local confirmation.
+- `list_browser_workspaces()`: caller-linked devices, versions, connection and workspace state.
+- `wait_for_workspace({device_id,description,timeout_seconds?})`: passive human wait,
+  default300/max600seconds; no remote panel opening or grant creation.
+- `list_workspace_tabs({workspace_id})`: active grouped targets and bounded metadata.
+- `create_workspace_tab({workspace_id,url?,description})`: fresh background tab,
+  no adoption of existing unshared tabs, eight-tab capacity.
+- `request_handoff({target_id,description,wait_timeout_seconds?})`: global notification,
+  target-only wait, explicit Done/Cancel; other tabs can work.
+- Existing15 page operations keep explicit target_id and operation arguments.
+  No ordinary `wait_timeout_seconds`; readiness timeout_ms and execution budget remain.
 
-The local share action moves the selected actual tab (not a URL clone) into a
-new normal window, preserving the document and unsaved state. It installs
-required origin protection and signs the tab/window IDs, fresh target ID, client/tenant,
-policy, request nonce, connection ID/epoch and advertised browser operations.
-Unsupported browser operations remain unavailable; this is a fixed ordinary-page
-boundary, not arbitrary privileged browser APIs.
+Descriptions use minimum40 after trimming, maximum500 Unicode code points.
+Text output is 16KiB default/64KiB maximum UTF-8 serialized content wrapper;
+inspector4KiB, reads4000chars/50elements by default with explicit truncation.
+Snapshots are DOM-derived, field-value-redacted, top-level/open-shadow only.
+Input is DOM-based, not native/trusted keystrokes; press_key has no browser default
+action guarantee. Selectors must be unique; refs/documents and resolved label/control
+identity remain exact. No mutation replay after uncertainty.
 
-The MCP result contains `target_id`, its alias `tab_handle`, the selected `tab_id`, `window_id`,
-and supported capabilities. Every operation still uses an explicit `target_id`.
-`list_browser_targets` lists eligible devices and their `shared_tabs`, not unrelated
-tabs; compatibility fields `target_id/capabilities` describe the first shared tab.
-Sharing another tab is an explicit action and yields a distinct handle.
+## Lease and dispatch
 
-A freshly signed re-share of an active handle preserves that grant and its
-pending command queue only when client, tenant, device, connection, tab, window
-and capabilities still match. It consumes a new request nonce; stale proofs or
-changing a handle's binding do not authorize reuse.
+Device hello/challenge/proof v5 authenticates the bound namespace/client.
+The extension sends signed workspace.sync snapshots:
 
-The toolbar opens native controls immediately and shares the selected website
-tab when the linked client/request is unambiguous. Without a pending request it
-creates a short-lived one-shot local intent and requests a fresh server nonce.
-Navigation/connection changes invalidate that intent. Ambiguous requests require
-explicit selection in trusted UI. Sharing never enables Allow all implicitly.
-Remote requests notify/mark the toolbar; they cannot manufacture the gesture
-required to open a native panel. If opening controls in the newly created window
-is browser-refused, click its toolbar; `PANEL_OPEN_REQUIRED` is explicit.
-
-Device results also separate `connection_state` (`connected`/`offline`),
-`sharing_state` (`active`/`none`), and `pending_request_id` (null without an
-outstanding sharing request). The legacy `state` remains available for existing
-clients: `approval_required` means connected but not sharing, not that a prompt
-is currently displayed. Sharing and connection are independent; a connected
-idle device needs a new explicit request before asking the user to approve.
-Grant capabilities enumerate page operations, not management/handoff tools.
-An advertised operation is browser-supported but may fail page policy checks.
-No additional unshared tab information is exposed by these fields.
-Connected device results include `browser_info` (`extension_version`,
-`browser_name`, `browser_version`); it is null on older/offline peers. Browser
-version is null where the runtime API does not provide it (Chrome).
-These bounded self-reported strings are diagnostic only, never attestation,
-membership, protected-origin authority or permission to share.
-
-## Actions
-
-Sharing, human assistance and every page call require a `description` of at
-least 40 characters after trimming and at most 500 total characters.
-Short descriptions return `INVALID_ARGUMENTS` before MCP target dispatch; whitespace
-padding does not satisfy the minimum. This is an intent-quality requirement,
-not a consent security proof. Treat it as unverified
-requester text; pair it with operation-derived details. Render as text, never HTML.
-One approved click/script may itself cause arbitrary ordinary-page side effects.
-Descriptions are not a security proof and logs must not retain them or arguments.
-
-The extension prepares operation-derived summaries before positive action
-approval: tab title/origin, operation, selector/ref, resolved control and
-navigation destination. Typed values and script source are hidden. The agent's
-explanation is displayed separately as unverified text; neither one character
-nor forty characters proves informed consent. When a target resolves, the
-extension privately binds execution to that exact element/document. Replacing
-the control fails stale checks, even if the same selector would match a new one.
-Positive approvals wait for preparation; Decline/Stop remain available. Missing
-controls may be approved as explicitly unresolved selectors under the existing
-bounded readiness wait. Allow-all retains the same private binding checks.
-
-The server dispatches a pending `command` with the human deadline. The extension
-queues it independently of heartbeat traffic and displays:
-
-- Approve: one exact operation.
-- Decline: `ACTION_DECLINED`, no execution.
-- Allow all while sharing: supported ordinary-page operations for this tab/client
-  for this sharing session; never human-confirmation requests or other tabs.
-- Stop sharing: invalidate authority immediately, cancel pending work, and close
-  the controlled tab. Unsaved state is lost; closing the last tab closes its window.
-
-Positive decisions come only from exact packaged extension UI: Chrome side panel,
-Firefox sidebar, or trusted settings. Website DOM never contains Approve,
-Allow all or Done; all `page.decision` messages are rejected, even with genuine
-nonce/sender metadata. Real clicks on webpage-owned DOM are not consent proof:
-the page can relabel/reposition genuine controls. The page decoration is cosmetic;
-its only control is a nonce/document-bound negative Stop requiring a trusted click.
-
-Moving the tab out, adding another tab or opening a popup from the controlled tab
-revokes authority rather than adopting new tabs. Checks run before preparation,
-execution and readiness waits. Cleanup closes only the recorded controlled tab,
-never the whole window or unrelated tabs.
-
-Local activity history retains at most 200 metadata-only events across extension
-restarts. It records commands and observed lifecycle events, not every JavaScript
-or network side effect. It never persists descriptions, arguments, typed values,
-source, page contents or URLs. Storage failure is explicitly shown. History is
-available only to trusted extension UI, not MCP callers or website scripts.
-
-This is the normal browser profile, not a sandbox: cookies/logins, same-origin
-relationships and opener links survive moving the actual tab. Arbitrary page
-JavaScript is still included in explicit Allow all. Stop cannot undo requests,
-account changes, timers elsewhere or service workers. Closing ends execution in
-that document, not all effects on the profile or account.
-
-## Human wait and execution budgets
-
-Human waits default to 300 seconds, max 600. Once action approval arrives:
-
-```text
-server -> command (human expires_at)
-extension -> command.ready (same request/target)
-server -> command.execute (fresh 25-second expires_at)
-extension -> result (same request/target)
+```
+workspace_id, activation_id, client_id, group_id, window_id,
+state, revision, lease_ms<=5000,
+tabs:[{target_id,tab_id,title,url,page_state,capabilities}]
 ```
 
-The server rejects successful results before it issued execution. Late ready/results
-are discarded when cancelled/expired. A duplicate ready cannot execute twice.
-Queues stay bounded; they are not an unlimited approval backlog.
+Signatures bind service origin, namespace, epoch and connection as well as
+the payload. The host acknowledges revision with workspace.active.
+Ordinary command -> automatic local preparation -> command.ready ->
+command.execute (fresh bounded budget) -> result remains serialized per tab.
+Workspace-level capacity is two; human handoff does not reserve ordinary slots.
+Every continuation checks activation/lease/cancellation. Tab creation publishes
+authority through a signed snapshot before its result can return a handle.
 
-Server `expires_at` is authoritative on the server. Sharing/command messages also
-carry bounded `wait_timeout_ms`, and execution authorization carries
-`execution_timeout_ms`. The extension measures those budgets on receipt using its
-own clock; laptop and server wall clocks need not agree. Delayed messages cannot
-extend server authority or make expired results acceptable. Invalid execution
-budgets fail the individual action, not every shared tab's socket.
+Workspace: active/paused/inactive. Tab execution: idle/running/waiting_for_human.
+Page: ready/loading/navigation_only/unavailable.
+Unknown/foreign handles are generic NOT_AUTHORIZED. Caller-owned bounded
+tombstones can explain WORKSPACE_PAUSED/INACTIVE or TAB_NOT_IN_WORKSPACE.
+Refused DOM is DOCUMENT_NOT_CONTROLLABLE, with fixed inspection_stage/
+injection_reason/last_error/timeout_ms where available. Raw exceptions are omitted.
 
-HTTP disconnect/MCP cancellation removes waiting work. `command.cancel` tells the
-extension which request ended. Before execution it is a cancelled/expired request;
-after execution begins an uncertain outcome is reported and sharing ends rather
-than allowing an automatic retry. Credential revocation/rotation and disconnect
-invalidate pending authority as well as active grants. Other tenants are unaffected.
+## UX and lifecycle
 
-Client/proxy timeout must exceed the human wait plus execution and scheduling
-margin. For a 600-second client limit, request at most 540 seconds; default 300
-seconds leaves headroom. The nginx example uses a 650-second read timeout.
-An intermediary with a shorter hard limit must be configured or the explicit wait
-reduced. Do not claim the long wait is verified through an untested gateway.
+Start creates a named native group with a blank tab. Drag or menu Add grants
+existing-tab scope while active. Remove revokes immediately; re-add gets fresh
+handle. Website-created tabs/popup inheritance is excluded until explicitly added.
+Only grouped metadata is exposed. No focus change unless the user clicks a task
+row/menu/notification. End/close/lease loss leaves tabs/group open.
+Native panel restoration, browser restart and reconnect restore no runtime access.
+Pause cancels backlog; explicit Resume creates a fresh execution activation.
 
-Tool-call responses use Streamable HTTP SSE, with content-free heartbeat comments
-every 15 seconds while waiting. Discovery/initialization can still use JSON.
-This prevents an otherwise silent human wait from hitting common proxy idle-read
-timeouts; it does not override a proxy's hard total-duration limit or the client's
-own operation timeout. Use an MCP-aware client, not JSON-only response parsing.
+System notification plus toolbar pending count announces human assistance.
+Notification delivery failure is explicit; OS suppression cannot prove visibility.
+The user click focuses a bound task, never marks it Done or bypasses Pause.
+History holds at most200 metadata-only commands/events, not descriptions/source/
+values/URLs and not all JavaScript effects.
 
-## Cooperative user interaction
+Grouped tabs can navigate away from browser-owned/refused current documents
+without injection into them, to ordinary permitted HTTP(S) destinations.
+No new URL allowlist. Protected origins/invalid destinations remain denied.
+Reduced capability never claims DOM readability, never bypasses renderer/CSP
+or repeats a POST. Existing user-profile httpbin refusal remains an open
+acceptance question; collect actual versions and response evidence.
 
-`request_handoff({target_id, description, wait_timeout_seconds?})` uses the same
-pending-command path but always requires **Done** (or Cancel), even under allow-all.
-It pauses that tab's agent command queue while the human acts, not ownership of
-the browser. Done returns `{state:"completed",user_confirmed:true}` without a
-page action or fresh tab-sharing ceremony.
-
-The user may log in, solve a challenge, click, type, or navigate. Human assistance
-completion must tolerate navigation deliberately performed by that user. Normal
-page requests approved/queued for the old document must still fail stale checks;
-they cannot silently run on the new document. Existing sharing survives ordinary
-navigation, but protected or browser-refused pages are not an inspection bypass.
-
-No password/CAPTCHA heuristic automatically ends an otherwise accessible shared
-session. The agent should ask the user to enter credentials; unrestricted ordinary
-page scripts can still see DOM-visible secrets. This is disclosed behavior, not
-universal secret filtering.
-
-## Structured snapshots and reliable page actions
-
-Install extensions 4.1.2 from the 4.1.0-beta.3 release to use these additions.
-Existing device identities and credentials need no reset; share tabs again
-after updating. Older releases remain available for coordinated rollback.
-
-`get_page_snapshot({target_id, description})` returns a compact DOM-derived
-snapshot: `document`, `url`, `title`, visible `text`, and element references.
-Elements have an opaque `ref`, `role`, accessible-name approximation, tag,
-disabled/readonly/editable state, viewport membership and checked state where
-applicable. Excessive DOM size returns `RESULT_TOO_LARGE`. Field values, including contenteditable values, are
-redacted from snapshots. This is not a native accessibility tree or a general
-secret-filtering guarantee for page text/scripts.
-
-### Compact output budgets (4.1.0-beta.2)
-
-Service 4.1.0-beta.2 and extensions 4.1.1 default to 4000 text characters and 50 elements rather than
-whole-page dumps. Textual MCP results have a default 16 KiB budget and a hard
-64 KiB maximum, measured as UTF-8 bytes of the serialized MCP result including
-its text-content wrapper and JSON escaping. JSON-RPC/SSE framing adds a small
-amount of transport overhead. Neither many calls in aggregate nor explicit
-image results are covered by the textual budget.
-
-Read tools accept `max_output_bytes` (1024..65536). `get_text` and
-`get_page_snapshot` accept `max_text_chars` (0..16000); snapshot and legacy
-element enumeration accept `max_elements` (1..100). The byte budget may reduce
-these requested counts further, particularly for multibyte/escaped text.
-Truncation is explicit in `truncated`, `text_truncated`, and
-`elements_truncated`. Text is clipped at a valid string boundary; rows are
-returned whole. Do not interpret a partial result as a full page or tree.
-
-Focus `get_page_snapshot` with a unique `selector` to inspect a relevant
-section instead of repeatedly requesting the entire page. Its refs still
-belong to that document, and every new snapshot invalidates the previous refs.
-`get_text` should normally target a specific selector/ref. Prefer these tools
-over scripts that return full DOM/HTML, whole-page text, or large arrays.
-Arbitrary script values, mutation receipts, and device lists cannot be safely
-truncated: oversized results return `RESULT_TOO_LARGE`, never partial JSON.
-The extension bounds reads before reporting them; the MCP server enforces
-the same budgets even when an older extension returns a larger result.
-New sizing/scoping arguments and specific script errors require the new
-extension; older extensions retain their existing argument/capability rules.
-Screenshots remain separate explicitly requested image content under their
-existing size bounds, not a text-output-budget exception for other operations.
-
-`evaluate_script` takes JavaScript source/expression, not a function body.
-`document.title` and `(() => document.title)()` are valid; a top-level
-`return document.title;` is invalid. Return only small, focused JSON data.
-New extensions distinguish `SCRIPT_SYNTAX_ERROR`, `SCRIPT_RUNTIME_ERROR`,
-`SCRIPT_SERIALIZATION_ERROR`, `SCRIPT_POLICY_BLOCKED`, and
-`SCRIPT_EXECUTION_UNAVAILABLE`. Error codes do not include page/source/exception
-contents. A recognizable Firefox eval-policy refusal is `SCRIPT_POLICY_BLOCKED`;
-generic browser injection failure is not presumed to be CSP. Browser support
-does not guarantee every page permits eval. Use snapshots/text instead of
-retrying or bypassing a policy refusal. Chrome runtime evaluation keeps its
-existing narrow page-context boundary.
-
-The scope is the top-level document and open shadow roots only. Closed shadow
-roots and iframe documents are not exposed. References belong to the exact DOM
-element in that document. Navigation returns `TARGET_STALE`; a removed element
-or reference from an earlier snapshot returns `ELEMENT_STALE`. A new snapshot
-invalidates the previous reference set and never reuses its reference numbers.
-
-Targeted actions accept either `selector`, or both `ref` and `document`:
-
-```json
-{
-  "target_id": "<shared tab handle>",
-  "ref": "e3",
-  "document": "<document from snapshot>",
-  "description": "Fill the account nickname in the selected profile form",
-  "text": "My nickname",
-  "timeout_ms": 3000
-}
-```
-
-CSS selectors search the top-level document and open shadow roots. Multiple
-matches fail with `ELEMENT_AMBIGUOUS`, never selecting the first arbitrarily.
-`get_text` can omit a target to read page text. Input actions require a target.
-`click`, `type_text`, `select_option`, `set_checked`, `press_key`, `get_text` and
-`scroll` default to a 3-second actionability wait, bounded by `timeout_ms`
-(0..10,000). Zero returns immediate readiness errors. A positive exhausted
-wait returns `WAIT_TIMEOUT`. Waiting for absent, disabled, readonly, invisible
-or obstructed controls never repeats an executed mutation. Invalid selectors,
-ambiguous/stale targets and unsupported operations fail immediately.
-
-Actions inspect and scroll the target into view, check the hit-test point and
-reject covered controls. No browser-wide input or raw CDP surface is added:
-
-- `type_text`: replace the field value and dispatch input/change events.
-- `select_option({value})`: select a unique enabled option in a single-select.
-- `set_checked({checked})`: set a native checkbox, or select a native radio.
-  Styled inputs hidden by their own CSS can use an exact associated visible label.
-  Both control and activation label are bound during approval. A hidden ancestor,
-  disabled control, unrelated overlay or replacement label still fails.
-  `click` on a visible label also accepts its exact associated checkbox/radio at
-  the hit-test point; it never treats an unrelated transparent input as authority.
-  Clearing a radio and multi-select operations require human assistance.
-- `press_key({key})`: dispatch synthetic DOM keydown/keyup for the documented
-  key enum. Browser defaults (form submission, Tab traversal, editing) and
-  browser shortcuts are not synthesized. Results explicitly report
-  `native_input:false` and `default_action_performed:false`. Prefer the semantic
-  click/fill/select/check actions when modifying native controls.
-- `scroll({delta_y, delta_x?})`: scroll the document or targeted element by a
-  bounded pixel delta.
-
-`navigate` retains its existing `navigation_started:true` acknowledgement.
-Call `wait_for_page({timeout_ms?})` to observe `state:"loaded"` with the current
-URL and document. It follows ordinary navigation under the same tab grant;
-protected destinations and cancellation still stop access. Its default wait
-is 10 seconds. Neither navigation completion nor a successful click implies
-that a website completed the business transaction.
-
-These operations use the same human approval and separate execution budget as
-existing tools. The shared operation definitions drive MCP schemas and both
-relay/extension argument validation. Old extensions advertise only their
-supported operations; new tools require installing the updated extension.
-Wire version 3 and tenant/device identities remain unchanged.
-
-### Latest retest and mutation fixes (4.1.0-beta.3)
-
-Service 4.1.0-beta.3 and extensions 4.1.2 are available in the release ZIPs.
-This build validates target-handle shape before authorization. UUID handles
-and legacy 43-character tokens remain opaque and accepted; a malformed value such
-as `not-a-uuid` returns `INVALID_ARGUMENTS`. Valid-shaped unknown/ended/foreign
-handles return `NOT_AUTHORIZED` without revealing which other client owns one.
-
-Positive element readiness waits still return `WAIT_TIMEOUT` when exhausted.
-They now include a fixed `last_error` and bounded `timeout_ms`, for example
-`{"error":"WAIT_TIMEOUT","last_error":"ELEMENT_NOT_FOUND","timeout_ms":3000}`.
-Use zero for an immediate selector probe. The default element wait is 3 seconds,
-not the separate human approval deadline. No exception text or page contents
-are included in these diagnostics, and no executed mutation is retried.
-
-Legacy geometry lists explicitly identify `coordinate_system:"viewport"` and
-include control state and `in_viewport`. Off-screen, narrow controls are not
-necessarily CSS-hidden; truly hidden inputs remain excluded. The action still
-scrolls and checks the actual target before mutating it.
-
-HTML `head > title` extraction returns bounded document-title metadata. Other
-non-rendered text targets explicitly return `rendered:false` with
-`empty_reason:"NOT_RENDERED"`; scripts/styles are not exposed by falling back to
-raw text content. Normal text uses `text_source:"rendered"`.
-
-A sharing banner can cover text inputs on a narrow page. The packaged helper
-now temporarily excludes only its own isolated-world-tracked decoration from
-the hit test, restoring it synchronously before the approved DOM action.
-The banner stays available and site overlays still cause `ELEMENT_OBSCURED`.
-Approved DOM clicks explicitly focus focusable controls before dispatching the
-click, but never retarget a replaced or newly disabled control.
-No native/trusted automation input or new approval surface is introduced.
-
-Disposable Chrome/native Firefox tests fill text/tel/email/search controls,
-assert values and radio/checkbox state, submit to a local POST echo, and inspect
-the loaded HTML response under the same grant. Supported HTML form navigation
-is not inherently a grant-ending event. Browser-refused response documents
-(including some JSON-viewer cases) must still fail closed. The retained tab
-must remain at the response URL, never silently revert or repeat the POST.
-`PAGE_UNAVAILABLE` is not an invitation to bypass document inspection.
-
-## Lifecycle and tests
-
-Stop, tab closure, revocation, browser/service restart, or disconnect ends sharing
-and allow-all state. Reconnect restores identity only. Explicit Stop/Disconnect closes owned tabs. Unexpected disconnects/revocations
-leave them available for inspection and manual closure in trusted controls.
-Restart never restores grants or adopts stale stored tab IDs.
-
-Test real user-tab choice while a different tab/window is active; individual action
-approval; denial; allow-all; human login/Done after navigation; long waits beyond
-the old 25-second deadline; cancellation; cross-tenant/tab proofs; duplicate ready;
-stale queued work; and accurate overlay/toolbar stop state. Keep native Firefox
-persistent idle/restart and Chrome onboarding tests.
-
-## Element diagnosis and form-response verification
-
-`inspect_element` accepts an exact selector or document/ref and returns at most
-4 KiB of JSON. It reports match count, state/reason, redacted control flags,
-rectangle and viewport. It does not focus, scroll or mutate the page.
-Missing and ambiguous selector matches are diagnosis states; invalid CSS,
-stale refs and lost authority remain errors. Snapshots include viewport size.
-Use diagnosis to distinguish responsive/collapsed UI from broken automation:
-inspect, reveal the intended widget when appropriate, refresh refs, act, verify.
-It does not poll element readiness and has no `timeout_ms` argument. A hidden
-control can report `hidden_by` with bounded element/ancestor metadata and its
-CSS hiding reason, plus at most three visible/enabled `reveal_controls` with an
-explicit matching `aria-controls`. These are candidates, not proof of intended
-workflow and never automatically activated. `activation` describes an associated
-label available to operate a styled checkbox/radio without exposing its value.
-
-### Navigation inspection readiness
-
-Before producing an approval preview, inspection waits up to 10 seconds for a
-settled document (or the operation's explicit `timeout_ms`). It checks browser tab
-status, injected `document.readyState`, and URL consistency before/after inspection.
-Only benign inspection is retried during transient navigation/injection failure.
-An unapproved document-unbound read can discard its obsolete preview and prepare
-a new one as navigation settles. Explicit document/ref requests, scripts,
-mutations and already approved reads never silently rebind.
-After approval, the same inspection checks remain document-bound: a replacement
-document cannot silently inherit a prior preview or mutation approval.
-`wait_for_page` uses its own bounded page wait and checks cancellation, authority
-and workspace identity on every attempt.
-
-Safe failures may include `inspection_stage`: `tab_status`, `document_state`,
-`document_changed`, or `document_injection`. Exhausted inspection waits also
-include allowlisted `last_error`/`timeout_ms`. A settling page can return
-`WAIT_TIMEOUT`; persistent injection refusal returns `PAGE_UNAVAILABLE` and ends
-sharing. Browser/source/exception text is never included in these diagnostics.
-No POST is repeated, grant silently renewed, protected renderer bypassed or
-already executed action retried. A supported HTML/JSON POST response keeps its
-existing handle; genuinely refused documents remain fail-closed.
-`injection_reason` may distinguish `permission_denied`, `browser_restricted`,
-`frame_unavailable`, `helper_execution_failed`, `empty_result`, or `unknown`.
-It classifies fixed browser error patterns without retaining exception text or
-URLs. A reason is evidence of the API failure class, not proof that JSON viewers
-are inherently inaccessible. The actual httpbin form is tested, with fictitious
-input only, under both JSON-viewer settings; this does not qualify every browser
-version or installed profile policy.
-
-Form filling and a click acknowledgement are not a confirmed submission.
-Verify the actual response and compare document identity as well as URL.
-Do not alter production forms with preventDefault handlers or clone them merely
-to capture data. Submission may be intercepted by site code or navigate to a
-browser-generated viewer. Firefox JSON viewing is explicitly enabled in the
-native integration tests; MIME type and the actual injected response are checked.
-Some browser builds or response policies may refuse injection, and such pages
-remain fail-closed. No raw privileged renderer access or automatic POST replay
-is introduced. A failed script may already have mutated the page.
-
-Install extension 4.3.3 and the matched v4 service. The catalogue contains 18
-tools. Older wire-v3 extensions are intentionally rejected because their page
-consent surface is unsafe. Reconnect and explicitly share again; identities and
-credentials need no reset. Rollback requires matched server/extension versions
-and restores the older consent weakness; do not recommend it as a security fix.
-
-The optional `DOMAGENT_PUBLIC_HTTPBIN=1` native Firefox test submits only
-fictitious data to httpbin and verifies the actual JSON response. It is opt-in
-to keep default tests independent of public endpoint availability. Local JSON
-viewer coverage runs by default. Successful qualification does not establish
-that all Firefox versions, response policies or generated viewers are injectable.
+See [security](SECURE-PAIRING.md), [migration](V5-MIGRATION.md) and
+[browser tests](../domagent-extension/test/README.md).

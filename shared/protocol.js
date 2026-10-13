@@ -1,5 +1,8 @@
-export const VERSION = 4;
-export const POLICY_ID = 'single-tab-workspace-v1';
+export const VERSION = 5;
+export const POLICY_ID = 'grouped-workspace-v1';
+export const WORKSPACE_LEASE_MS = 5000;
+export const WORKSPACE_TAB_LIMIT = 8;
+export const WORKSPACE_CONCURRENCY = 2;
 export const HEARTBEAT_MS = 5_000;
 export const LIVENESS_MS = 15_000;
 export const HUMAN_WAIT_MS = 600_000;
@@ -26,7 +29,7 @@ export const READINESS_ERRORS = Object.freeze([
 ]);
 export const MIN_DESCRIPTION_LENGTH = 40;
 export function validDescription(value) {
-  return typeof value === 'string' && value.length <= 500 &&
+  return typeof value === 'string' && [...value].length <= 500 &&
     [...value.trim()].length >= MIN_DESCRIPTION_LENGTH;
 }
 export function validBrowserInfo(value) {
@@ -40,7 +43,7 @@ export function validBrowserInfo(value) {
     ));
 }
 export function inspectionErrorDetails(error) {
-  if (!['PAGE_UNAVAILABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
+  if (!['PAGE_UNAVAILABLE', 'DOCUMENT_NOT_CONTROLLABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
       !['tab_status', 'document_injection', 'document_state', 'document_changed'].includes(error.inspection_stage)) return {};
   const result = { inspection_stage: error.inspection_stage };
   if (['permission_denied', 'browser_restricted', 'frame_unavailable', 'helper_execution_failed',
@@ -187,7 +190,38 @@ export async function keyId(jwk) {
 }
 
 export function authPayload(c) {
-  return encode(['domagent.v4', 'auth', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.nonce, c.key_id]);
+  return encode(['domagent.v5', 'auth', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.nonce, c.key_id]);
+}
+
+export function workspacePayload(c) {
+  return encode(['domagent.v5', 'workspace', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id,
+    c.client_id, c.workspace_id, c.activation_id, c.group_id, c.window_id, c.state, c.revision, c.lease_ms,
+    c.tabs.map(tab => [tab.target_id, tab.tab_id, tab.title, tab.url, tab.page_state, [...tab.capabilities].sort()])]);
+}
+
+export function pairingStartPayload(c) {
+  return encode(['domagent.v5', 'pairing-start', c.origin, c.request_id, c.key_id,
+    c.extension_origin, c.pairing_code, c.receipt, c.nonce, c.label]);
+}
+
+export function pairingStatusPayload(c) {
+  return encode(['domagent.v5', 'pairing-status', c.origin, c.request_id, c.key_id, c.receipt]);
+}
+
+export function pairingConfirmPayload(c) {
+  return encode(['domagent.v5', 'pairing-confirm', c.origin, c.request_id, c.proposal_id, c.key_id,
+    c.receipt, c.tenant_id, c.client_id, c.nonce]);
+}
+
+export function pairingCancelPayload(c) {
+  return encode(['domagent.v5', 'pairing-cancel', c.origin, c.request_id, c.key_id, c.receipt]);
+}
+
+export function normalizePairingCode(value) {
+  if (typeof value !== 'string' || value.length > 16) throw new Error('PAIRING_UNAVAILABLE');
+  const code = value.toUpperCase().replaceAll('-', '').replaceAll(' ', '');
+  if (!/^[0-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('PAIRING_UNAVAILABLE');
+  return code;
 }
 
 export function startPayload(c) {

@@ -1,88 +1,69 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { preview, migrate } from '../migrate.js';
-import { Store, hash } from '../store.js';
+import { Store } from '../store.js';
+import { preview, migrate, verifyMigration } from '../migrate.js';
 
-function legacy(db) {
-  db.exec(`
-    PRAGMA foreign_keys=ON;
-    CREATE TABLE owners(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,label TEXT,admitted INTEGER,disabled INTEGER,invitation_expires INTEGER,UNIQUE(issuer,subject));
-    CREATE TABLE sessions(hash TEXT PRIMARY KEY,owner_id TEXT REFERENCES owners(id),csrf TEXT,expires INTEGER);
-    CREATE TABLE clients(id TEXT PRIMARY KEY,owner_id TEXT REFERENCES owners(id),label TEXT,credential_hash TEXT UNIQUE,revoked INTEGER);
-    CREATE TABLE devices(id TEXT PRIMARY KEY,owner_id TEXT REFERENCES owners(id),key_id TEXT UNIQUE,public_key TEXT,extension_origin TEXT,label TEXT,revoked INTEGER);
-    CREATE TABLE links(client_id TEXT REFERENCES clients(id),device_id TEXT REFERENCES devices(id),PRIMARY KEY(client_id,device_id));
-    CREATE TABLE enrollments(id TEXT PRIMARY KEY,key_id TEXT,public_key TEXT,extension_origin TEXT,label TEXT,nonce TEXT,owner_id TEXT REFERENCES owners(id),expires INTEGER);
-    INSERT INTO owners VALUES('owner','https://idp.test','owner','Owner',1,0,0);
-    INSERT INTO owners VALUES('member','https://idp.test','member','Member',1,0,0);
-    INSERT INTO clients VALUES('client','owner','Old client','fixture-hash',0);
-    INSERT INTO devices VALUES('device','member','legacy-key','{}','chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Old browser',0);
-    INSERT INTO links VALUES('client','device');
-  `);
-}
-
-test('legacy database requires explicit complete assignments and fresh browser pairing', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'domagent-migration-'));
-  const path = join(directory, 'legacy.db');
-  let db;
-  let store;
-  try {
-    db = new DatabaseSync(path);
-    legacy(db);
-    db.prepare('UPDATE clients SET credential_hash=? WHERE id=?').run(hash('old-credential'), 'client');
-    const report = preview(db);
-    assert.equal(report.clients[0].client_id, 'client');
-    assert.equal(report.browser_owners[0].owner_id, 'member');
-    assert(!JSON.stringify(report).includes(hash('old-credential')));
-    assert.throws(() => migrate(db, []), /INCOMPLETE_ASSIGNMENTS/);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0);
-    assert.throws(() => new Store(path), /TENANT_MIGRATION_REQUIRED/);
-    const migrated = migrate(db, [{ client_id: 'client', owner_id: 'owner', label: 'Atlas', members: ['member'] }]);
-    assert.equal(migrated.length, 1);
-    assert.equal(preview(db).migration_required, false);
-    assert.throws(() => migrate(db, []), /ALREADY_MIGRATED/);
-    assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
-    db.close(); db = undefined;
-    store = new Store(path);
-    const tenant = migrated[0].tenant_id;
-    assert.equal(store.authenticateClient('old-credential', tenant).id, 'client');
-    assert.equal(store.member('member', tenant), true);
-    assert.deepEqual(store.devicesForClient('client'), []);
-    assert.equal(store.deviceByKey('legacy-key', tenant), undefined);
-  } finally {
-    store?.close(); db?.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test('invalid migration input leaves legacy state unchanged', () => {
+function legacy() {
   const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE owners(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,label TEXT,admitted INTEGER,disabled INTEGER,invitation_expires INTEGER);
+    CREATE TABLE tenants(id TEXT PRIMARY KEY,label TEXT,owner_id TEXT,enabled INTEGER);
+    CREATE TABLE tenant_members(tenant_id TEXT,owner_id TEXT);
+    CREATE TABLE clients(id TEXT PRIMARY KEY,owner_id TEXT,label TEXT,credential_hash TEXT,revoked INTEGER,tenant_id TEXT);
+    CREATE TABLE devices(id TEXT PRIMARY KEY,owner_id TEXT,key_id TEXT,public_key TEXT,extension_origin TEXT,label TEXT,revoked INTEGER,tenant_id TEXT);
+    CREATE TABLE sessions(hash TEXT,owner_id TEXT,csrf TEXT,expires INTEGER);
+    CREATE TABLE enrollments(id TEXT,key_id TEXT,public_key TEXT,extension_origin TEXT,label TEXT,nonce TEXT,owner_id TEXT,expires INTEGER,tenant_id TEXT);
+    CREATE TABLE setup_requests(id TEXT,agent_name TEXT,request_description TEXT,token_hash TEXT,receipt_hash TEXT,expires INTEGER,state TEXT,tenant_id TEXT);
+    PRAGMA user_version=2;
+    INSERT INTO owners VALUES('owner','https://old.test','subject','Owner',1,0,1);
+    INSERT INTO tenants VALUES('t_abcdefghijklmnopqrstuv','Atlas','owner',1);
+    INSERT INTO tenant_members VALUES('t_abcdefghijklmnopqrstuv','owner');
+    INSERT INTO clients VALUES('client','owner','Atlas','credential-hash',0,'t_abcdefghijklmnopqrstuv');
+    INSERT INTO devices VALUES('device','owner','key','public-key','moz-extension://uuid','My browser',0,'t_abcdefghijklmnopqrstuv');
+    INSERT INTO sessions VALUES('session','owner','csrf',1);
+  `);
+  return db;
+}
+test('explicit schema migration preserves IDs, keys, hashes, revocations and historical bindings, not sessions', () => {
+  const db = legacy();
   try {
-    legacy(db);
-    assert.throws(() => migrate(db, [{ client_id: 'unknown', owner_id: 'owner', label: 'Atlas' }]));
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0);
-    assert.equal(db.prepare('SELECT key_id FROM devices').get().key_id, 'legacy-key');
+    const before = db.prepare('SELECT * FROM devices').get();
+    assert.equal(preview(db).can_migrate, true);
+    const result = migrate(db);
+    assert.equal(result.schema_version, 3);
+    assert.equal(verifyMigration(db).verified, true);
+    const after = db.prepare('SELECT * FROM devices').get();
+    for (const field of Object.keys(before)) assert.equal(after[field], before[field]);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM legacy_sessions').get().n, 0);
+    assert.deepEqual({ ...db.prepare('SELECT * FROM client_devices').get() },
+      { client_id: 'client', device_id: 'device', tenant_id: 't_abcdefghijklmnopqrstuv' });
+    assert.throws(() => migrate(db), /ALREADY_MIGRATED/);
+  } finally { db.close(); }
+  const store = new Store(':memory:');
+  assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
+  store.close();
+});
+test('ambiguous multiowner migration and unknown schema are rejected transactionally without flattening', () => {
+  const db = legacy();
+  try {
+    db.exec("INSERT INTO owners VALUES('other','https://old.test','other','Other',1,0,1); INSERT INTO tenant_members VALUES('t_abcdefghijklmnopqrstuv','other')");
+    assert.equal(preview(db).can_migrate, false);
+    assert.throws(() => migrate(db), /MULTIOWNER_MAPPING_REQUIRED/);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM devices").get().n, 1);
+    db.exec('CREATE TABLE unexpected(id TEXT)');
+    assert.throws(() => preview(db), /UNKNOWN_SCHEMA_LAYOUT/);
   } finally { db.close(); }
 });
-
-test('failure during migration rolls back schema and credential mutations', () => {
-  const db = new DatabaseSync(':memory:');
+test('migration records disabled legacy accounts and preserves revoked flags rather than resurrecting access', () => {
+  const db = legacy();
   try {
-    legacy(db);
-    const prepare = db.prepare.bind(db);
-    db.prepare = sql => {
-      if (sql.includes('INSERT INTO clients(id,owner_id,label,credential_hash')) throw new Error('Injected migration write failure');
-      return prepare(sql);
-    };
-    assert.throws(() => migrate(db, [{ client_id: 'client', owner_id: 'owner', label: 'Atlas' }]),
-      /Injected migration write failure/);
-    db.prepare = prepare;
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0);
-    assert.equal(db.prepare('SELECT credential_hash FROM clients').get().credential_hash, 'fixture-hash');
-    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='legacy_clients'").get(), undefined);
-    assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
+    db.exec("UPDATE owners SET disabled=1; UPDATE devices SET revoked=1; UPDATE clients SET revoked=1");
+    migrate(db);
+    assert.equal(db.prepare('SELECT legacy_disabled FROM clients').get().legacy_disabled, 1);
+    assert.equal(db.prepare('SELECT revoked FROM clients').get().revoked, 1);
+    assert.equal(db.prepare('SELECT revoked FROM devices').get().revoked, 1);
+    assert.equal(verifyMigration(db).verified, true);
   } finally { db.close(); }
 });

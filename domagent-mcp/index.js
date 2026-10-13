@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
-import { createOidc } from './oidc.js';
 import { createApp } from './app.js';
 import { audit, failureCode } from './errors.js';
 
@@ -10,9 +9,8 @@ let app;
 let store;
 try {
   const config = loadConfig();
-  const oidc = await createOidc(config);
-  store = new Store(config.db);
-  app = createApp(store, config, oidc);
+  store = new Store(config.db, { pairingSecret: config.pairingSecret });
+  app = createApp(store, config);
   await app.listen();
   audit('service_started');
 } catch (error) {

@@ -1,295 +1,156 @@
-import { parseConnectionUrl } from '../../shared/protocol.js';
+import { serviceOrigin } from '../../shared/protocol.js';
 
 const api = typeof browser === 'undefined' ? chrome : browser;
 const byId = id => document.getElementById(id);
-let busy = false;
-let formLoaded = false;
-let lastRender = '';
-let selectedTab = null;
-
+let state, busy = false, windowId;
 const errors = {
-  INVALID_CONNECTION_LINK: 'Paste a connection link like https://example.org/join/… — not an approval link or a password.',
-  INVALID_TENANT: 'This connection link is incomplete. Ask your assistant for a new link.',
-  INVALID_SERVICE_ORIGIN: 'Use the secure connection link your assistant gave you.',
-  PERMISSION_REQUIRED: 'Permission was declined. You can try again when you are ready.',
-  NOT_AUTHORIZED: "You don't have access to this connection. Ask its owner, or check the link.",
-  ENROLLMENT_EXPIRED: 'This request expired. Choose Start again.',
-  BROWSER_OFFLINE: 'Connection lost. No tabs are being shared. Try again.',
-  PROTECTION_UNAVAILABLE: 'Sharing is unavailable because browser protection could not start.',
-  HANDOFF_REQUIRED: 'This operation is unavailable. You can complete it yourself in the shared tab.',
-  PAGE_UNAVAILABLE: 'Sharing stopped because bounded inspection retries could not read this page. Inspect the retained tab yourself; do not repeat an uncertain submission.',
-  TARGET_STALE: 'The selected tab or document changed. Review the new request before approving.',
-  COMMAND_EXPIRED: 'This action expired. Ask your assistant for a fresh request.',
-  COMMAND_CANCELLED: 'The assistant cancelled this request. No new action will be started.',
-  ACTION_DECLINED: 'This request was declined. No action will be started.',
-  INVALID_MESSAGE: 'The action could not be started safely. Ask your assistant for a fresh request.',
-  INVALID_ARGUMENT: 'The requested action was incomplete or invalid. Ask your assistant to correct it.',
-  OUTCOME_UNKNOWN: 'The connection ended before the action was confirmed. It may already have happened; check the tab before trying again.',
-  CAPABILITY_UNAVAILABLE: 'This action is not supported on the current page or browser.',
-  APPROVAL_REQUIRED: 'This sharing request ended. Ask your assistant to try again.',
-  ELEMENT_NOT_FOUND: 'No matching element was found. Ask your assistant to inspect the page again.',
-  ELEMENT_AMBIGUOUS: 'More than one element matched. Ask your assistant to use a specific page reference.',
-  ELEMENT_STALE: 'That element was removed or its snapshot expired. Ask your assistant for a fresh page snapshot.',
-  ELEMENT_DISABLED: 'This control is disabled. Complete any required steps before trying again.',
-  ELEMENT_READONLY: 'This field is read-only.',
-  ELEMENT_NOT_VISIBLE: 'This control is not visible.',
-  ELEMENT_OBSCURED: 'Another element covers this control. Dismiss the covering dialog before trying again.',
-  ELEMENT_NOT_EDITABLE: 'This control does not support the requested operation.',
-  OPTION_NOT_FOUND: 'The requested option is not available in this control.',
-  WAIT_TIMEOUT: 'The page or control did not become ready within the bounded wait. No mutation was replayed; inspect the current page before trying again.',
-  OPERATION_FAILED: 'The control did not keep the requested state. Check the page before trying again.',
-  RESULT_TOO_LARGE: 'The response exceeds its output budget. Ask your assistant to request a smaller, focused result.',
-  SCRIPT_POLICY_BLOCKED: 'This page blocks JavaScript evaluation. Your assistant can use snapshots or targeted text instead.',
-  SCRIPT_SYNTAX_ERROR: 'The supplied JavaScript is invalid. It must be an expression or script, not a function body.',
-  SCRIPT_RUNTIME_ERROR: 'The supplied JavaScript failed on this page.',
-  SCRIPT_SERIALIZATION_ERROR: 'The script result cannot be returned as JSON. Ask for plain JSON data.',
-  SCRIPT_EXECUTION_UNAVAILABLE: 'The browser could not run page JavaScript. Snapshots and targeted text may still work.',
-  WORKSPACE_CHANGED: 'The workspace changed. Sharing stopped; unrelated tabs were not closed.',
-  PANEL_OPEN_REQUIRED: 'Click the DomAgent toolbar in the workspace window to open its trusted controls.',
-  HISTORY_UNAVAILABLE: 'The activity history could not be saved. Current controls are still available.',
+  PLATFORM_UNSUPPORTED: 'Update the browser: native tab groups and sidebar lifecycle support are required.',
+  NOT_AUTHORIZED: 'This connection is not authorized. Check the selected client or pair again.',
+  PAIRING_UNAVAILABLE: 'Pairing expired or is unavailable. Start again for a fresh code.',
+  PAIRING_CODE_COLLISION: 'That code could not be reserved. Choose Start again.',
+  WORKSPACE_INACTIVE: 'Open the DomAgent sidebar and explicitly start/resume this workspace.',
+  WORKSPACE_PAUSED: 'This workspace is paused. Resume it yourself when ready.',
+  DOCUMENT_NOT_CONTROLLABLE: 'This document cannot be inspected. Ordinary website navigation may still be available.',
+  PERMISSION_REQUIRED: 'Website permission was declined. Nothing has been authorized.',
+  BROWSER_OFFLINE: 'The browser connection is offline. Reconnect; existing work will not be replayed.',
+  PANEL_OPEN_REQUIRED: 'Click the DomAgent toolbar in this window to open its native sidebar.',
+  TAB_LIMIT_REACHED: 'The workspace has reached its eight-tab limit.',
+  NOTIFICATION_UNAVAILABLE: 'The system notification could not be delivered. Check browser notification settings.',
 };
-
-function showError(error) {
-  byId('error').textContent = errors[error.message] || 'That did not work. Check your connection and try again.';
-}
-
-async function request(type, extra = {}) {
-  if (type === 'state' && location.pathname === '/panel.html') {
-    extra = { ...extra, windowId: (await api.windows.getCurrent()).id };
-  }
-  const response = await api.runtime.sendMessage({ type: `ui.${type}`, ...extra });
+function error(value) { byId('error').textContent = errors[value.message] || `DomAgent: ${value.message}`; }
+async function request(type, fields = {}) {
+  const response = await api.runtime.sendMessage({ type: `ui.${type}`, ...fields });
   if (!response?.ok) throw new Error(response?.error?.code || 'BROWSER_OFFLINE');
   return response.value;
 }
-
-async function action(run) {
+async function run(operation) {
   if (busy) return;
-  busy = true;
-  byId('error').textContent = '';
-  try {
-    await run();
-    lastRender = '';
-    await refresh();
-  } catch (error) {
-    showError(error);
-  } finally {
-    busy = false;
-  }
+  busy = true; byId('error').textContent = '';
+  try { await operation(); await refresh(); } catch (failure) { error(failure); } finally { busy = false; }
 }
-
-function button(parent, label, run) {
-  const element = document.createElement('button');
-  element.type = 'button';
-  element.textContent = label;
-  element.addEventListener('click', () => action(run));
-  parent.append(element);
+function text(parent, value) {
+  const node = document.createElement('p'); node.textContent = value; parent.append(node);
 }
-
-function paragraph(parent, value) {
-  const element = document.createElement('p');
-  element.textContent = value;
-  parent.append(element);
+function button(parent, label, operation) {
+  const node = document.createElement('button'); node.type = 'button'; node.textContent = label;
+  node.onclick = () => { void run(operation); }; parent.append(node);
 }
-
 function render(snapshot) {
-  selectedTab = snapshot.selected_tab;
-  if (byId('share-clients')) {
-    byId('share-clients').replaceChildren();
-    if (snapshot.eligible_clients.length > 1) {
-      paragraph(byId('share-clients'), 'Choose the linked application to share with (names are unverified).');
-      for (const client of snapshot.eligible_clients) {
-        button(byId('share-clients'), `Share with ${client.label}`, () => shareSelected(client.id));
-      }
-    }
-  }
-  const connected = snapshot.phase === 'authenticated';
-  const active = snapshot.targets.filter(target => target.state === 'active');
-  const name = snapshot.identity?.tenant_label || 'your assistant';
-  let status = 'Connect your browser. No tabs are being shared.';
-  if (active.length) status = `${active.map(target => target.client_label || name).join(', ')} can use your selected shared tabs.`;
-  else if (connected) status = `You're connected to ${name}. No tabs are being shared.`;
-  else if (['connecting', 'authenticating', 'proving'].includes(snapshot.phase)) {
-    status = `Connecting to ${name}… No tabs are being shared.`;
-  } else if (snapshot.enrollment) status = 'Finish connecting your browser. No tabs are being shared.';
-  else if (snapshot.identity) status = 'Connection lost. No tabs are being shared.';
-  byId('status').textContent = status;
-  byId('identity').textContent = snapshot.config.service_origin
-    ? new URL(snapshot.config.service_origin).host : 'Paste the link your assistant or administrator gave you.';
-  if (snapshot.browser_info) {
-    const info = snapshot.browser_info;
-    byId('identity').textContent += ` · Extension ${info.extension_version} · ${info.browser_name}` +
-      (info.browser_version ? ` ${info.browser_version}` : ' (browser version unavailable)');
-  }
-  byId('connect').disabled = !snapshot.identity || snapshot.phase !== 'disconnected';
-  byId('disconnect').disabled = snapshot.phase === 'disconnected' && !snapshot.config.enabled;
-
-  if (byId('config')) {
-    if (!formLoaded) {
-      byId('connection-link').value = snapshot.config.connection_url || '';
-      byId('protected').value = snapshot.config.local_protected_origins.join('\n');
-      formLoaded = true;
-    }
-    byId('config').hidden = Boolean(snapshot.identity && snapshot.config.enabled);
-    byId('heading').textContent = connected ? 'Your browser is connected' : 'Connect your browser';
-    byId('done').hidden = !connected;
-    byId('enrollment').replaceChildren();
-    if (snapshot.enrollment) {
-      paragraph(byId('enrollment'), snapshot.enrollment.expires_at <= Date.now()
-        ? 'The sign-in request expired. Start again to continue.'
-        : 'Sign in on the website and choose Connect browser. This screen will finish automatically.');
-      if (snapshot.enrollment.expires_at > Date.now()) {
-        button(byId('enrollment'), 'Open sign-in again', () => request('openSignIn'));
-      }
-      button(byId('enrollment'), 'Start again', async () => {
-        await request('enroll', { label: 'My browser' });
-        await request('openSignIn');
-      });
-    }
-    byId('protections').replaceChildren(...snapshot.protected_origins.map(origin => {
-      const element = document.createElement('li');
-      element.textContent = origin;
-      return element;
-    }));
-  }
-
-  byId('connections').replaceChildren();
-  for (const pair of snapshot.saved_connections) {
-    const article = document.createElement('article');
-    paragraph(article, `${pair.label} · ${new URL(pair.origin).host}`);
-    if (pair.connection_url !== snapshot.config.connection_url) {
-      button(article, 'Switch connection', () => request('switch', { connection_url: pair.connection_url }));
-    } else paragraph(article, 'Selected connection');
-    byId('connections').append(article);
-  }
-
-  byId('requests').replaceChildren();
-  if (!snapshot.pending.length) paragraph(byId('requests'), 'No sharing requests.');
-  for (const pending of snapshot.pending) {
-    const article = document.createElement('article');
-    paragraph(article, `${pending.client_label} would like you to share a tab.`);
-    paragraph(article, pending.description);
-    paragraph(article, 'Agent explanation above is unverified; the tab and sharing scope below determine access.');
-    paragraph(article, 'This name was supplied by the application. It is not a verified identity.');
-    paragraph(article, 'Visit an existing or new website tab, then use the DomAgent toolbar to share that tab. You remain free to navigate and interact.');
-    paragraph(article, 'Sharing allows page actions, including page scripts, only on your selected tab. Each action asks for approval unless you choose Allow all while sharing.');
-    const selected = snapshot.selected_tab;
-    paragraph(article, selected ? `Selected tab: ${selected.title || 'Untitled'} · ${selected.url}` : 'No website tab selected. Visit a website in a normal browser window first.');
-    button(article, `Share this tab with ${pending.client_label}`, async () => {
-      if (!selected) throw new Error('TARGET_STALE');
-      // The permission call must remain directly inside the user's click, before
-      // any messaging or asynchronous work loses browser user activation.
-      const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
-      if (!granted) throw new Error('PERMISSION_REQUIRED');
-      await request('approve', { request_id: pending.request_id, tabId: selected.tabId });
-    });
-    article.lastElementChild.disabled = !selected;
-    button(article, 'Not now', () => request('deny', { request_id: pending.request_id }));
-    byId('requests').append(article);
-  }
-
-  byId('targets').replaceChildren();
-  if (!snapshot.targets.length) paragraph(byId('targets'), 'No shared tabs.');
-  for (const target of snapshot.targets) {
-    const article = document.createElement('article');
-    paragraph(article, target.state === 'active'
-      ? `${target.client_label || name} can use this tab.` : 'This tab is not being shared.');
-    if (target.indicator_unavailable) {
-      paragraph(article, 'This tab is still being shared, but its banner could not be displayed. You can stop sharing here.');
-    }
-    if (target.allow_all) paragraph(article, 'Allow all while sharing is on for ordinary actions in this tab only. Human assistance still requires Done.');
-    for (const command of target.commands || []) {
-      const pending = document.createElement('article');
-      paragraph(pending, `${command.operation}: ${command.description}`);
-      paragraph(pending, 'Agent explanation is unverified. Review the operation-derived details:');
-      for (const line of command.summary || []) paragraph(pending, line);
-      if (command.preparing) paragraph(pending, 'Inspecting the target before approval…');
-      if (command.state === 'pending' && !command.preparing && command === target.commands[0]) {
-        const decide = action => request('decision', {
-          target_id: target.target_id, request_id: command.request_id, action,
+  state = snapshot;
+  byId('status').textContent = snapshot.phase === 'authenticated'
+    ? `Connected to ${snapshot.identity?.client_label || snapshot.identity?.tenant_label || 'your assistant'}`
+    : 'No browser access enabled. Connect your assistant.';
+  byId('identity').textContent = snapshot.browser_info
+    ? `Extension ${snapshot.browser_info.extension_version} - ${snapshot.browser_info.browser_name} ${snapshot.browser_info.browser_version || ''}`
+    : '';
+  if (byId('pairing')) {
+    byId('pairing').replaceChildren();
+    const pairing = snapshot.pairing;
+    if (pairing) {
+      text(byId('pairing'), `Tell your assistant this pairing code: ${pairing.code}`);
+      text(byId('pairing'), `Expires ${new Date(pairing.expires_at).toLocaleTimeString()}. It is not an application credential.`);
+      button(byId('pairing'), 'Copy code', () => navigator.clipboard.writeText(pairing.code));
+      if (pairing.state === 'proposed') {
+        text(byId('pairing'), `${pairing.proposal.client_label} wants to connect. This application label is not a verified human identity.`);
+        button(byId('pairing'), 'Connect and start workspace', async () => {
+          const permission = api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
+          const opening = api.sidePanel ? api.sidePanel.open({ windowId }) : api.sidebarAction.open();
+          if (!await permission) throw new Error('PERMISSION_REQUIRED');
+          await request('confirmPairing');
+          await opening;
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
+            const snapshot = await request('state');
+            if (snapshot.phase === 'authenticated') {
+              await request('start', { windowId }); return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          throw new Error('BROWSER_OFFLINE');
         });
-        if (command.operation === 'request_handoff') {
-          paragraph(pending, 'Complete this task yourself in the shared tab. Done confirms completion without stopping sharing.');
-          button(pending, 'Done', () => decide('done'));
-          button(pending, 'Cancel', () => decide('decline'));
-        } else {
-          button(pending, 'Approve', () => decide('approve'));
-          button(pending, 'Decline', () => decide('decline'));
-          button(pending, 'Allow all while sharing', () => decide('allow_all'));
-        }
-      } else paragraph(pending, command.state === 'pending' ? 'Queued for review.' :
-        command.state === 'executing' ? 'Action running…' : 'Approved; waiting for service…');
-      article.append(pending);
+        button(byId('pairing'), 'Decline', () => request('cancelPairing'));
+      } else button(byId('pairing'), 'Start again', () => request('pairAgain'));
     }
-    button(article, 'View tab', () => request('inspectTab', { tabId: target.tabId }));
-    if (target.target_id) {
-      button(article, 'Stop sharing', () => request('end', { target_id: target.target_id, reason: 'OWNER_PAUSED' }));
-      paragraph(article, 'Stop closes this controlled tab and loses unsaved state.');
-    }
-    byId('targets').append(article);
   }
-  for (const workspace of snapshot.workspaces || []) {
-    if (snapshot.targets.some(target => target.tabId === workspace.tabId)) continue;
-    const article = document.createElement('article');
-    paragraph(article, `Workspace window ${workspace.windowId}: sharing ended.`);
-    button(article, 'Close controlled tab', () => request('closeWorkspace', {
-      tabId: workspace.tabId, windowId: workspace.windowId,
-    }));
-    byId('targets').append(article);
+  const targets = byId('targets');
+  if (targets) {
+    targets.replaceChildren();
+    const workspace = snapshot.workspaces[0];
+    if (!workspace) {
+      text(targets, 'Start a fresh grouped workspace. Normal website logins are reused; this is not a sandbox.');
+      button(targets, 'Start browsing with your assistant', async () => {
+        const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
+        if (!granted) throw new Error('PERMISSION_REQUIRED');
+        await request('start', { windowId });
+      });
+    } else {
+      text(targets, `Workspace ${workspace.state}. Grouped tabs are available in the background.`);
+      if (workspace.state !== 'active') {
+        button(targets, 'Resume workspace', () => request('start', { windowId }));
+      } else button(targets, 'Pause all', () => request('pause', { workspace_id: workspace.workspace_id }));
+      button(targets, 'End session', () => request('end', { workspace_id: workspace.workspace_id }));
+      button(targets, 'Add current tab', () => request('add', { workspace_id: workspace.workspace_id }));
+      button(targets, 'Move task to its own window', () => request('move', { workspace_id: workspace.workspace_id }));
+      for (const tab of workspace.tabs) {
+        const row = document.createElement('article');
+        text(row, `${tab.title} - ${tab.page_state}`);
+        button(row, 'Go to tab', () => request('focus', { workspace_id: workspace.workspace_id, tabId: tab.tabId }));
+        for (const command of tab.commands) {
+          text(row, `${command.operation}: ${command.description}`);
+          if (command.human && !command.executing) {
+            button(row, 'Done', () => request('decision', { request_id: command.request_id, action: 'done' }));
+            button(row, 'Cancel', () => request('decision', { request_id: command.request_id, action: 'cancel' }));
+          }
+        }
+        targets.append(row);
+      }
+    }
   }
   if (byId('activity')) {
     byId('activity').replaceChildren();
-    for (const entry of [...(snapshot.activity || [])].reverse().slice(0, 100)) {
-      paragraph(byId('activity'), `${new Date(entry.time).toLocaleTimeString()} · ${entry.event}` +
-        `${entry.operation ? ` · ${entry.operation}` : ''}${entry.code ? ` · ${entry.code}` : ''}`);
+    for (const event of snapshot.activity.slice(-50).reverse()) {
+      text(byId('activity'), `${new Date(event.time).toLocaleTimeString()} ${event.event} ${event.operation || ''} ${event.code || ''}`);
     }
-    if (snapshot.history_unavailable) paragraph(byId('activity'), 'History persistence failed; some events may be missing.');
+    if (byId('connections')) {
+      byId('connections').replaceChildren();
+      for (const connection of snapshot.saved_connections) {
+        if (connection.origin === snapshot.config.service_origin && connection.tenant_id === snapshot.config.tenant_id) continue;
+        button(byId('connections'), `Select ${connection.label}`, () => request('switch', {
+          origin: connection.origin, tenant_id: connection.tenant_id,
+        }));
+      }
+    }
   }
-  const failures = snapshot.failures.filter(code => code !== 'INDICATOR_UNAVAILABLE');
-  if (failures.length) showError(new Error(failures.at(-1)));
-  else byId('error').textContent = '';
+  if (snapshot.failures.length) error(new Error(snapshot.failures.at(-1)));
 }
-
-async function refresh() {
-  const snapshot = await request('state');
-  const serialized = JSON.stringify(snapshot);
-  if (serialized !== lastRender) {
-    render(snapshot);
-    lastRender = serialized;
-  }
-}
-
+async function refresh() { render(await request('state', location.pathname === '/panel.html' ? { windowId } : {})); }
 byId('config')?.addEventListener('submit', event => {
   event.preventDefault();
-  void action(async () => {
-    let pair;
-    try { pair = parseConnectionUrl(byId('connection-link').value); } catch { throw new Error('INVALID_CONNECTION_LINK'); }
-    const granted = await api.permissions.request({ origins: [`${pair.origin}/*`] });
-    if (!granted) throw new Error('PERMISSION_REQUIRED');
-    await request('configure', { config: { connection_url: pair.connection_url,
-      local_protected_origins: byId('protected').value.split(/\s+/).filter(Boolean) } });
-    const snapshot = await request('state');
-    if (snapshot.identity) await request('connect');
-    else {
-      await request('enroll', { label: 'My browser' });
-      await request('openSignIn');
-    }
+  void run(async () => {
+    let input = byId('domain').value.trim();
+    if (!input.includes('://')) input = `https://${input}`;
+    const origin = serviceOrigin(input);
+    if (!await api.permissions.request({ origins: [`${origin}/*`] })) throw new Error('PERMISSION_REQUIRED');
+    await request('configure', { service_origin: origin });
   });
 });
-byId('connect').addEventListener('click', () => action(() => request('connect')));
-byId('disconnect').addEventListener('click', () => action(() => request('disconnect')));
-byId('options')?.addEventListener('click', () => api.runtime.openOptionsPage().catch(showError));
-byId('add-connection')?.addEventListener('click', () => {
-  byId('config').hidden = false;
-  byId('connection-link').focus();
+byId('options')?.addEventListener('click', () => api.runtime.openOptionsPage().catch(error));
+byId('connect')?.addEventListener('click', () => { void run(() => request('connect')); });
+byId('disconnect')?.addEventListener('click', () => { void run(() => request('disconnect')); });
+byId('open-panel')?.addEventListener('click', () => {
+  const open = api.sidePanel ? api.sidePanel.open({ windowId }) : api.sidebarAction.open();
+  void open.catch(error);
 });
-byId('done')?.addEventListener('click', () => window.close());
-async function shareSelected(clientId) {
-  const selected = selectedTab;
-  if (!selected) throw new Error('TARGET_STALE');
-  const granted = await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
-  if (!granted) throw new Error('PERMISSION_REQUIRED');
-  await request('shareSelected', { tabId: selected.tabId, ...(clientId ? { client_id: clientId } : {}) });
-}
-byId('share-selected')?.addEventListener('click', () => action(() => shareSelected()));
-refresh().catch(showError);
-setInterval(() => { if (!busy) refresh().catch(showError); }, 250);
+void api.windows.getCurrent().then(browserWindow => {
+  windowId = browserWindow.id;
+  if (location.pathname === '/panel.html') {
+    const port = api.runtime.connect({ name: 'domagent-panel' });
+    const heartbeat = () => port.postMessage({ type: 'heartbeat', windowId });
+    const timer = setInterval(heartbeat, 1000);
+    port.onMessage.addListener(message => { if (message.type === 'state') render(message.value); });
+    port.onDisconnect.addListener(() => { clearInterval(timer); error(new Error('WORKSPACE_INACTIVE')); });
+    window.addEventListener('pagehide', () => { clearInterval(timer); port.disconnect(); }, { once: true });
+    heartbeat();
+  } else setInterval(() => { if (!busy) void refresh().catch(error); }, 1500);
+  return refresh();
+}).catch(error);

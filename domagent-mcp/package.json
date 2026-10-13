@@ -1,7 +1,7 @@
 {
     "name": "domagent",
     "private": true,
-    "version": "4.3.0-beta.3",
+    "version": "5.0.0-beta.1",
     "description": "MCP server for DOMAgent — let AI agents control your real browser via Chrome or Firefox extension",
     "main": "index.js",
     "type": "module",
@@ -45,7 +45,6 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "1.32.1",
-        "openid-client": "6.8.1",
         "ws": "8.22.0"
     },
     "devDependencies": {

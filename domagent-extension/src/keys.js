@@ -41,6 +41,17 @@ export class IndexedStore {
       tx.onabort = () => reject(tx.error || new Error('Device key write aborted'));
     });
   }
+
+  async delete(connection) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('services', 'readwrite');
+      tx.objectStore('services').delete(connection);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('Device key delete aborted'));
+    });
+  }
 }
 
 export class DeviceKeys {
@@ -79,6 +90,33 @@ export class DeviceKeys {
       privateKey: keys.privateKey, public_key, key_id: await keyId(public_key),
       enrollment: null, identity: null, protected_origins: [],
     });
+  }
+
+  async pending(origin) {
+    origin = serviceOrigin(origin);
+    const connection = `${origin}/pairing`;
+    const existing = await this.store.get(connection);
+    if (existing) {
+      if (existing.origin !== origin || existing.connection_url !== connection ||
+          existing.privateKey?.extractable !== false || existing.privateKey?.type !== 'private' ||
+          existing.privateKey?.algorithm?.name !== 'ECDSA' ||
+          existing.privateKey?.algorithm?.namedCurve !== 'P-256' ||
+          existing.key_id !== await keyId(existing.public_key)) fail('NOT_AUTHORIZED');
+      return existing;
+    }
+    const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    const public_key = await crypto.subtle.exportKey('jwk', keys.publicKey);
+    return this.store.put({ origin, connection_url: connection, privateKey: keys.privateKey,
+      public_key, key_id: await keyId(public_key), identity: null, protected_origins: [] });
+  }
+
+  async bind(record, identity) {
+    const connection = connectionUrl(record.origin, identity.tenant_id);
+    const existing = await this.store.get(connection);
+    if (existing && existing.key_id !== record.key_id) fail('NOT_AUTHORIZED');
+    const bound = await this.store.put({ ...record, connection_url: connection, tenant_id: identity.tenant_id, identity });
+    await this.store.delete(record.connection_url);
+    return bound;
   }
 
   save(record) {

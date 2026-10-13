@@ -2,70 +2,58 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Controller } from '../src/controller.js';
 import { DeviceKeys } from '../src/keys.js';
-import { enrollmentPayload, startPayload, statusPayload, verify } from '../../shared/protocol.js';
+import { pairingStartPayload, pairingStatusPayload, pairingConfirmPayload, verify } from '../../shared/protocol.js';
 
-test('enrollment validates tenant approval, automatically confirms/connects, but never grants local control', async () => {
-  const records = new Map();
-  const keys = new DeviceKeys({
-    async get(origin) { return records.get(origin); },
-    async put(record) { records.set(record.connection_url, record); return record; },
-  });
+test('domain-only reverse pairing binds an authenticated proposal only after trusted local confirmation', async () => {
   const origin = 'https://control.example';
-  const tenant_id = 't_abcdefghijklmnopqrstuv';
-  const extension_origin = 'moz-extension://11111111-1111-1111-1111-111111111111';
-  let phase = 'pending';
-  let confirmations = 0;
-  const controller = new Controller({
-    adapter: { capabilities: () => [], async release() {} },
-    keys, storage: { async set() {} }, extensionUrl: `${extension_origin}/`,
-    Socket: class { constructor() { this.readyState = 0; } close() {} },
-    fetcher: async (url, options) => {
-      assert.equal(options.credentials, 'omit');
-      assert.equal(options.redirect, 'error');
-      const body = options.body ? JSON.parse(options.body) : null;
-      const path = new URL(url).pathname.split('/').at(-1);
-      let value;
-      assert.equal(new URL(url).pathname.startsWith(`/api/tenants/${tenant_id}/enrollment/`), true);
-      if (body) assert.equal(body.tenant_id, tenant_id);
-      if (path === 'challenge') value = { origin, tenant_id, nonce: 'challenge-nonce' };
-      if (path === 'start') {
-        assert.equal(body.extension_origin, extension_origin);
-        assert.equal(await verify(body.public_key, startPayload({ ...body, origin }), body.signature), true);
-        value = { tenant_id, enrollment_id: 'enrollment-1', verification_url: `${origin}/pair/${tenant_id}?enrollment=enrollment-1`,
-          expires_at: Date.now() + 60_000 };
-      }
-      if (path === 'status') {
-        assert.equal(await verify(controller.record.public_key,
-          statusPayload({ ...body, origin }), body.signature), true);
-        value = { tenant_id, state: phase, enrollment_id: 'enrollment-1' };
-        if (phase === 'approved') Object.assign(value, { owner_id: 'owner-1', owner_label: 'Owner',
-          key_id: controller.record.key_id, nonce: 'approval-nonce', extension_origin,
-          tenant_label: 'Atlas', protected_origins: ['https://idp.example'], expires_at: Date.now() + 60_000 });
-      }
-      if (path === 'confirm') {
-        confirmations++;
-        assert.equal(await verify(controller.record.public_key,
-          enrollmentPayload({ ...controller.record.enrollment, origin }), body.signature), true);
-        value = { ...controller.record.enrollment, device_id: 'device-1' };
-      }
-      return { ok: true, async text() { return JSON.stringify(value); } };
-    },
+  const records = new Map(), saved = {}, calls = [];
+  const keys = new DeviceKeys({
+    async get(key) { return records.get(key); },
+    async put(record) { records.set(record.connection_url, record); return record; },
+    async delete(key) { records.delete(key); },
   });
-  await controller.configure({ service_origin: origin, tenant_id, local_protected_origins: ['https://banana.example'] });
-  await controller.enroll('My Firefox');
-  const key = controller.record.key_id;
-  await assert.rejects(controller.confirmEnrollment(), /ENROLLMENT_EXPIRED/);
-  await controller.enrollmentStatus();
-  assert.equal(controller.record.enrollment.owner_id, undefined);
-  phase = 'approved';
-  await controller.enrollmentStatus();
-  assert.equal(confirmations, 1);
-  assert.equal(controller.phase, 'connecting');
-  assert.equal(controller.grants.size, 0);
-  assert.equal(controller.record.key_id, key);
-  assert.equal(controller.record.enrollment, null);
-  assert.equal(controller.record.identity.owner_id, 'owner-1');
-  assert.deepEqual(controller.protectedOrigins(), [origin, 'https://banana.example', 'https://idp.example']);
-  assert.equal((await new DeviceKeys(keys.store).get(origin, tenant_id)).identity.device_id, 'device-1');
-  controller.dispose();
+  let started;
+  const tenant_id = 't_abcdefghijklmnopqrstuv';
+  const proposal = { proposal_id: crypto.randomUUID(), tenant_id, client_id: 'client-1', client_label: 'Atlas', nonce: 'nonce-confirm' };
+  const fetcher = async (url, args) => {
+    const body = args.body ? JSON.parse(args.body) : null;
+    calls.push({ url, body });
+    let value;
+    if (url.endsWith('/challenge')) value = { origin, nonce: 'nonce-start', expires_at: Date.now() + 300000 };
+    else if (url.endsWith('/start')) {
+      started = body;
+      assert.equal(Object.hasOwn(body, 'origin'), false);
+      assert.equal(body.pairing_code.length, 8);
+      assert.equal(body.receipt.length, 43);
+      assert(await verify(body.public_key, pairingStartPayload({ ...body, origin }), body.signature));
+      value = { request_id: body.request_id, expires_at: Date.now() + 300000 };
+    } else if (url.endsWith('/status')) {
+      assert(await verify(started.public_key, pairingStatusPayload({ ...body, origin }), body.signature));
+      value = { state: 'proposed', expires_at: Date.now() + 300000, ...proposal };
+    } else if (url.endsWith('/confirm')) {
+      assert(await verify(started.public_key, pairingConfirmPayload({ ...body, origin }), body.signature));
+      value = { state: 'confirmed', device_id: 'device-1', ...proposal, protected_origins: [origin] };
+    } else throw new Error('Unexpected API');
+    return { ok: true, async text() { return JSON.stringify(value); } };
+  };
+  class Socket { constructor() { this.readyState = 1; } close() {} }
+  const controller = new Controller({ adapter: {}, keys, storage: { async set(value) { Object.assign(saved, value); } },
+    extensionUrl: 'moz-extension://11111111-1111-4111-8111-111111111111/', fetcher, Socket });
+  try {
+    await controller.configure({ service_origin: 'control.example' });
+    await controller.beginPairing();
+    assert.equal(controller.record, null);
+    assert.equal(controller.snapshot().pairing.code.length, 9);
+    assert.equal(JSON.stringify(controller.snapshot()).includes(started.receipt), false);
+    await controller.pairingStatus();
+    assert.equal(controller.record, null);
+    await controller.confirmPairing();
+    assert.equal(controller.record.identity.client_id, 'client-1');
+    assert.equal(controller.record.privateKey.extractable, false);
+    assert.equal(controller.record.key_id, started.key_id);
+    assert.equal(controller.workspaces.size, 0);
+    assert.equal(controller.config.tenant_id, tenant_id);
+    assert.equal(saved.config.enabled, true);
+    assert(!calls.some(call => /login|oidc|pair\/t_/.test(call.url)));
+  } finally { controller.dispose(); }
 });

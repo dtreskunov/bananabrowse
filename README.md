@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.3**, extensions **5.0.1**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.3).
+Service **5.0.0-beta.4**, extensions **5.0.2**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.4).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -55,6 +55,9 @@ repeated per-action prompts.
   errors. A retained same-named group is not automatically authorized; choose
   its explicit native group ID in the sidebar instead of re-pairing/creating
   yet another group.
+- Removed/moved tracked groups no longer trap End/Resume during cosmetic color
+  cleanup. The stale local record is retired, pairing stays intact and the user
+  can select an existing group or start anew. No tabs are deleted or auto-adopted.
 - Toolbar/sidebar and supported native tab menus add/remove the clicked tab.
 - Moving a task to its own window is optional and pauses until revalidated.
 

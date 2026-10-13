@@ -16,6 +16,7 @@ const errors = {
   PANEL_OPEN_REQUIRED: 'Click the DomAgent toolbar in this window to open its native sidebar.',
   TAB_LIMIT_REACHED: 'The workspace has reached its eight-tab limit.',
   NOTIFICATION_UNAVAILABLE: 'The system notification could not be delivered. Check browser notification settings.',
+  GROUP_UNAVAILABLE: 'The tracked group is no longer in this window. Choose an existing group below or start a new task group. Pairing is still valid.',
 };
 const endReasons = {
   SERVICE_RESTARTED: 'The service restarted. Resume this workspace locally; no re-pairing is needed.',

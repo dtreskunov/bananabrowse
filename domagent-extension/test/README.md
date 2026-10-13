@@ -63,3 +63,7 @@ retention, signed optional reasons, lease expiry and legacy snapshot compatibili
 Resolved red authorization errors clear while history/persistence warnings remain.
 Explicit existing-group selection reuses tabs; duplicate titles alone do not
 authorize them or silently create another group.
+Removed-group regressions reproduce a color-update failure blocking End and
+subsequent group selection. Native ungroup/removal now retires the stale local
+record without closing tabs, and explicit selection recovers. The between-query/
+lookup deletion race is covered; non-removal permission errors remain explicit.

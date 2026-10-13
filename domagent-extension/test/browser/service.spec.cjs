@@ -160,6 +160,23 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
     expect((await state()).workspaces[0].groupId).toBe(first.groupId);
     expect((await options.evaluate(() => chrome.tabs.query({}))).length).toBe(tabsAfter.length);
+    await options.evaluate(async groupId => {
+      const grouped = await chrome.tabs.query({ groupId });
+      await chrome.tabs.ungroup(grouped.map(tab => tab.id));
+    }, first.groupId);
+    await expect.poll(async () => (await state()).workspaces.length).toBe(0);
+    expect((await state()).current_error).toBe('GROUP_UNAVAILABLE');
+    const candidate = await options.evaluate(async windowId => {
+      const tab = await chrome.tabs.create({ windowId, url: 'about:blank', active: false });
+      return chrome.tabs.group({ tabIds: [tab.id] });
+    }, windowId);
+    await request({ type: 'ui.start', windowId, groupId: candidate });
+    await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
+    await expect.poll(async () => (await state()).current_error).toBe(null);
+    expect((await state()).workspaces[0].groupId).toBe(candidate);
+    const finalTabs = await options.evaluate(() => chrome.tabs.query({}));
+    expect(finalTabs.filter(tab => tab.groupId === first.groupId)).toHaveLength(0);
+    expect(finalTabs.some(tab => tab.id === unshared.id)).toBe(true);
   } finally {
     await client?.close(); await context?.close(); await app.close(); store.close();
     tls.closeAllConnections(); pageServer.closeAllConnections();

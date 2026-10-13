@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "minimum_chrome_version": "145",
   "description": "Share selected browser tabs with your assistant and approve actions while collaborating.",
   "permissions": ["debugger", "tabs", "storage", "scripting", "webNavigation", "notifications", "declarativeNetRequest", "sidePanel", "tabGroups", "contextMenus"],

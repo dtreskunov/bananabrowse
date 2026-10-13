@@ -73,7 +73,7 @@ export class Controller {
 
   resolveConnectionError() {
     if (['NOT_AUTHORIZED', 'BROWSER_OFFLINE', 'WORKSPACE_INACTIVE', 'WORKSPACE_PAUSED',
-      'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED'].includes(this.currentError)) this.currentError = null;
+      'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED', 'GROUP_UNAVAILABLE'].includes(this.currentError)) this.currentError = null;
   }
 
   async initialize() {
@@ -366,6 +366,12 @@ export class Controller {
     await this.adapter.permissions();
     await Promise.all([...this.endingTasks]);
     let workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
+    if (workspace && !await this.groupExists(workspace)) {
+      await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
+      this.workspaces.delete(workspace.id);
+      workspace = null;
+      if (selectedGroupId === undefined) fail('GROUP_UNAVAILABLE');
+    }
     if (selectedGroupId !== undefined) {
       if (!Number.isSafeInteger(selectedGroupId) || selectedGroupId < 0) fail('INVALID_ARGUMENT');
       const group = await this.adapter.api.tabGroups.get(selectedGroupId);
@@ -430,6 +436,12 @@ export class Controller {
     if (workspace.state !== 'active') return;
     const activation = workspace.activationId;
     if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive', 'VISIBILITY_LOST'); return; }
+    if (!await this.groupExists(workspace)) {
+      await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
+      this.workspaces.delete(workspace.id);
+      this.report(new Error('GROUP_UNAVAILABLE'));
+      return;
+    }
     const group = await this.adapter.api.tabGroups.get(workspace.groupId);
     if (group.windowId !== workspace.windowId) { await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED'); return; }
     const tabs = await this.adapter.api.tabs.query({ groupId: workspace.groupId });
@@ -505,7 +517,10 @@ export class Controller {
           }
         } catch (error) {
           await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
-          this.report(error);
+          if (!await this.groupExists(workspace)) {
+            this.workspaces.delete(workspace.id);
+            this.report(new Error('GROUP_UNAVAILABLE'));
+          } else this.report(error);
         }
       }
     } finally { this.syncing = false; this.changed(); }
@@ -530,7 +545,7 @@ export class Controller {
       { code: task.executing ? 'OUTCOME_UNKNOWN' : state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE' });
     this.changed();
     await this.sync(workspace);
-    await this.adapter.api.tabGroups.update(workspace.groupId, { color: 'grey' });
+    await this.groupColor(workspace);
   }
 
   check(workspace, tab, task, after = false) {
@@ -739,11 +754,21 @@ export class Controller {
     catch (failure) { this.report(failure); }
   }
 
+  async groupExists(workspace) {
+    const groups = await this.adapter.api.tabGroups.query({ windowId: workspace.windowId });
+    return groups.some(group => group.id === workspace.groupId);
+  }
+
   async groupColor(workspace) {
+    if (!await this.groupExists(workspace)) return;
     const human = [...this.notificationTasks.values()].some(entry => entry.workspace === workspace);
     let color = 'grey';
     if (workspace.state === 'active') color = human ? 'yellow' : 'blue';
-    await this.adapter.api.tabGroups.update(workspace.groupId, { color });
+    try { await this.adapter.api.tabGroups.update(workspace.groupId, { color }); }
+    catch (error) {
+      if (await this.groupExists(workspace)) throw error;
+      console.warn('DomAgent: group was removed during its status update; access remains revoked.');
+    }
   }
 
   async tick() {

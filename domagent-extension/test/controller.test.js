@@ -33,7 +33,9 @@ async function fixture(t) {
     async releaseAction() {},
     async execute(tab, operation, args, check) { check(); calls.push(['execute', tab.tabId, operation]); return { text: 'Fixture' }; },
     api: {
-      tabGroups: { async get() { return { windowId: 10 }; }, async update(_id, args) { calls.push(['color', args.color]); } },
+      tabGroups: { async get() { return { windowId: 10 }; },
+        async query() { return [{ id: 1, windowId: 10 }, { id: 2, windowId: 10 }]; },
+        async update(_id, args) { calls.push(['color', args.color]); } },
       tabs: {
         async query() { return tabs; },
         async get(id) { return tabs.find(tab => tab.id === id); },
@@ -218,6 +220,50 @@ test('choosing a retained group requires native panel/user activation and never 
   f.setOpen(true);
   await assert.rejects(f.controller.startWorkspace(10, 3), /WORKSPACE_CHANGED/);
   assert.equal(f.controller.workspaces.size, 1);
+});
+
+test('a removed tracked group cannot trap End/Resume or prevent explicitly selecting another retained group', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  f.adapter.api.tabGroups.query = async () => [{ id: 2, windowId: 10, title: 'DomAgent - Atlas' }];
+  f.adapter.api.tabGroups.get = async groupId => {
+    if (groupId === 1) throw new Error('No group with id: 1');
+    return { id: groupId, windowId: 10 };
+  };
+  f.adapter.api.tabGroups.update = async groupId => {
+    if (groupId === 1) throw new Error('No group with id: 1');
+  };
+  await f.controller.stopWorkspace(workspace, 'inactive');
+  await f.controller.startWorkspace(10, 2);
+  assert.equal([...f.controller.workspaces.values()][0].groupId, 2);
+  assert.equal(f.calls.some(call => call[0] === 'remove'), false);
+});
+
+test('removed group refresh retires its local record without affecting tabs, and unrelated status errors remain explicit', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  f.adapter.api.tabGroups.query = async () => [];
+  await f.controller.refresh();
+  assert.equal(f.controller.workspaces.size, 0);
+  assert.equal(workspace.state, 'inactive');
+  assert.equal(f.controller.currentError, 'GROUP_UNAVAILABLE');
+  assert.equal(f.calls.some(call => call[0] === 'remove'), false);
+  const sync = f.socket.sent.filter(message => message.type === 'workspace.sync').at(-1);
+  assert.equal(sync.state, 'inactive');
+  assert.deepEqual(sync.tabs, []);
+  f.adapter.api.tabGroups.query = async () => [{ id: 1, windowId: 10 }];
+  f.adapter.api.tabGroups.update = async () => { throw new Error('Group API permission failure'); };
+  await assert.rejects(f.controller.groupColor(workspace), /Group API permission failure/);
+});
+
+test('group disappearing between existence query and native lookup still retires safely', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  let queries = 0;
+  f.adapter.api.tabGroups.query = async () => ++queries === 1 ? [{ id: 1, windowId: 10 }] : [];
+  f.adapter.api.tabGroups.get = async () => { throw new Error('No group with id: 1'); };
+  await f.controller.refresh();
+  assert.equal(f.controller.workspaces.size, 0);
+  assert.equal(workspace.state, 'inactive');
+  assert.equal(f.controller.currentError, 'GROUP_UNAVAILABLE');
+  assert.equal(f.calls.some(call => call[0] === 'remove'), false);
 });
 
 test('protected navigation revokes authority synchronously but retains its rejection guard', async t => {

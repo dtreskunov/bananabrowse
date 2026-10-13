@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.3 / extension5.0.1 is the current matched release.
+Service5.0.0-beta.4 / extension5.0.2 is the current matched release.
 
 ## Tools
 
@@ -80,6 +80,11 @@ Successful reconnect/active acknowledgement clears resolved transport/auth error
 not unrelated history-persistence/notification failures. Retained same-named
 native groups may be chosen explicitly at Start; name alone never grants scope
 and group movement/window validation still applies.
+If that native group no longer exists in the window, authority is revoked and
+the stale local record is retired. Cosmetic group-color updates skip only a
+verified absent group; actual API/permission failures are not swallowed.
+GROUP_UNAVAILABLE directs the user to existing-group selection/new Start without
+re-pairing. Neither deletion races nor stale color updates may trap End/Resume.
 
 System notification plus toolbar pending count announces human assistance.
 Notification delivery failure is explicit; OS suppression cannot prove visibility.

@@ -103,6 +103,7 @@ export function errorCode(error) {
     'DOCUMENT_NOT_CONTROLLABLE', 'TAB_LIMIT_REACHED', 'NOTIFICATION_UNAVAILABLE',
     'PAIRING_UNAVAILABLE', 'PAIRING_CODE_COLLISION', 'RATE_LIMITED',
     'UPGRADE_REQUIRED', 'WORKSPACE_LIMIT',
+    'GROUP_UNAVAILABLE',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

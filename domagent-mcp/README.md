@@ -1,4 +1,4 @@
-# DomAgent service 5.0.0-beta.2
+# DomAgent service 5.0.0-beta.3
 
 Node 22.13+ authenticated tenant-scoped Streamable HTTP MCP and signed browser
 wire **v5**. Existing `/mcp/<tenant>` credentials/identities and
@@ -127,6 +127,18 @@ Active leases are at most five seconds; closure/Pause/End/removal/disconnect
 invalidate authority. Old leases cannot reactivate: explicit fresh activation
 and fresh handles are needed. The service never resumes a sidebar or replays
 cancelled work. `workspace.active` acknowledges each validated revision.
+
+Device discovery includes service_epoch/service_started_at and current connection_id.
+Inactive workspace summaries retain end_reason/ended_at for up to ten minutes
+without tab metadata or authority. Lease expiry and disconnect record terminal
+state; revocation still removes eligibility. These summaries are client-scoped.
+Updated extensions sign optional end_reason metadata and, after reconnect, may
+republish only inactive empty summaries with a fresh activation. They can report
+SERVICE_RESTARTED by comparing the authenticated service epoch with their saved
+prior epoch; last_session_end is explicitly extension-reported context, not proof
+of why a socket closed. Identity reconnect never activates the group.
+Unknown old handles/tombstones still do not survive server restart; compare
+generations and ask for local Resume, not credential replacement or re-pairing.
 
 Ordinary tools take `description`, `target_id` and their operation arguments,
 **not** `wait_timeout_seconds`. Descriptions count Unicode code points: trimmed

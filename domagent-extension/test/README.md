@@ -54,3 +54,12 @@ The old v4 extended Juggler consent test was retired with that protocol, not
 silently used as proof of v5 parity. Firefox coverage is its actual native RDP
 engine; page-helper-only tests run both engines. No published browser-profile
 specific POST bug is considered fixed merely by these disposable results.
+
+Restart patch tests stop/recreate the actual Chrome fixture service while the
+native panel/group remains open, verify epoch/connection changes and inactive
+empty signed reprojection without replay, then require explicit local Resume and
+fresh handles. Unit tests cover caller-scoped terminal metadata, ten-minute
+retention, signed optional reasons, lease expiry and legacy snapshot compatibility.
+Resolved red authorization errors clear while history/persistence warnings remain.
+Explicit existing-group selection reuses tabs; duplicate titles alone do not
+authorize them or silently create another group.

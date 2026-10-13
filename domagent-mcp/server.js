@@ -5,6 +5,7 @@ import {
   WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
   authPayload, workspacePayload, verify, navigationUrl, validOperationArgs, validTargetId,
   validDescription, inspectionErrorDetails, waitErrorDetails, validBrowserInfo,
+  validWorkspaceEndReason,
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
@@ -26,6 +27,7 @@ export class BridgeServer {
   constructor(store, config) {
     this.store = store; this.config = config; this.now = config.now || Date.now;
     this.epoch = randomUUID();
+    this.startedAt = this.now();
     this.connections = new Map(); this.workspaces = new Map(); this.targets = new Map();
     this.calls = new Map(); this.waiters = new Set(); this.tombstones = new Map(); this.sockets = new Set();
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
@@ -103,12 +105,20 @@ export class BridgeServer {
       session.authenticated = true; session.lastSeen = this.now(); this.connections.set(session.device.id, session);
       this.send(session, { type: 'authenticated', device_id: session.device.id, client_id: session.client_id,
         client_label: this.store.client(session.client_id).label, epoch: this.epoch,
-        connection_id: session.connection_id, protected_origins: this.config.protectedOrigins });
+        connection_id: session.connection_id, service_started_at: this.startedAt,
+        protected_origins: this.config.protectedOrigins });
       return;
     }
     requireValue(this.current(session), 'NOT_AUTHORIZED', 403);
     session.lastSeen = this.now();
     if (m.type === 'pong') return;
+    if (m.type === 'session.status') {
+      requireValue(validWorkspaceEndReason(m.end_reason) &&
+        (m.previous_service_epoch === null || UUID.test(m.previous_service_epoch || '')), 'INVALID_MESSAGE');
+      session.last_session_end = { reason: m.end_reason, reported_at: this.now(),
+        previous_service_epoch: m.previous_service_epoch, source: 'extension_reported' };
+      return;
+    }
     if (m.type === 'workspace.sync') { await this.syncWorkspace(session, m); return; }
     if (m.type === 'command.ready') {
       const call = this.calls.get(m.request_id);
@@ -157,6 +167,9 @@ export class BridgeServer {
       STATES.has(m.state) && Number.isSafeInteger(m.revision) && m.revision > 0 &&
       Number.isSafeInteger(m.lease_ms) && m.lease_ms > 0 && m.lease_ms <= WORKSPACE_LEASE_MS &&
       Array.isArray(m.tabs) && m.tabs.length <= WORKSPACE_TAB_LIMIT, 'INVALID_WORKSPACE');
+    requireValue(m.end_reason === undefined ||
+      (m.state !== 'active' && validWorkspaceEndReason(m.end_reason)), 'INVALID_WORKSPACE');
+    requireValue(m.state === 'active' || m.tabs.length === 0, 'INVALID_WORKSPACE');
     const seenTargets = new Set(), seenTabs = new Set();
     for (const tab of m.tabs) {
       requireValue(tab && UUID.test(tab.target_id || '') && validInt(tab.tab_id) &&
@@ -185,8 +198,12 @@ export class BridgeServer {
     requireValue(verified && this.current(session), 'NOT_AUTHORIZED', 403);
     let workspace = this.workspaces.get(m.workspace_id);
     if (workspace) {
-      requireValue(workspace.device_id === session.device.id && workspace.connection_id === session.connection_id &&
+      requireValue(workspace.device_id === session.device.id &&
         workspace.client_id === session.client_id, 'NOT_AUTHORIZED', 403);
+      if (workspace.connection_id !== session.connection_id) {
+        requireValue(workspace.state === 'inactive' && m.state === 'inactive' &&
+          m.tabs.length === 0 && workspace.activation_id !== m.activation_id, 'WORKSPACE_INACTIVE');
+      }
       requireValue(m.revision > workspace.revision, 'TARGET_STALE');
       this.expire(workspace);
       requireValue(!workspace.retiredActivations.has(m.activation_id), 'WORKSPACE_INACTIVE');
@@ -230,6 +247,10 @@ export class BridgeServer {
     }
     Object.assign(workspace, { activation_id: m.activation_id, group_id: m.group_id, window_id: m.window_id,
       revision: m.revision, state: m.state, credential_hash: session.credential_hash, expires_at: this.now() + m.lease_ms });
+    workspace.connection_id = session.connection_id;
+    session.workspaces.add(m.workspace_id);
+    this.recordEnd(workspace, m.state === 'active' ? null : m.end_reason ||
+      (m.state === 'paused' ? 'USER_PAUSED' : 'USER_ENDED'));
     if (m.state !== 'active') this.invalidate(workspace, m.state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
     else {
       for (const id of [...workspace.tabs.keys()]) if (!seenTargets.has(id)) this.removeTarget(workspace, id, 'TAB_NOT_IN_WORKSPACE');
@@ -258,8 +279,19 @@ export class BridgeServer {
   }
   expire(workspace) {
     if (workspace.state === 'active' && this.now() >= workspace.expires_at) {
-      workspace.state = 'inactive'; this.invalidate(workspace, 'WORKSPACE_INACTIVE');
+      workspace.state = 'inactive'; this.recordEnd(workspace, 'LEASE_EXPIRED');
+      this.invalidate(workspace, 'WORKSPACE_INACTIVE');
     }
+  }
+  recordEnd(workspace, reason) {
+    if (reason === null) {
+      workspace.end_reason = null; workspace.ended_at = null; workspace.retained_until = null;
+      return;
+    }
+    if (workspace.end_reason !== reason || !workspace.ended_at) {
+      workspace.end_reason = reason; workspace.ended_at = this.now();
+    }
+    workspace.retained_until = workspace.state === 'inactive' ? this.now() + 600000 : null;
   }
   tombstone(target, reason) {
     this.tombstones.set(target.target_id, { client_id: target.workspace.client_id, tenant_id: target.workspace.tenant_id,
@@ -284,7 +316,12 @@ export class BridgeServer {
     for (const id of session.workspaces) {
       const workspace = this.workspaces.get(id);
       if (!workspace || workspace.connection_id !== session.connection_id) continue;
-      workspace.state = 'inactive'; this.invalidate(workspace, code); this.workspaces.delete(id);
+      workspace.state = 'inactive';
+      let reason = 'CONNECTION_LOST';
+      if (code === 'REPLACED') reason = 'CONNECTION_REPLACED';
+      else if (code === 'REVOKED') reason = 'CLIENT_REVOKED';
+      this.recordEnd(workspace, reason);
+      this.invalidate(workspace, code);
     }
     session.workspaces.clear(); session.authenticated = false;
     for (const waiter of [...this.waiters]) waiter.check();
@@ -315,7 +352,9 @@ export class BridgeServer {
     this.expire(workspace);
     return { workspace_id: workspace.workspace_id, activation_id: workspace.activation_id, state: workspace.state,
       tab_count: workspace.state === 'active' ? workspace.tabs.size : 0,
-      window_id: workspace.window_id, group_id: workspace.group_id, revision: workspace.revision };
+      window_id: workspace.window_id, group_id: workspace.group_id, revision: workspace.revision,
+      end_reason: workspace.end_reason || null, ended_at: workspace.ended_at ?? null,
+      service_epoch: this.epoch, connection_id: workspace.connection_id };
   }
   listWorkspaces(clientId, tenant) {
     requireValue(this.store.client(clientId, tenant), 'NOT_AUTHORIZED', 403);
@@ -323,6 +362,9 @@ export class BridgeServer {
       const session = this.connections.get(device.id), connected = Boolean(session && this.current(session));
       return { device_id: device.id, label: device.label, browser_info: connected ? session.browser_info : null,
         connection_state: connected ? 'connected' : 'offline',
+        service_epoch: this.epoch, service_started_at: this.startedAt,
+        connection_id: connected ? session.connection_id : null,
+        last_session_end: connected ? session.last_session_end || null : null,
         workspaces: [...this.workspaces.values()].filter(w => w.device_id === device.id && w.client_id === clientId)
           .map(w => this.workspaceMetadata(w)) };
     });
@@ -513,6 +555,13 @@ export class BridgeServer {
   }
   sweep() {
     this.reconcile();
+    for (const [id, workspace] of this.workspaces) {
+      if (workspace.state === 'inactive' && Number.isFinite(workspace.retained_until) &&
+          workspace.retained_until <= this.now()) {
+        this.workspaces.delete(id);
+        this.connections.get(workspace.device_id)?.workspaces.delete(id);
+      }
+    }
     for (const [id, row] of this.tombstones) if (row.expires <= this.now()) this.tombstones.delete(id);
     for (const session of [...this.connections.values()]) {
       if (this.now() - session.lastSeen >= LIVENESS_MS) { this.disconnected(session); session.ws.terminate(); }

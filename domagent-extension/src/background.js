@@ -50,7 +50,10 @@ async function uiAction(message) {
   if (fatal) throw fatal;
   if (message.type === 'ui.state') {
     const snapshot = controller.snapshot();
-    return { ...snapshot, ...(message.windowId !== undefined ? {
+    const groups = message.windowId === undefined ? [] : await api.tabGroups.query({ windowId: message.windowId });
+    return { ...snapshot, available_groups: groups.slice(0, 20).map(group => ({
+      groupId: group.id, title: group.title || 'Untitled group',
+    })), ...(message.windowId !== undefined ? {
       workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === message.windowId),
     } : {}) };
   }
@@ -74,7 +77,7 @@ async function uiAction(message) {
   if (message.type === 'ui.connect') return controller.enable();
   if (message.type === 'ui.disconnect') return controller.disconnect();
   if (message.type === 'ui.switch') return controller.switchConnection(message.origin, message.tenant_id);
-  if (message.type === 'ui.start') return controller.startWorkspace(message.windowId);
+  if (message.type === 'ui.start') return controller.startWorkspace(message.windowId, message.groupId);
   if (message.type === 'ui.decision') return controller.decide(message.request_id, message.action);
   const workspace = controller.workspaces.get(message.workspace_id);
   if (!workspace) fail('WORKSPACE_INACTIVE');
@@ -134,7 +137,9 @@ api.runtime.onConnect.addListener(port => {
       } else if (message.windowId !== windowId) fail('NOT_AUTHORIZED');
       adapter.touchPanel(windowId, port);
       const snapshot = controller.snapshot();
+      const groups = await api.tabGroups.query({ windowId });
       port.postMessage({ type: 'state', value: { ...snapshot,
+        available_groups: groups.slice(0, 20).map(group => ({ groupId: group.id, title: group.title || 'Untitled group' })),
         workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === windowId) } });
     }).catch(error => { controller.report(error); port.disconnect(); });
   });
@@ -164,6 +169,10 @@ action.onClicked.addListener(tab => {
     if (workspace?.state === 'paused' || workspace?.state === 'active') return;
     const permission = await api.permissions.contains({ origins: ['http://*/*', 'https://*/*'] });
     if (!permission) return;
+    if (!workspace) {
+      const groups = await api.tabGroups.query({ windowId: tab.windowId });
+      if (groups.some(group => group.title?.startsWith('DomAgent - '))) return;
+    }
     const deadline = Date.now() + 3000;
     while (!await adapter.panelOpen(tab.windowId)) {
       if (Date.now() >= deadline) fail('PANEL_OPEN_REQUIRED');

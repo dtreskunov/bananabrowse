@@ -3,6 +3,7 @@ import {
   authPayload, workspacePayload, serviceOrigin, tenantId, sign, pairingStartPayload, pairingStatusPayload,
   pairingConfirmPayload, pairingCancelPayload, validBrowserInfo, validDescription, OPERATIONS,
   navigationUrl, inspectionErrorDetails, waitErrorDetails, validOperationArgs,
+  validWorkspaceEndReason,
 } from '../../shared/protocol.js';
 import { boundedResult, checkBinding, errorCode, fail, id, originList, protectedUnion } from './security.js';
 import { ActivityHistory } from './activity.js';
@@ -25,6 +26,7 @@ export class Controller {
     this.lastPing = 0;
     this.workspaces = new Map();
     this.failures = [];
+    this.currentError = null;
     this.syncing = false;
     this.notificationTasks = new Map();
     this.endingTasks = new Set();
@@ -32,7 +34,7 @@ export class Controller {
     this.adapter.onWarning = error => this.report(error);
     this.adapter.onPanelClosed = windowId => {
       for (const workspace of this.workspaces.values()) {
-        if (workspace.windowId === windowId) void this.stopWorkspace(workspace, 'inactive').catch(error => this.report(error));
+        if (workspace.windowId === windowId) void this.stopWorkspace(workspace, 'inactive', 'PANEL_CLOSED').catch(error => this.report(error));
       }
     };
     this.adapter.onGroupsChanged = () => { void this.refresh().catch(error => this.report(error)); };
@@ -65,7 +67,13 @@ export class Controller {
     const code = errorCode(error);
     console.error('DomAgent:', code);
     this.failures = [...this.failures.slice(-4), code];
+    this.currentError = code;
     this.changed();
+  }
+
+  resolveConnectionError() {
+    if (['NOT_AUTHORIZED', 'BROWSER_OFFLINE', 'WORKSPACE_INACTIVE', 'WORKSPACE_PAUSED',
+      'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED'].includes(this.currentError)) this.currentError = null;
   }
 
   async initialize() {
@@ -94,12 +102,17 @@ export class Controller {
     return {
       config: this.config, phase: this.phase, browser_info: this.browserInfo,
       identity: this.record?.identity || null, saved_connections: this.savedConnections,
+      connection_info: this.connection ? { service_epoch: this.connection.epoch,
+        connection_id: this.connection.connection_id, service_started_at: this.serviceStartedAt } : null,
+      last_session_end: this.lastSessionEnd || null,
       pairing: this.pairing ? { code: this.pairing.code, expires_at: this.pairing.expires_at,
         state: this.pairing.state, proposal: this.pairing.proposal } : null,
-      failures: this.failures, activity: this.history.entries, history_unavailable: this.history.unavailable,
+      failures: this.failures, current_error: this.currentError,
+      activity: this.history.entries, history_unavailable: this.history.unavailable,
       workspaces: [...this.workspaces.values()].map(workspace => ({
         workspace_id: workspace.id, windowId: workspace.windowId, groupId: workspace.groupId,
-        state: workspace.state, tabs: [...workspace.tabs.values()].map(tab => ({
+        state: workspace.state, end_reason: workspace.endReason || null, ended_at: workspace.endedAt ?? null,
+        tabs: [...workspace.tabs.values()].map(tab => ({
           target_id: tab.targetId, tabId: tab.tabId, title: tab.title, url: tab.url,
           page_state: tab.pageState, commands: tab.queue.map(task => ({
             request_id: task.message.request_id, operation: task.message.operation,
@@ -290,13 +303,32 @@ export class Controller {
       checkBinding(message, this.challenge); id(message.client_id);
       if (typeof message.client_label !== 'string' || !message.client_label ||
           [...message.client_label].length > 80) fail('INVALID_MESSAGE');
+      const previousEpoch = this.record.last_service_epoch || null;
+      let endReason = this.lastSessionEnd?.reason || null;
+      if (previousEpoch && previousEpoch !== message.epoch) endReason = 'SERVICE_RESTARTED';
+      else if (!endReason && previousEpoch) endReason = 'CONNECTION_LOST';
       this.connection = { epoch: message.epoch, connection_id: message.connection_id, tenant_id: message.tenant_id,
         client_id: message.client_id, client_label: message.client_label };
+      this.serviceStartedAt = Number.isSafeInteger(message.service_started_at) ? message.service_started_at : null;
+      this.record.last_service_epoch = message.epoch;
       this.record.protected_origins = protectedUnion(this.config.service_origin, message.protected_origins);
       this.record.identity = { ...this.record.identity, client_id: message.client_id, client_label: message.client_label };
       await this.keys.save(this.record);
       if (!this.current(socket, generation)) return;
-      this.phase = 'authenticated'; this.lastPing = this.now(); this.history.record('connected'); this.changed();
+      this.phase = 'authenticated'; this.lastPing = this.now(); this.resolveConnectionError();
+      this.history.record('connected'); this.changed();
+      if (endReason) {
+        this.lastSessionEnd = { reason: endReason, at: this.now(), previous_service_epoch: previousEpoch };
+        this.send({ type: 'session.status', end_reason: endReason, previous_service_epoch: previousEpoch });
+        for (const workspace of this.workspaces.values()) {
+          if (workspace.state === 'active') await this.stopWorkspace(workspace, 'inactive', endReason);
+          workspace.activationId = crypto.randomUUID(); workspace.ackRevision = 0;
+          if (endReason === 'SERVICE_RESTARTED' || workspace.state !== 'paused') {
+            workspace.state = 'inactive'; workspace.endReason = endReason; workspace.endedAt = this.now();
+          }
+          await this.sync(workspace);
+        }
+      }
       return;
     }
     if (!this.connection) fail('NOT_AUTHORIZED');
@@ -305,6 +337,7 @@ export class Controller {
       const workspace = this.workspaces.get(message.workspace_id);
       if (workspace && workspace.activationId === message.activation_id && message.revision === workspace.revision) {
         workspace.ackRevision = message.revision;
+        if (workspace.state === 'active') this.resolveConnectionError();
         this.changed();
       }
       return;
@@ -327,14 +360,27 @@ export class Controller {
     fail('INVALID_MESSAGE');
   }
 
-  async startWorkspace(windowId) {
+  async startWorkspace(windowId, selectedGroupId) {
     if (!this.connection) fail('BROWSER_OFFLINE');
     if (!await this.adapter.panelOpen(windowId)) fail('PANEL_OPEN_REQUIRED');
     await this.adapter.permissions();
     await Promise.all([...this.endingTasks]);
     let workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
+    if (selectedGroupId !== undefined) {
+      if (!Number.isSafeInteger(selectedGroupId) || selectedGroupId < 0) fail('INVALID_ARGUMENT');
+      const group = await this.adapter.api.tabGroups.get(selectedGroupId);
+      if (group.windowId !== windowId) fail('WORKSPACE_CHANGED');
+      if (workspace && workspace.groupId !== selectedGroupId) {
+        await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
+        await Promise.all([...this.endingTasks]);
+        this.workspaces.delete(workspace.id);
+        workspace = null;
+      }
+    }
     if (!workspace) {
-      const created = await this.adapter.makeGroup(windowId, this.connection.client_label);
+      const created = selectedGroupId === undefined ? await this.adapter.makeGroup(windowId, this.connection.client_label) :
+        { groupId: selectedGroupId };
+      this.adapter.managedGroups?.add(created.groupId);
       workspace = { id: crypto.randomUUID(), groupId: created.groupId, windowId,
         activationId: crypto.randomUUID(), state: 'inactive', revision: 0, ackRevision: 0,
         tabs: new Map(), excluded: new Set(), previouslyExcluded: new Set(), tasks: [], running: 0, seen: new Set() };
@@ -342,6 +388,7 @@ export class Controller {
     }
     if (workspace.state === 'active') return;
     workspace.activationId = crypto.randomUUID();
+    workspace.endReason = null; workspace.endedAt = null;
     workspace.state = 'active'; workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
     await this.refreshWorkspace(workspace);
     await this.sync(workspace);
@@ -356,6 +403,7 @@ export class Controller {
       origin: this.config.service_origin, ...connection, workspace_id: workspace.id,
       activation_id: workspace.activationId, group_id: workspace.groupId, window_id: workspace.windowId,
       state: workspace.state, revision: ++workspace.revision,
+      ...(workspace.state !== 'active' && workspace.endReason ? { end_reason: workspace.endReason } : {}),
       lease_ms: WORKSPACE_LEASE_MS,
       tabs: workspace.state === 'active' ? [...workspace.tabs.values()].sort((a, b) => a.tabId - b.tabId).map(tab => ({
         target_id: tab.targetId, tab_id: tab.tabId, title: tab.title, url: tab.url,
@@ -381,9 +429,9 @@ export class Controller {
   async scanWorkspace(workspace) {
     if (workspace.state !== 'active') return;
     const activation = workspace.activationId;
-    if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive'); return; }
+    if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive', 'VISIBILITY_LOST'); return; }
     const group = await this.adapter.api.tabGroups.get(workspace.groupId);
-    if (group.windowId !== workspace.windowId) { await this.stopWorkspace(workspace, 'inactive'); return; }
+    if (group.windowId !== workspace.windowId) { await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED'); return; }
     const tabs = await this.adapter.api.tabs.query({ groupId: workspace.groupId });
     for (const [tabId, tab] of workspace.tabs) {
       if (!tabs.some(current => current.id === tabId)) this.dropTab(workspace, tab, 'TAB_NOT_IN_WORKSPACE');
@@ -456,7 +504,7 @@ export class Controller {
             await this.sync(workspace);
           }
         } catch (error) {
-          await this.stopWorkspace(workspace, 'inactive');
+          await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
           this.report(error);
         }
       }
@@ -472,8 +520,10 @@ export class Controller {
     this.history.record('sharing_ended', { target_id: tab.targetId, code });
   }
 
-  async stopWorkspace(workspace, state = 'inactive') {
+  async stopWorkspace(workspace, state = 'inactive', reason = state === 'paused' ? 'USER_PAUSED' : 'USER_ENDED') {
+    if (!validWorkspaceEndReason(reason)) fail('INVALID_ARGUMENT');
     workspace.state = state; workspace.localLease = 0;
+    workspace.endReason = reason; workspace.endedAt = this.now();
     for (const tab of [...workspace.tabs.values()]) this.dropTab(workspace, tab,
       state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
     for (const task of [...workspace.tasks]) this.finishTask(workspace, null, task,
@@ -714,8 +764,10 @@ export class Controller {
     if (!this.current(socket, generation)) return;
     this.connection = null; this.socket = null; this.phase = 'disconnected'; this.generation++;
     for (const workspace of this.workspaces.values()) {
-      void this.stopWorkspace(workspace, 'inactive').catch(error => this.report(error));
+      void this.stopWorkspace(workspace, 'inactive', 'CONNECTION_LOST').catch(error => this.report(error));
     }
+    this.lastSessionEnd = { reason: 'CONNECTION_LOST', at: this.now(),
+      previous_service_epoch: this.record?.last_service_epoch || null };
     socket.close(); this.history.record('disconnected'); this.changed();
     if (this.config.enabled) this.reconnectTimer = setTimeout(() => this.connect(), 2000);
   }

@@ -5,6 +5,7 @@ import { WebSocket } from 'ws';
 import { tools, callTool } from '../mcp.js';
 import { Store, hash, token } from '../store.js';
 import { authPayload, sign, validDescription, workspacePayload, OPERATIONS } from '../../shared/protocol.js';
+import { BridgeServer } from '../server.js';
 import { fixture, appFixture, keys, bind, tab, flush, capture, responseMessage, post,
   ORIGIN, EXTENSION, DESCRIPTION } from './helpers.js';
 
@@ -33,9 +34,9 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
   try {
     const a = f.store.createClient('A'), b = f.store.createClient('B');
     const metadata = await (await fetch(`${f.base}/.well-known/domagent`)).json();
-    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.2');
+    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.3');
     const health = await (await fetch(`${f.base}/health`)).json();
-    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.2', protocol_version: 5 });
+    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.3', protocol_version: 5 });
     assert(!JSON.stringify(metadata).includes('oidc'));
     const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
     for (const [credential, tenant, extra] of [
@@ -53,7 +54,7 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
       { jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-03-26',
         capabilities: {}, clientInfo: { name: 'test', version: '1' } } },
       { Authorization: `Bearer ${a.credential}`, Accept: 'application/json, text/event-stream' });
-    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.2');
+    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.3');
     assert.equal((await fetch(`${f.base}/mcp/${a.tenant_id}`)).status, 405);
     assert.equal((await post(f.base, '/api/setup-requests', { agent_name: 'A' })).status, 404);
   } finally { await f.close(); }
@@ -135,6 +136,104 @@ test('lease expires at exactly five seconds; stale renewal cannot revive, fresh 
     await f.sync({ revision: 4, activation_id: randomUUID(), tabs: [tab(1)] });
     assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
     await assert.rejects(f.sync({ revision: 5, lease_ms: 5001 }), /INVALID_WORKSPACE/);
+  } finally { f.close(); }
+});
+
+test('inactive end reasons are signed, caller scoped and retained without resurrecting removed targets', async () => {
+  const f = await fixture();
+  try {
+    const old = f.workspace.tabs[0], foreign = f.store.createClient('Foreign');
+    assert.equal(f.authenticated.service_started_at, f.bridge.startedAt);
+    await f.sync({ revision: 2, state: 'paused', tabs: [], end_reason: 'USER_PAUSED' });
+    let listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
+    assert.equal(listed.service_epoch, f.bridge.epoch);
+    assert.equal(listed.connection_id, f.session.connection_id);
+    assert.equal(listed.workspaces[0].end_reason, 'USER_PAUSED');
+    assert.equal(listed.workspaces[0].ended_at, f.now());
+    assert.equal(listed.workspaces[0].tab_count, 0);
+    assert.deepEqual(f.bridge.listWorkspaces(foreign.id, foreign.tenant_id), []);
+    await assert.rejects(f.sync({ revision: 3, state: 'active', tabs: [tab(1)], end_reason: 'USER_ENDED' }), /INVALID_WORKSPACE/);
+    await assert.rejects(f.sync({ revision: 4, state: 'inactive', tabs: [], end_reason: 'private raw error' }), /INVALID_WORKSPACE/);
+    await f.sync({ revision: 5, state: 'inactive', tabs: [], end_reason: 'PANEL_CLOSED' });
+    listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
+    assert.equal(listed.workspaces[0].end_reason, 'PANEL_CLOSED');
+    await assert.rejects(f.bridge.operate(f.client.id, old.target_id, 'get_text', {}, null, f.client.tenant_id, DESCRIPTION), /WORKSPACE_PAUSED/);
+    await assert.rejects(f.bridge.operate(foreign.id, old.target_id, 'get_text', {}, null, foreign.tenant_id, DESCRIPTION), /NOT_AUTHORIZED/);
+    const forged = { ...f.workspace, revision: 6, end_reason: 'USER_ENDED' };
+    forged.signature = await sign(f.key.key, workspacePayload({ ...forged, end_reason: 'PANEL_CLOSED',
+      origin: ORIGIN, epoch: f.bridge.epoch, connection_id: f.session.connection_id }));
+    await assert.rejects(f.bridge.message(f.session, forged), /NOT_AUTHORIZED/);
+    f.clock.value += 600000; f.bridge.sweep();
+    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces.length, 0);
+  } finally { f.close(); }
+});
+
+test('service restart generation plus inactive reconnect summary explains lost authority; fresh Resume alone can reactivate', async () => {
+  const f = await fixture();
+  const originalEpoch = f.bridge.epoch;
+  const priorWorkspace = { ...f.workspace }, oldTarget = f.workspace.tabs[0].target_id;
+  f.bridge.close();
+  const restarted = new BridgeServer(f.store, f.config);
+  const session = { ...f.session, connection_id: randomUUID(), authenticated: false, challenge: null,
+    workspaces: new Set(), usedTargets: new Set() };
+  try {
+    await restarted.message(session, { type: 'hello', tenant_id: f.client.tenant_id, version: 5, key_id: f.key.key_id });
+    const challenge = f.ws.sent.at(-1);
+    await restarted.message(session, { type: 'proof', tenant_id: f.client.tenant_id,
+      signature: await sign(f.key.key, authPayload(challenge)) });
+    assert.notEqual(restarted.epoch, originalEpoch);
+    assert.equal(restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces.length, 0);
+    await restarted.message(session, { type: 'session.status', tenant_id: f.client.tenant_id,
+      previous_service_epoch: originalEpoch, end_reason: 'SERVICE_RESTARTED' });
+    const summary = { ...priorWorkspace, revision: priorWorkspace.revision + 1,
+      state: 'inactive', tabs: [], activation_id: randomUUID(), end_reason: 'SERVICE_RESTARTED' };
+    const send = async value => restarted.message(session, { ...value,
+      signature: await sign(f.key.key, workspacePayload({ ...value, origin: ORIGIN,
+        epoch: restarted.epoch, connection_id: session.connection_id })) });
+    await send(summary);
+    const listed = restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0];
+    assert.equal(listed.last_session_end.reason, 'SERVICE_RESTARTED');
+    assert.equal(listed.last_session_end.source, 'extension_reported');
+    assert.equal(listed.workspaces[0].state, 'inactive');
+    assert.equal(listed.workspaces[0].tab_count, 0);
+    assert.deepEqual(restarted.listTabs(f.client.id, summary.workspace_id, f.client.tenant_id), []);
+    await assert.rejects(restarted.operate(f.client.id, oldTarget, 'get_text', {}, null, f.client.tenant_id, DESCRIPTION), /NOT_AUTHORIZED/);
+    await assert.rejects(send({ ...summary, revision: summary.revision + 1,
+      state: 'active', end_reason: undefined, tabs: [tab(1)] }), /WORKSPACE_INACTIVE|INVALID_WORKSPACE/);
+    const resumed = { ...summary, revision: summary.revision + 2, state: 'active',
+      activation_id: randomUUID(), tabs: [tab(1)] };
+    delete resumed.end_reason;
+    await send(resumed);
+    assert.equal(restarted.listTabs(f.client.id, summary.workspace_id, f.client.tenant_id).length, 1);
+    assert.equal(restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].end_reason, null);
+    assert.equal(f.store.listDevices().length, 1);
+  } finally { restarted.close(); f.store.close(); }
+});
+
+test('same-service reconnect retains terminal state and only transfers a signed inactive summary to its original device', async () => {
+  const f = await fixture();
+  try {
+    const oldTarget = f.workspace.tabs[0].target_id;
+    f.bridge.disconnected(f.session);
+    const listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
+    assert.equal(listed.connection_state, 'offline');
+    assert.equal(listed.workspaces[0].end_reason, 'CONNECTION_LOST');
+    assert.equal(listed.workspaces[0].tab_count, 0);
+    const session = { ...f.session, authenticated: false, challenge: null, connection_id: randomUUID(),
+      workspaces: new Set(), usedTargets: new Set() };
+    await f.bridge.message(session, { type: 'hello', tenant_id: f.client.tenant_id, version: 5, key_id: f.key.key_id });
+    const challenge = f.ws.sent.at(-1);
+    await f.bridge.message(session, { type: 'proof', tenant_id: f.client.tenant_id,
+      signature: await sign(f.key.key, authPayload(challenge)) });
+    const summary = { ...f.workspace, revision: 2, state: 'inactive', tabs: [],
+      activation_id: randomUUID(), end_reason: 'CONNECTION_LOST' };
+    summary.signature = await sign(f.key.key, workspacePayload({ ...summary, origin: ORIGIN,
+      epoch: f.bridge.epoch, connection_id: session.connection_id }));
+    await f.bridge.message(session, summary);
+    assert(session.workspaces.has(summary.workspace_id));
+    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].connection_id, session.connection_id);
+    await assert.rejects(f.bridge.operate(f.client.id, oldTarget, 'get_text', {}, null,
+      f.client.tenant_id, DESCRIPTION), /BROWSER_OFFLINE/);
   } finally { f.close(); }
 });
 

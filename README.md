@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.2**, extensions **5.0.0**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.2).
+Service **5.0.0-beta.3**, extensions **5.0.1**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.3).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -48,6 +48,13 @@ repeated per-action prompts.
 - Closing/replacing the native sidebar, End, disconnect or stale visibility
   lease ends authority within its bounded lease; **tabs remain open**.
 - Browser/worker restart restores identity only. Explicit Resume is required.
+- Service/connection generation and bounded end reasons distinguish a stopped
+  session from broken pairing. Updated reconnecting extensions can republish
+  inactive empty summaries only; local Resume is still required.
+- Resolved authorization failures remain diagnostic history, not red current
+  errors. A retained same-named group is not automatically authorized; choose
+  its explicit native group ID in the sidebar instead of re-pairing/creating
+  yet another group.
 - Toolbar/sidebar and supported native tab menus add/remove the clicked tab.
 - Moving a task to its own window is optional and pauses until revalidated.
 

@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.2 / extension5.0.0 is a matched breaking upgrade.
+Service5.0.0-beta.3 / extension5.0.1 is the current matched release.
 
 ## Tools
 
@@ -61,6 +61,25 @@ Only grouped metadata is exposed. No focus change unless the user clicks a task
 row/menu/notification. End/close/lease loss leaves tabs/group open.
 Native panel restoration, browser restart and reconnect restore no runtime access.
 Pause cancels backlog; explicit Resume creates a fresh execution activation.
+
+Restart diagnostics are separate from authority: discovery includes service_epoch,
+service_started_at, current connection_id and terminal end_reason/ended_at.
+Inactive summaries are retained up to ten minutes, scoped to the authenticated
+client and stripped of tabs. After reconnect, an updated extension compares the
+service epoch and can publish a signed inactive empty summary under the new
+connection/fresh activation. It reports SERVICE_RESTARTED or CONNECTION_LOST
+through diagnostic last_session_end (source extension_reported).
+No stale active snapshot, old handle or retired activation is accepted as Resume.
+Do not synthesize TARGET_EXPIRED for random unknown/foreign handles; server
+restart destroys its in-memory ownership evidence. Recovery is local Start/Resume.
+Optional end_reason is covered by the snapshot signature; older snapshots without
+that field remain valid. Use the matched patch for full reconnect diagnostics.
+
+The sidebar shows current failures separately from recent diagnostic history.
+Successful reconnect/active acknowledgement clears resolved transport/auth errors,
+not unrelated history-persistence/notification failures. Retained same-named
+native groups may be chosen explicitly at Start; name alone never grants scope
+and group movement/window validation still applies.
 
 System notification plus toolbar pending count announces human assistance.
 Notification delivery failure is explicit; OS suppression cannot prove visibility.

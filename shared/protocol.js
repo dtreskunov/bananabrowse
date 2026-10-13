@@ -3,6 +3,13 @@ export const POLICY_ID = 'grouped-workspace-v1';
 export const WORKSPACE_LEASE_MS = 5000;
 export const WORKSPACE_TAB_LIMIT = 8;
 export const WORKSPACE_CONCURRENCY = 2;
+export const WORKSPACE_END_REASONS = Object.freeze([
+  'USER_PAUSED', 'USER_ENDED', 'PANEL_CLOSED', 'VISIBILITY_LOST', 'CONNECTION_LOST',
+  'SERVICE_RESTARTED', 'CONNECTION_REPLACED', 'CLIENT_REVOKED', 'LEASE_EXPIRED', 'WORKSPACE_CHANGED',
+]);
+export function validWorkspaceEndReason(value) {
+  return WORKSPACE_END_REASONS.includes(value);
+}
 export const HEARTBEAT_MS = 5_000;
 export const LIVENESS_MS = 15_000;
 export const HUMAN_WAIT_MS = 600_000;
@@ -196,7 +203,8 @@ export function authPayload(c) {
 export function workspacePayload(c) {
   return encode(['domagent.v5', 'workspace', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id,
     c.client_id, c.workspace_id, c.activation_id, c.group_id, c.window_id, c.state, c.revision, c.lease_ms,
-    c.tabs.map(tab => [tab.target_id, tab.tab_id, tab.title, tab.url, tab.page_state, [...tab.capabilities].sort()])]);
+    c.tabs.map(tab => [tab.target_id, tab.tab_id, tab.title, tab.url, tab.page_state, [...tab.capabilities].sort()]),
+    ...(Object.hasOwn(c, 'end_reason') ? [c.end_reason] : [])]);
 }
 
 export function pairingStartPayload(c) {

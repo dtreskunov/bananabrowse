@@ -99,6 +99,7 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     expect(created.isError).not.toBe(true);
     const second = JSON.parse(created.content[0].text);
     await expect.poll(async () => (await listing()).length).toBe(2);
+    await expect.poll(async () => (await listing()).find(tab => tab.target_id === second.target_id)?.page_state).toBe('ready');
     const unshared = await options.evaluate(url => chrome.tabs.create({ url, active: true }), pageUrl);
     const results = await Promise.all([blank.target_id, second.target_id].map(target_id =>
       call('get_text', { target_id, selector: 'h1' })));
@@ -119,8 +120,27 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     await worker.evaluate(() => globalThis.restoreFixtureInspection());
     expect((await call('navigate', { target_id: blank.target_id, url: pageUrl + '?recovered=1' })).isError).not.toBe(true);
     await expect.poll(async () => (await listing()).find(tab => tab.target_id === blank.target_id)?.page_state).toBe('ready');
+    const beforeRestart = app.bridge.epoch;
+    await app.close();
+    app = createApp(store, { origin, bind: '127.0.0.1', port: address.port, protectedOrigins: [origin] });
+    await app.listen();
+    await expect.poll(async () => (await state()).phase, { timeout: 10000 }).toBe('authenticated');
+    await expect.poll(async () => (await state()).workspaces[0].end_reason).toBe('SERVICE_RESTARTED');
+    expect((await state()).workspaces[0].state).toBe('inactive');
+    expect((await state()).current_error).toBe(null);
+    const discovered = async () => JSON.parse((await client.callTool({ name: 'list_browser_workspaces', arguments: {} })).content[0].text);
+    await expect.poll(async () => (await discovered())[0]?.workspaces[0]?.end_reason).toBe('SERVICE_RESTARTED');
+    const afterRestart = (await discovered())[0];
+    expect(afterRestart.service_epoch).not.toBe(beforeRestart);
+    expect(afterRestart.last_session_end.reason).toBe('SERVICE_RESTARTED');
+    expect(afterRestart.workspaces[0].tab_count).toBe(0);
+    expect(await listing()).toEqual([]);
+    expect((await call('get_text', { target_id: blank.target_id, selector: 'h1' })).isError).toBe(true);
+    await request({ type: 'ui.start', windowId });
+    await expect.poll(async () => (await listing()).length).toBe(2);
+    const current = (await listing())[0];
     await request({ type: 'ui.pause', workspace_id: first.workspace_id });
-    const paused = await call('get_text', { target_id: blank.target_id, selector: 'h1' });
+    const paused = await call('get_text', { target_id: current.target_id, selector: 'h1' });
     expect(paused.isError).toBe(true);
     expect(await options.evaluate(id => chrome.tabs.get(id).then(tab => tab.id), unshared.id)).toBe(unshared.id);
     await request({ type: 'ui.start', windowId });
@@ -129,10 +149,17 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     expect(resumed.target_id).not.toBe(blank.target_id);
     await options.evaluate(windowId => chrome.sidePanel.close({ windowId }), windowId);
     await expect.poll(async () => (await state()).workspaces[0].state).toBe('inactive');
+    expect((await state()).workspaces[0].end_reason).toBe('PANEL_CLOSED');
     expect((await call('get_text', { target_id: resumed.target_id, selector: 'h1' })).isError).toBe(true);
     const tabsAfter = await options.evaluate(() => chrome.tabs.query({}));
     expect(tabsAfter.filter(tab => tab.groupId === first.groupId)).toHaveLength(2);
     expect(tabsAfter.some(tab => tab.id === unshared.id)).toBe(true);
+    await options.getByRole('button', { name: 'Open workspace sidebar' }).click();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await request({ type: 'ui.start', windowId, groupId: first.groupId });
+    await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
+    expect((await state()).workspaces[0].groupId).toBe(first.groupId);
+    expect((await options.evaluate(() => chrome.tabs.query({}))).length).toBe(tabsAfter.length);
   } finally {
     await client?.close(); await context?.close(); await app.close(); store.close();
     tls.closeAllConnections(); pageServer.closeAllConnections();

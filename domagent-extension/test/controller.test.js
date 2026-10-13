@@ -48,7 +48,7 @@ async function fixture(t) {
   controller.record = record; controller.browserInfo = await adapter.browserInfo();
   controller.connect(); controller.socket.onopen();
   const socket = controller.socket;
-  const binding = { tenant_id, epoch: 'epoch-1', connection_id: 'connection-1' };
+  const binding = { tenant_id, epoch: crypto.randomUUID(), connection_id: crypto.randomUUID() };
   const receive = message => controller.receive(JSON.stringify(message), socket, controller.generation);
   const challenge = { ...binding, origin, key_id: record.key_id, nonce: 'nonce', type: 'challenge' };
   await receive(challenge);
@@ -167,6 +167,57 @@ test('startup and restored native panels do not restore workspace authority', as
   f.controller.config.enabled = false;
   await f.controller.initialize();
   assert.equal(f.controller.workspaces.size, 0);
+});
+
+test('server restart reconnect republishes an inactive empty summary and clears resolved pairing errors only', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  const oldEpoch = f.binding.epoch, oldHandle = workspace.tabs.get(100).targetId;
+  f.controller.report(Object.assign(new Error('NOT_AUTHORIZED'), { code: 'NOT_AUTHORIZED' }));
+  f.controller.loseConnection(f.socket, f.controller.generation);
+  clearTimeout(f.controller.reconnectTimer);
+  assert.equal(workspace.state, 'inactive');
+  assert.equal(workspace.tabs.size, 0);
+  f.controller.connect();
+  const socket = f.controller.socket;
+  socket.onopen();
+  const next = { tenant_id, epoch: crypto.randomUUID(), connection_id: crypto.randomUUID() };
+  const receive = message => f.controller.receive(JSON.stringify(message), socket, f.controller.generation);
+  await receive({ ...next, type: 'challenge', origin, key_id: f.record.key_id, nonce: 'next-nonce' });
+  await receive({ ...next, type: 'authenticated', device_id: 'device-1', client_id: 'client-1',
+    client_label: 'Atlas', service_started_at: f.controller.now(), protected_origins: [origin] });
+  assert.equal(f.controller.phase, 'authenticated');
+  assert.equal(f.controller.currentError, null);
+  assert(f.controller.failures.includes('NOT_AUTHORIZED'));
+  assert.equal(f.controller.snapshot().last_session_end.reason, 'SERVICE_RESTARTED');
+  const status = socket.sent.find(message => message.type === 'session.status');
+  assert.equal(status.previous_service_epoch, oldEpoch);
+  const sync = socket.sent.find(message => message.type === 'workspace.sync');
+  assert.equal(sync.state, 'inactive');
+  assert.equal(sync.end_reason, 'SERVICE_RESTARTED');
+  assert.deepEqual(sync.tabs, []);
+  assert(await verify(f.record.public_key, workspacePayload(sync), sync.signature));
+  assert.equal(f.calls.some(call => call[0] === 'execute'), false);
+  await f.controller.startWorkspace(10);
+  assert.notEqual(workspace.tabs.get(100).targetId, oldHandle);
+  assert.equal(workspace.endReason, null);
+  f.controller.report(Object.assign(new Error('HISTORY_UNAVAILABLE'), { code: 'HISTORY_UNAVAILABLE' }));
+  await receive({ ...next, type: 'workspace.active', workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  assert.equal(f.controller.currentError, 'HISTORY_UNAVAILABLE');
+});
+
+test('choosing a retained group requires native panel/user activation and never adopts by matching title', async t => {
+  const f = await fixture(t);
+  f.adapter.api.tabGroups.get = async groupId => ({ windowId: groupId === 2 ? 10 : 11, title: 'DomAgent - Atlas' });
+  await f.controller.startWorkspace(10, 2);
+  const workspace = [...f.controller.workspaces.values()][0];
+  assert.equal(workspace.groupId, 2);
+  assert.equal(f.calls.some(call => call[0] === 'remove'), false);
+  f.setOpen(false);
+  await assert.rejects(f.controller.startWorkspace(10, 2), /PANEL_OPEN_REQUIRED/);
+  f.setOpen(true);
+  await assert.rejects(f.controller.startWorkspace(10, 3), /WORKSPACE_CHANGED/);
+  assert.equal(f.controller.workspaces.size, 1);
 });
 
 test('protected navigation revokes authority synchronously but retains its rejection guard', async t => {

@@ -63,7 +63,12 @@ retention, signed optional reasons, lease expiry and legacy snapshot compatibili
 Resolved red authorization errors clear while history/persistence warnings remain.
 Explicit existing-group selection reuses tabs; duplicate titles alone do not
 authorize them or silently create another group.
-Removed-group regressions reproduce a color-update failure blocking End and
-subsequent group selection. Native ungroup/removal now retires the stale local
-record without closing tabs, and explicit selection recovers. The between-query/
-lookup deletion race is covered; non-removal permission errors remain explicit.
+
+Missing-group tests preserve revoke-before-cleanup, retirement and explicit
+alternate-group selection even when a native lookup races group deletion.
+Empty-sidebar renderer fixtures in both Chrome and Firefox assert exact recovery
+buttons and selected IDs at320px width with no tab rows and a stale warning.
+They mock browser APIs for rendering only, not production authorization.
+Actual Chrome tests exercise native ungroup/removal, End preserving groups/tabs,
+existing group reactivation and fresh task creation. Failed activation/End tests
+surface unrelated API errors without retaining active authority or closing tabs.

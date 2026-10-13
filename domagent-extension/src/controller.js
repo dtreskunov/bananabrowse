@@ -73,7 +73,7 @@ export class Controller {
 
   resolveConnectionError() {
     if (['NOT_AUTHORIZED', 'BROWSER_OFFLINE', 'WORKSPACE_INACTIVE', 'WORKSPACE_PAUSED',
-      'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED', 'GROUP_UNAVAILABLE'].includes(this.currentError)) this.currentError = null;
+      'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED', 'GROUP_UNAVAILABLE', 'OUTCOME_UNKNOWN'].includes(this.currentError)) this.currentError = null;
   }
 
   async initialize() {
@@ -367,8 +367,7 @@ export class Controller {
     await Promise.all([...this.endingTasks]);
     let workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
     if (workspace && !await this.groupExists(workspace)) {
-      await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
-      this.workspaces.delete(workspace.id);
+      await this.endWorkspace(workspace, 'WORKSPACE_CHANGED');
       workspace = null;
       if (selectedGroupId === undefined) fail('GROUP_UNAVAILABLE');
     }
@@ -377,9 +376,7 @@ export class Controller {
       const group = await this.adapter.api.tabGroups.get(selectedGroupId);
       if (group.windowId !== windowId) fail('WORKSPACE_CHANGED');
       if (workspace && workspace.groupId !== selectedGroupId) {
-        await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
-        await Promise.all([...this.endingTasks]);
-        this.workspaces.delete(workspace.id);
+        await this.endWorkspace(workspace, 'WORKSPACE_CHANGED');
         workspace = null;
       }
     }
@@ -396,10 +393,40 @@ export class Controller {
     workspace.activationId = crypto.randomUUID();
     workspace.endReason = null; workspace.endedAt = null;
     workspace.state = 'active'; workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
-    await this.refreshWorkspace(workspace);
-    await this.sync(workspace);
-    await this.adapter.api.tabGroups.update(workspace.groupId, { color: 'blue', collapsed: false });
+    try {
+      await this.refreshWorkspace(workspace);
+      if (workspace.state !== 'active' || this.workspaces.get(workspace.id) !== workspace) fail('GROUP_UNAVAILABLE');
+      await this.sync(workspace);
+      await this.adapter.api.tabGroups.update(workspace.groupId, { color: 'blue', collapsed: false });
+    } catch (error) {
+      await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
+      if (!await this.groupExists(workspace)) {
+        this.workspaces.delete(workspace.id);
+        fail('GROUP_UNAVAILABLE');
+      }
+      throw error;
+    }
     this.changed();
+  }
+
+  async startNewWorkspace(windowId) {
+    if (!this.connection) fail('BROWSER_OFFLINE');
+    if (!await this.adapter.panelOpen(windowId)) fail('PANEL_OPEN_REQUIRED');
+    await this.adapter.permissions();
+    const workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
+    if (workspace) await this.endWorkspace(workspace);
+    await this.startWorkspace(windowId);
+  }
+
+  async endWorkspace(workspace, reason = 'USER_ENDED') {
+    // Local authority ends even if a later transport or cosmetic API update fails.
+    try {
+      await this.stopWorkspace(workspace, 'inactive', reason);
+    } finally {
+      this.workspaces.delete(workspace.id);
+      await Promise.all([...this.endingTasks]);
+      this.changed();
+    }
   }
 
   async sync(workspace) {
@@ -437,8 +464,7 @@ export class Controller {
     const activation = workspace.activationId;
     if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive', 'VISIBILITY_LOST'); return; }
     if (!await this.groupExists(workspace)) {
-      await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
-      this.workspaces.delete(workspace.id);
+      await this.endWorkspace(workspace, 'WORKSPACE_CHANGED');
       this.report(new Error('GROUP_UNAVAILABLE'));
       return;
     }
@@ -756,7 +782,7 @@ export class Controller {
 
   async groupExists(workspace) {
     const groups = await this.adapter.api.tabGroups.query({ windowId: workspace.windowId });
-    return groups.some(group => group.id === workspace.groupId);
+    return groups.some(group => group.id === workspace.groupId && group.windowId === workspace.windowId);
   }
 
   async groupColor(workspace) {

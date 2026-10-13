@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.4**, extensions **5.0.2**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.4).
+Service **5.0.0-beta.5**, extensions **5.0.3**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.5).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -55,9 +55,14 @@ repeated per-action prompts.
   errors. A retained same-named group is not automatically authorized; choose
   its explicit native group ID in the sidebar instead of re-pairing/creating
   yet another group.
-- Removed/moved tracked groups no longer trap End/Resume during cosmetic color
-  cleanup. The stale local record is retired, pairing stays intact and the user
-  can select an existing group or start anew. No tabs are deleted or auto-adopted.
+- Recovery actions are always visible for an inactive workspace, including when
+  it has zero tab rows: select an existing native group or **Start a new task group**.
+  End retires local tracking and leaves the old group/tabs intact; Pause keeps it
+  available for Resume. A removed/moved group cannot trap End or other selection,
+  and real browser API failures still surface explicitly.
+- Starting fresh clears a previous current OUTCOME_UNKNOWN warning only after
+  successful authentication/active acknowledgement; historical uncertainty is
+  retained and does not mean the earlier operation is safe to repeat.
 - Toolbar/sidebar and supported native tab menus add/remove the clicked tab.
 - Moving a task to its own window is optional and pauses until revalidated.
 

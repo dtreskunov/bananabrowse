@@ -78,11 +78,12 @@ async function uiAction(message) {
   if (message.type === 'ui.disconnect') return controller.disconnect();
   if (message.type === 'ui.switch') return controller.switchConnection(message.origin, message.tenant_id);
   if (message.type === 'ui.start') return controller.startWorkspace(message.windowId, message.groupId);
+  if (message.type === 'ui.startNew') return controller.startNewWorkspace(message.windowId);
   if (message.type === 'ui.decision') return controller.decide(message.request_id, message.action);
   const workspace = controller.workspaces.get(message.workspace_id);
   if (!workspace) fail('WORKSPACE_INACTIVE');
   if (message.type === 'ui.pause') return controller.stopWorkspace(workspace, 'paused');
-  if (message.type === 'ui.end') return controller.stopWorkspace(workspace, 'inactive');
+  if (message.type === 'ui.end') return controller.endWorkspace(workspace);
   if (message.type === 'ui.focus') {
     if (!workspace.tabs.has(message.tabId)) fail('TAB_NOT_IN_WORKSPACE');
     return adapter.focusTab(message.tabId);

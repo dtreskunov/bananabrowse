@@ -232,7 +232,8 @@ test('a removed tracked group cannot trap End/Resume or prevent explicitly selec
   f.adapter.api.tabGroups.update = async groupId => {
     if (groupId === 1) throw new Error('No group with id: 1');
   };
-  await f.controller.stopWorkspace(workspace, 'inactive');
+  await f.controller.endWorkspace(workspace);
+  assert.equal(f.controller.workspaces.size, 0);
   await f.controller.startWorkspace(10, 2);
   assert.equal([...f.controller.workspaces.values()][0].groupId, 2);
   assert.equal(f.calls.some(call => call[0] === 'remove'), false);
@@ -264,6 +265,45 @@ test('group disappearing between existence query and native lookup still retires
   assert.equal(workspace.state, 'inactive');
   assert.equal(f.controller.currentError, 'GROUP_UNAVAILABLE');
   assert.equal(f.calls.some(call => call[0] === 'remove'), false);
+});
+
+test('new-group recovery ends even an intact inactive workspace without touching retained tabs or authority', async t => {
+  const f = await fixture(t), previous = await start(f);
+  const oldTarget = previous.tabs.get(100).targetId;
+  await f.controller.stopWorkspace(previous, 'inactive', 'WORKSPACE_CHANGED');
+  f.adapter.makeGroup = async () => {
+    f.calls.push(['makeGroup']);
+    return { groupId: 2, tabId: 200 };
+  };
+  f.tabs.splice(0, 1, { id: 200, windowId: 10, groupId: 2, url: 'about:blank', status: 'complete' });
+  f.controller.currentError = 'OUTCOME_UNKNOWN';
+  await f.controller.startNewWorkspace(10);
+  const current = [...f.controller.workspaces.values()][0];
+  assert.equal(f.controller.workspaces.size, 1);
+  assert.notEqual(current.id, previous.id);
+  assert.equal(current.groupId, 2);
+  assert.equal(previous.state, 'inactive');
+  assert.equal(previous.tabs.size, 0);
+  assert.equal(current.tabs.get(200).pageState, 'navigation_only');
+  assert(f.calls.some(call => call[0] === 'makeGroup'));
+  assert(!f.calls.some(call => call[0] === 'remove'));
+  await f.receive({ ...f.binding, type: 'workspace.active', workspace_id: current.id,
+    activation_id: current.activationId, revision: current.revision });
+  assert.equal(f.controller.currentError, null);
+  f.controller.enqueue(command(f, current, { targetId: oldTarget }));
+  assert.equal(f.socket.sent.at(-1).error.code, 'TAB_NOT_IN_WORKSPACE');
+});
+
+test('failed fresh activation leaves no authority, and End still clears the local record when its status update fails', async t => {
+  const f = await fixture(t);
+  f.adapter.api.tabGroups.update = async () => { throw new Error('Group status API failure'); };
+  await assert.rejects(f.controller.startWorkspace(10), /Group status API failure/);
+  const workspace = [...f.controller.workspaces.values()][0];
+  assert.equal(workspace.state, 'inactive');
+  assert.equal(workspace.tabs.size, 0);
+  await assert.rejects(f.controller.endWorkspace(workspace), /Group status API failure/);
+  assert.equal(f.controller.workspaces.size, 0);
+  assert(!f.calls.some(call => call[0] === 'remove'));
 });
 
 test('protected navigation revokes authority synchronously but retains its rejection guard', async t => {

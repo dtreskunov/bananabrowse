@@ -174,9 +174,20 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
     await expect.poll(async () => (await state()).current_error).toBe(null);
     expect((await state()).workspaces[0].groupId).toBe(candidate);
+    const retainedWorkspace = (await state()).workspaces[0];
+    await request({ type: 'ui.end', workspace_id: retainedWorkspace.workspace_id });
+    expect((await state()).workspaces).toHaveLength(0);
+    expect(await options.evaluate(groupId => chrome.tabGroups.get(groupId).then(group => group.id), candidate)).toBe(candidate);
+    await request({ type: 'ui.start', windowId, groupId: candidate });
+    await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
+    await request({ type: 'ui.startNew', windowId });
+    await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
+    expect((await state()).workspaces[0].groupId).not.toBe(candidate);
+    expect((await state()).workspaces[0].workspace_id).not.toBe(retainedWorkspace.workspace_id);
     const finalTabs = await options.evaluate(() => chrome.tabs.query({}));
     expect(finalTabs.filter(tab => tab.groupId === first.groupId)).toHaveLength(0);
     expect(finalTabs.some(tab => tab.id === unshared.id)).toBe(true);
+    expect(finalTabs.some(tab => tab.groupId === candidate)).toBe(true);
   } finally {
     await client?.close(); await context?.close(); await app.close(); store.close();
     tls.closeAllConnections(); pageServer.closeAllConnections();

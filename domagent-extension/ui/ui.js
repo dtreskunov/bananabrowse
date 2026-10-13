@@ -16,7 +16,9 @@ const errors = {
   PANEL_OPEN_REQUIRED: 'Click the DomAgent toolbar in this window to open its native sidebar.',
   TAB_LIMIT_REACHED: 'The workspace has reached its eight-tab limit.',
   NOTIFICATION_UNAVAILABLE: 'The system notification could not be delivered. Check browser notification settings.',
-  GROUP_UNAVAILABLE: 'The tracked group is no longer in this window. Choose an existing group below or start a new task group. Pairing is still valid.',
+  GROUP_UNAVAILABLE: 'This task group is no longer in this window. Choose an existing group below or start a new task group. No re-pairing is needed.',
+  WORKSPACE_CHANGED: 'The group or window changed. No control is active; choose a group or start a new task below.',
+  OUTCOME_UNKNOWN: 'A previous operation could not be confirmed. Review its outcome before repeating it. You can still end the session or start a fresh task below.',
 };
 const endReasons = {
   SERVICE_RESTARTED: 'The service restarted. Resume this workspace locally; no re-pairing is needed.',
@@ -28,7 +30,7 @@ const endReasons = {
   USER_ENDED: 'You ended this session. Tabs remain open.',
   LEASE_EXPIRED: 'The workspace lease expired. Resume locally; old work will not be replayed.',
   CLIENT_REVOKED: 'Application access was revoked. Check the connection with the operator.',
-  WORKSPACE_CHANGED: 'The group or window changed. Review it and Resume locally.',
+  WORKSPACE_CHANGED: 'The group or window changed. Choose an available group or start a new task below; no re-pairing is needed.',
 };
 function error(value) { byId('error').textContent = errors[value.message] || `DomAgent: ${value.message}`; }
 async function request(type, fields = {}) {
@@ -59,6 +61,9 @@ function render(snapshot) {
   if (byId('historical-errors')) {
     byId('historical-errors').textContent = snapshot.failures.length
       ? `Recent diagnostic history (not current connection status): ${snapshot.failures.join(', ')}` : '';
+    if (snapshot.failures.includes('OUTCOME_UNKNOWN')) {
+      byId('historical-errors').textContent += ' A past operation remains unconfirmed; check its outcome before repeating it.';
+    }
   }
   if (byId('pairing')) {
     byId('pairing').replaceChildren();
@@ -102,17 +107,23 @@ function render(snapshot) {
         await request('start', { windowId });
       });
     } else {
-      text(targets, `Workspace ${workspace.state}. Grouped tabs are available in the background.`);
+      text(targets, workspace.state === 'active'
+        ? 'Workspace active. Grouped tabs are available in the background.'
+        : `Workspace ${workspace.state}. No tabs are being controlled.`);
       text(targets, `Controlled group #${workspace.groupId}. Other same-named groups are not included.`);
       if (workspace.state !== 'active' && workspace.end_reason) {
         text(targets, endReasons[workspace.end_reason] || 'This session ended. Resume locally to start fresh.');
       }
       if (workspace.state !== 'active') {
-        button(targets, 'Resume workspace', () => request('start', { windowId }));
+        const present = (snapshot.available_groups || []).some(group => group.groupId === workspace.groupId);
+        if (present) button(targets, 'Resume workspace', () => request('start', { windowId }));
+        else text(targets, 'The previously controlled group is unavailable in this window.');
       } else button(targets, 'Pause all', () => request('pause', { workspace_id: workspace.workspace_id }));
       button(targets, 'End session', () => request('end', { workspace_id: workspace.workspace_id }));
-      button(targets, 'Add current tab', () => request('add', { workspace_id: workspace.workspace_id }));
-      button(targets, 'Move task to its own window', () => request('move', { workspace_id: workspace.workspace_id }));
+      if ((snapshot.available_groups || []).some(group => group.groupId === workspace.groupId)) {
+        button(targets, 'Add current tab', () => request('add', { workspace_id: workspace.workspace_id }));
+        button(targets, 'Move task to its own window', () => request('move', { workspace_id: workspace.workspace_id }));
+      }
       for (const tab of workspace.tabs) {
         const row = document.createElement('article');
         text(row, `${tab.title} - ${tab.page_state}`);
@@ -124,16 +135,21 @@ function render(snapshot) {
             button(row, 'Cancel', () => request('decision', { request_id: command.request_id, action: 'cancel' }));
           }
         }
-        if (!workspace || workspace.state !== 'active') {
-          for (const group of snapshot.available_groups || []) {
-            if (!group.title.startsWith('DomAgent - ') || group.groupId === workspace?.groupId) continue;
-            button(targets, `Use existing ${group.title} (#${group.groupId})`, async () => {
-              if (!await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] })) throw new Error('PERMISSION_REQUIRED');
-              await request('start', { windowId, groupId: group.groupId });
-            });
-          }
-        }
         targets.append(row);
+      }
+    }
+    // Recovery must remain reachable when the inactive workspace has zero tab rows.
+    if (!workspace || workspace.state !== 'active') {
+      if (workspace) button(targets, 'Start a new task group', async () => {
+        if (!await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] })) throw new Error('PERMISSION_REQUIRED');
+        await request('startNew', { windowId });
+      });
+      for (const group of snapshot.available_groups || []) {
+        if (!group.title.startsWith('DomAgent - ') || group.groupId === workspace?.groupId) continue;
+        button(targets, `Use existing ${group.title} (#${group.groupId})`, async () => {
+          if (!await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] })) throw new Error('PERMISSION_REQUIRED');
+          await request('start', { windowId, groupId: group.groupId });
+        });
       }
     }
   }

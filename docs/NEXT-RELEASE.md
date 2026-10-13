@@ -6,7 +6,7 @@ Updated 2026-10-12 23:38 UTC: global human-assistance CTA; no new URL allowlists
 Baseline: service **4.3.0-beta.3**, extensions **4.3.3**, browser wire **v4**,
 source commit `8f4b1da92fa07ee0338cb0b8d6da4b2500e7201d`.
 
-Release target: **5.0.0-beta.1**, extensions **5.0.0**, browser wire **v5**.
+Release target: **5.0.0-beta.2**, extensions **5.0.0**, browser wire **v5**.
 This is a coordinated breaking upgrade, not another v4 patch: consent, ownership,
 tab/window policy, onboarding, administrative authentication and MCP discovery
 all change. The MCP negotiated date version is independent of browser wire v5.

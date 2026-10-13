@@ -33,7 +33,9 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
   try {
     const a = f.store.createClient('A'), b = f.store.createClient('B');
     const metadata = await (await fetch(`${f.base}/.well-known/domagent`)).json();
-    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.1');
+    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.2');
+    const health = await (await fetch(`${f.base}/health`)).json();
+    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.2', protocol_version: 5 });
     assert(!JSON.stringify(metadata).includes('oidc'));
     const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
     for (const [credential, tenant, extra] of [
@@ -51,7 +53,7 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
       { jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-03-26',
         capabilities: {}, clientInfo: { name: 'test', version: '1' } } },
       { Authorization: `Bearer ${a.credential}`, Accept: 'application/json, text/event-stream' });
-    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.1');
+    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.2');
     assert.equal((await fetch(`${f.base}/mcp/${a.tenant_id}`)).status, 405);
     assert.equal((await post(f.base, '/api/setup-requests', { agent_name: 'A' })).status, 404);
   } finally { await f.close(); }

@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.1 / extension5.0.0 is a matched breaking upgrade.
+Service5.0.0-beta.2 / extension5.0.0 is a matched breaking upgrade.
 
 ## Tools
 

@@ -1,6 +1,6 @@
 # v4 -> v5 migration, verification and rollback
 
-This is a coordinated service5.0.0-beta.1 / extension5.0.0 / browser wire5 upgrade.
+This is a coordinated service5.0.0-beta.2 / extension5.0.0 / browser wire5 upgrade.
 It removes mandatory OIDC and account membership from runtime authorization,
 uses explicit client-device bindings and replaces one-tab/per-action consent
 with active native-sidebar/group authority. End leaves tabs open.

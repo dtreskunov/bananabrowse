@@ -90,6 +90,10 @@ export function createApp(store, config) {
     res.setHeader('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const url = new URL(req.url, config.origin), path = url.pathname, method = req.method, origin = req.headers.origin;
     requireValue(!url.search, 'INVALID_ARGUMENTS');
+    if (path === '/health' && method === 'GET') {
+      json(res, 200, { service: 'domagent', status: 'ok', version: SERVICE_VERSION, protocol_version: VERSION });
+      return;
+    }
     if (path === '/.well-known/domagent' && method === 'GET') {
       if (origin) {
         extension(origin);

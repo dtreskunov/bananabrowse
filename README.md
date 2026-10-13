@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.1**, extensions **5.0.0**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.1).
+Service **5.0.0-beta.2**, extensions **5.0.0**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.2).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 

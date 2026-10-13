@@ -80,6 +80,12 @@ cover expression/statements/Promises, strict directives, syntax/no-dispatch,
 runtime/async stacks and no page eval. Native source capture occurs before Firefox
 clones Error, rather than claiming an extension dispatcher stack is the page stack.
 
+Permission-category regression tests invoke Firefox153's actual parent permission
+API with already-granted permissions: combined userScripts/host origins fails,
+standalone userScripts succeeds. They do not fabricate a user gesture or claim
+physical dialog approval. Renderer fixtures exercise first-click scripting,
+second-click website access, declines and no premature activation/confirmation.
+
 Restart patch tests stop/recreate the actual Chrome fixture service while the
 native panel/group remains open, verify epoch/connection changes and inactive
 empty signed reprojection without replay, then require explicit local Resume and

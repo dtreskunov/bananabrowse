@@ -76,10 +76,10 @@ test('Firefox platform gate: native group API and sidebar open state follows bro
   const profile = path.join(directory, 'profile');
   await fs.mkdir(profile, { recursive: true });
   await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify({
-    manifest_version: 2, name: 'DomAgent Firefox platform fixture', version: '1.0.0',
+    manifest_version: 3, name: 'DomAgent Firefox platform fixture', version: '1.0.0',
     browser_specific_settings: { gecko: { id: 'domagent-gate@example.test' } },
     permissions: ['tabs', 'tabGroups'],
-    background: { scripts: ['background.js'], persistent: true },
+    background: { scripts: ['background.js'] },
     sidebar_action: { default_title: 'DomAgent platform gate', default_panel: 'panel.html' },
     options_ui: { page: 'probe.html', open_in_tab: true },
   }));
@@ -96,7 +96,7 @@ test('Firefox platform gate: native group API and sidebar open state follows bro
     'user_pref("devtools.chrome.enabled",true);',
   ].join('\n'));
   const port = await freePort();
-  const child = spawn(firefox.executablePath(), [
+  const child = spawn(process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(), [
     '--no-remote', '--headless', '--profile', profile, '--start-debugger-server', String(port), 'about:blank',
   ], { env: { ...process.env, TMPDIR: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let rdp;

@@ -1,8 +1,10 @@
-import { OPERATIONS, PAGE_WAIT_MS, DEFAULT_OUTPUT_BYTES, READINESS_ERRORS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
+import { OPERATIONS, PAGE_WAIT_MS, READINESS_ERRORS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
-import { pageEvaluate, pageHelper, sharingIndicator } from './page.js';
+import { pageHelper, sharingIndicator } from './page.js';
 import { actionSummary } from './approval-summary.js';
+import { diagnosticDetails } from '../../shared/diagnostics.js';
+import { compileScriptSource } from './script-source.js';
 
 export function injectionReason(error) {
   const message = typeof error?.message === 'string' ? error.message : '';
@@ -138,7 +140,7 @@ export class BrowserAdapter {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
       const protectedPage = guard?.origins.includes(new URL(details.url).origin);
-      this.onTabEvent(details.tabId, protectedPage ? 'protected_pending' : 'navigation', details.url);
+      this.onTabEvent(details.tabId, protectedPage ? 'protected_pending' : 'navigation_pending', details.url);
     });
     this.api.webNavigation.onErrorOccurred.addListener(details => {
       if (details.frameId !== 0) return;
@@ -396,6 +398,9 @@ export class BrowserAdapter {
     const blank = (tab.url || tab.pendingUrl) === 'about:blank' &&
       (!tab.pendingUrl || tab.pendingUrl === 'about:blank');
     if (allowBlank && blank) return { url: 'about:blank' };
+    if (!tab.url && !tab.pendingUrl) {
+      throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
+    }
     navigationUrl(tab.pendingUrl || tab.url, origins);
     if (tab.status === 'loading' || tab.pendingUrl) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
@@ -426,8 +431,9 @@ export class BrowserAdapter {
       try {
         if (grant.navigation && !grant.navigation.document) {
           const current = await this.api.tabs.get(grant.tabId);
-          if ((current.pendingUrl || current.url) === grant.navigation.from &&
-              grant.navigation.from !== grant.navigation.url) {
+          const candidate = current.pendingUrl || current.url;
+          if ((!/^https?:/.test(candidate || '') || candidate === grant.navigation.from) &&
+              candidate !== grant.navigation.url) {
             throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
           }
         }
@@ -490,23 +496,37 @@ export class BrowserAdapter {
     await this.assertWorkspace(grant);
     const tabId = grant.tabId;
     if (operation === 'wait_for_page') {
-      let page;
-      try { page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, checkCurrent); }
-      catch (error) {
-        if (error.code === 'TARGET_STALE' && args.timeout_ms === 0) {
-          error.code = error.message = 'WAIT_TIMEOUT';
+      const timeout = args.timeout_ms ?? PAGE_WAIT_MS;
+      const deadline = Date.now() + timeout;
+      while (true) {
+        let page;
+        try { page = await this.waitForInspection(grant, Math.max(0, deadline - Date.now()), checkCurrent); }
+        catch (error) {
+          if (error.code === 'TARGET_STALE' && args.timeout_ms === 0) error.code = error.message = 'WAIT_TIMEOUT';
+          throw error;
         }
-        throw error;
+        const loaded = { state: 'loaded', url: page.url, document: page.document_nonce, document_ready: true,
+          content_ready: null, ...(page.content_type ? { content_type: page.content_type } : {}) };
+        if (!args.content_selector) return loaded;
+        const condition = await this.helper(tabId, 'content_readiness', {
+          selector: args.content_selector, document_nonce: page.document_nonce,
+        });
+        checkCurrent();
+        await this.assertWorkspace(grant);
+        if (condition.ready) return { ...loaded, content_ready: true };
+        if (Date.now() >= deadline) {
+          throw Object.assign(new Error('WAIT_TIMEOUT'), { code: 'WAIT_TIMEOUT',
+            readiness_stage: 'content_readiness', last_error: 'ELEMENT_NOT_FOUND', timeout_ms: timeout });
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
       }
-      return { state: 'loaded', url: page.url, document: page.document_nonce,
-        ...(page.content_type ? { content_type: page.content_type } : {}) };
     }
     const document = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, checkCurrent, operation === 'navigate');
     if (preview?.document_nonce && preview.document_nonce !== document.document_nonce) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
     }
     let context;
-    if (operation === 'evaluate_script' && this.browserName === 'chrome') {
+    if (operation === 'evaluate_script' && this.browserName === 'chrome' && args.world !== 'USER_SCRIPT') {
       const tree = await this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree');
       context = this.contexts.get(tabId)?.get(tree.frameTree?.frame.id);
       if (!context?.uniqueId) fail('TARGET_STALE');
@@ -520,7 +540,7 @@ export class BrowserAdapter {
       return { url, navigation_started: true };
     }
     if (operation === 'evaluate_script') {
-      if (this.browserName === 'chrome') {
+      if (this.browserName === 'chrome' && args.world !== 'USER_SCRIPT') {
         // The remote caller chooses only page source, never a CDP method/target/context.
         const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
           expression: args.script, awaitPromise: true, returnByValue: true,
@@ -528,31 +548,86 @@ export class BrowserAdapter {
         });
         if (response.exceptionDetails || response.result?.subtype === 'error') {
           const exception = response.exceptionDetails?.exception || response.result;
-          fail(exception?.className === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR');
+          const code = exception?.className === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR';
+          const native = Object.assign(new Error(exception?.description || code), {
+            name: exception?.className || 'Error', native: response.exceptionDetails,
+          });
+          throw Object.assign(new Error(code), { code,
+            ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: 'MAIN' }) });
         }
         if (response.result?.unserializableValue !== undefined || response.result?.type === 'function') {
           fail('SCRIPT_SERIALIZATION_ERROR');
         }
         try {
-          return compactResult(operation, { value: response.result?.value ?? null }, args);
+          return compactResult(operation, { value: response.result?.value ?? null, execution_world: 'MAIN' }, args);
         } catch (error) {
           if (error.code === 'RESULT_TOO_LARGE') throw error;
           fail('SCRIPT_SERIALIZATION_ERROR');
         }
       }
       let responses;
+      let compiled;
+      try { compiled = compileScriptSource(args.script); }
+      catch (error) {
+        throw Object.assign(new Error('SCRIPT_SYNTAX_ERROR'), { code: 'SCRIPT_SYNTAX_ERROR', dispatch_status: 'not_dispatched',
+          ...diagnosticDetails(error, { layer: 'extension', phase: 'validation', execution_world: args.world || 'MAIN' }) });
+      }
       try {
-        responses = await this.api.scripting.executeScript({
+        if (!this.api.userScripts?.execute) throw new Error('Native user-script API is unavailable or not enabled.');
+        const world = args.world || 'MAIN';
+        if (world === 'USER_SCRIPT') {
+          await this.api.userScripts.configureWorld({
+            worldId: grant.scriptWorldId || 'domagent',
+            csp: "script-src 'self' 'unsafe-eval'; object-src 'none'",
+            messaging: false,
+          });
+        }
+        responses = await this.api.userScripts.execute({
           target: document.document_id ? { tabId, documentIds: [document.document_id] } : { tabId, frameIds: [0] },
-          world: 'MAIN', func: pageEvaluate, args: [args.script, args.max_output_bytes ?? DEFAULT_OUTPUT_BYTES],
+          world, ...(world === 'USER_SCRIPT' ? { worldId: grant.scriptWorldId || 'domagent' } : {}),
+          js: [{ code: compiled.code }],
         });
       } catch (error) {
-        this.onWarning(error);
-        fail('SCRIPT_EXECUTION_UNAVAILABLE');
+        const failure = Object.assign(new Error('SCRIPT_EXECUTION_UNAVAILABLE'), {
+          code: 'SCRIPT_EXECUTION_UNAVAILABLE',
+          ...diagnosticDetails(error, { layer: 'browser', phase: 'dispatch', execution_world: args.world || 'MAIN' }),
+        });
+        this.onWarning(failure);
+        throw failure;
       }
-      if (!responses?.[0]?.result || responses[0].error) fail('SCRIPT_EXECUTION_UNAVAILABLE');
-      if (responses[0].result.error) fail(responses[0].result.error);
-      return compactResult(operation, responses[0].result, args);
+      const response = responses?.[0];
+      if (!response) fail('SCRIPT_EXECUTION_UNAVAILABLE');
+      if (response.result?.__domagent_script_failure === compiled.marker) {
+        const details = response.result.details;
+        let code = 'SCRIPT_RUNTIME_ERROR';
+        if (response.result.serialization_error) code = 'SCRIPT_SERIALIZATION_ERROR';
+        else if (details.name === 'SyntaxError') code = 'SCRIPT_SYNTAX_ERROR';
+        else if (details.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(details.message || '')) {
+          code = 'SCRIPT_POLICY_BLOCKED';
+        }
+        throw Object.assign(new Error(code), { code, ...diagnosticDetails(details, {
+          layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN',
+        }) });
+      }
+      if (response.error !== undefined) {
+        const native = response.error;
+        let code = 'SCRIPT_RUNTIME_ERROR';
+        if (native?.name === 'SyntaxError') code = 'SCRIPT_SYNTAX_ERROR';
+        else if (native?.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(native.message || '')) {
+          code = 'SCRIPT_POLICY_BLOCKED';
+        }
+        throw Object.assign(new Error(code), { code,
+          ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN' }) });
+      }
+      if (document.document_id && response.documentId !== document.document_id) fail('TARGET_STALE');
+      if (typeof response.result === 'function' || typeof response.result === 'symbol') fail('SCRIPT_SERIALIZATION_ERROR');
+      try {
+        return compactResult(operation, { value: response.result ?? null, execution_world: args.world || 'MAIN' }, args);
+      } catch (error) {
+        if (error.code === 'RESULT_TOO_LARGE') throw error;
+        throw Object.assign(new Error('SCRIPT_SERIALIZATION_ERROR'), { code: 'SCRIPT_SERIALIZATION_ERROR',
+          ...diagnosticDetails(error, { layer: 'browser', phase: 'serialization', execution_world: args.world || 'MAIN' }) });
+      }
     }
     if (operation === 'get_screenshot') {
       if (this.browserName === 'chrome') {

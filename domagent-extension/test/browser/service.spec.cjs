@@ -36,6 +36,17 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
   const store = new Store(':memory:');
   const clientInfo = store.createClient('Atlas');
   app = createApp(store, { origin, bind: '127.0.0.1', port: 0, protectedOrigins: [origin] });
+  const receiveMessage = app.bridge.message.bind(app.bridge);
+  app.bridge.message = async (session, message) => {
+    try { return await receiveMessage(session, message); }
+    catch (error) {
+      if (message.type === 'workspace.sync' && error.code === 'INVALID_WORKSPACE') {
+        const { signature, ...snapshot } = message;
+        console.log('Synthetic invalid workspace evidence:', JSON.stringify(snapshot), error.stack);
+      }
+      throw error;
+    }
+  };
   const address = await app.listen();
   const pageServer = http.createServer((_req, res) => {
     res.setHeader('Content-Type', 'text/html');
@@ -62,9 +73,15 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS === '1') {
       await options.locator('#domain').fill(origin);
       await options.getByRole('button', { name: 'Continue', exact: true }).click();
-      await expect(options.locator('#error')).toContainText('permission was declined');
+      expect(await options.evaluate(origin => chrome.permissions.contains({ origins: [`${origin}/*`] }), origin)).toBe(false);
+      await expect(options.locator('button[type="submit"]')).toHaveText('Waiting for permission');
       expect((await state()).pairing).toBe(null);
       expect((await state()).workspaces).toHaveLength(0);
+      const denied = await options.evaluate(origin => chrome.runtime.sendMessage({
+        type: 'ui.configure', service_origin: origin,
+      }), origin);
+      expect(denied.ok).toBe(false);
+      expect(denied.error.code).toBe('PERMISSION_REQUIRED');
       return;
     } else await request({ type: 'ui.configure', service_origin: origin });
     await expect.poll(async () => (await state()).pairing?.code).toBeTruthy();
@@ -81,7 +98,7 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     } else await request({ type: 'ui.confirmPairing' });
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
     expect((await state()).workspaces).toHaveLength(0);
-    if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') await options.getByRole('button', { name: 'Open workspace sidebar' }).click();
+    if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') await options.getByRole('button', { name: 'Open dashboard' }).click();
     const windowId = await options.evaluate(() => chrome.windows.getCurrent().then(window => window.id));
     await new Promise(resolve => setTimeout(resolve, 500));
     if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') await request({ type: 'ui.start', windowId });
@@ -95,7 +112,22 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     expect(blank.page_state).toBe('navigation_only');
     expect((await call('navigate', { target_id: blank.target_id, url: pageUrl })).isError).not.toBe(true);
     await expect.poll(async () => (await listing())[0]?.page_state).toBe('ready');
+    const privilegedSettings = await context.newPage();
+    await privilegedSettings.goto('chrome://extensions/');
+    await privilegedSettings.evaluate(extensionId => new Promise((resolve, reject) => {
+      chrome.developerPrivate.updateExtensionConfiguration({ extensionId, userScriptsAccess: true }, () => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else resolve();
+      });
+    }), new URL(worker.url()).host);
+    await privilegedSettings.close();
+    const isolated = await call('evaluate_script', { target_id: blank.target_id, world: 'USER_SCRIPT',
+      script: '({ title: document.title, privileged: typeof globalThis.chrome?.runtime?.getManifest })' });
+    expect(isolated.isError).not.toBe(true);
+    const isolatedValue = JSON.parse(isolated.content[0].text);
+    expect(isolatedValue.execution_world).toBe('USER_SCRIPT');
+    expect(isolatedValue.value.privileged).toBe('undefined');
     const created = await call('create_workspace_tab', { workspace_id: first.workspace_id, url: pageUrl });
+    if (created.isError) console.log('Synthetic creation failure:', created, await state());
     expect(created.isError).not.toBe(true);
     const second = JSON.parse(created.content[0].text);
     await expect.poll(async () => (await listing()).length).toBe(2);
@@ -148,13 +180,16 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     const resumed = (await listing())[0];
     expect(resumed.target_id).not.toBe(blank.target_id);
     await options.evaluate(windowId => chrome.sidePanel.close({ windowId }), windowId);
-    await expect.poll(async () => (await state()).workspaces[0].state).toBe('inactive');
-    expect((await state()).workspaces[0].end_reason).toBe('PANEL_CLOSED');
+    await new Promise(resolve => setTimeout(resolve, 6500));
+    expect((await state()).workspaces[0].state).toBe('active');
+    expect((await call('get_text', { target_id: resumed.target_id, selector: 'h1' })).isError).not.toBe(true);
+    await request({ type: 'ui.pauseAll' });
+    await expect.poll(async () => (await state()).workspaces[0].state).toBe('paused');
     expect((await call('get_text', { target_id: resumed.target_id, selector: 'h1' })).isError).toBe(true);
     const tabsAfter = await options.evaluate(() => chrome.tabs.query({}));
     expect(tabsAfter.filter(tab => tab.groupId === first.groupId)).toHaveLength(2);
     expect(tabsAfter.some(tab => tab.id === unshared.id)).toBe(true);
-    await options.getByRole('button', { name: 'Open workspace sidebar' }).click();
+    await options.getByRole('button', { name: 'Open dashboard' }).click();
     await new Promise(resolve => setTimeout(resolve, 300));
     await request({ type: 'ui.start', windowId, groupId: first.groupId });
     await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');

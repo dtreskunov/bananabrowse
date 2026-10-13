@@ -15,9 +15,10 @@ interface BrowserApi {
     sendMessage(message: Record<string, unknown>): Promise<unknown>;
     connect(options: { name: string }): Port;
     openOptionsPage(): Promise<void>;
+    getBrowserInfo?: () => Promise<{ name: string; version: string }>;
   };
   windows: { getCurrent(): Promise<{ id?: number }> };
-  permissions: { request(options: { origins: string[] }): Promise<boolean> };
+  permissions: { request(options: { origins: string[]; permissions?: string[] }): Promise<boolean> };
   sidePanel?: { open(options: { windowId: number }): Promise<void> };
   sidebarAction?: { open(): Promise<void> };
 }
@@ -29,6 +30,7 @@ export const busy = signal<string | null>(null);
 export const localError = signal<string | null>(null);
 export const selection = signal<string | null>(null);
 export const isPanel = location.pathname === '/panel.html';
+export const isPopup = location.pathname === '/popup.html';
 let windowId: number;
 
 export function report(error: unknown): void {
@@ -50,7 +52,7 @@ function receive(value: unknown): void {
   selection.value = suggestedSelection(next, selection.value);
 }
 export async function refresh(): Promise<void> {
-  receive(await request('state', isPanel ? { windowId } : {}));
+  receive(await request('state', isPanel || isPopup ? { windowId } : {}));
 }
 export async function run(label: string, operation: () => Promise<unknown>): Promise<void> {
   if (busy.value) return;
@@ -82,7 +84,7 @@ export async function continueTask(): Promise<void> {
   const selected = selection.value;
   if (!selected) throw new Error('GROUP_UNAVAILABLE');
   // Ask synchronously within the local click gesture, before any connection work.
-  if (!await api.permissions.request({ origins: ['http://*/*', 'https://*/*'] })) throw new Error('PERMISSION_REQUIRED');
+  if (!await websitePermission()) throw new Error('PERMISSION_REQUIRED');
   await waitForConnection();
   if (selected === 'new') {
     await request('startNew', { windowId });
@@ -98,14 +100,13 @@ export async function continueTask(): Promise<void> {
 export async function configure(domain: string): Promise<void> {
   const input = domain.trim();
   const origin = serviceOrigin(input.includes('://') ? input : `https://${input}`);
+  busy.value = 'Waiting for permission';
   if (!await api.permissions.request({ origins: [`${origin}/*`] })) throw new Error('PERMISSION_REQUIRED');
+  busy.value = 'Connecting';
   await request('configure', { service_origin: origin });
 }
 export async function confirmPairing(): Promise<void> {
-  const permission = api.permissions.request({ origins: ['http://*/*', 'https://*/*'] });
-  const opening = openPanel();
-  const [granted] = await Promise.all([permission, opening]);
-  if (!granted) throw new Error('PERMISSION_REQUIRED');
+  if (!await websitePermission()) throw new Error('PERMISSION_REQUIRED');
   await request('confirmPairing');
   await waitForConnection();
   await request('start', { windowId });
@@ -113,6 +114,11 @@ export async function confirmPairing(): Promise<void> {
 export async function copyCode(code: string): Promise<void> {
   try { await navigator.clipboard.writeText(code); }
   catch { throw new Error('CLIPBOARD_UNAVAILABLE'); }
+}
+export const copyText = copyCode;
+function websitePermission(): Promise<boolean> {
+  return api.permissions.request({ origins: ['http://*/*', 'https://*/*'],
+    ...(api.runtime.getBrowserInfo ? { permissions: ['userScripts'] } : {}) });
 }
 export async function initialize(): Promise<void> {
   const current = await api.windows.getCurrent();
@@ -134,7 +140,7 @@ export async function initialize(): Promise<void> {
       // Do not keep an active-looking screen when its trusted panel port is gone.
       if (snapshot.value) snapshot.value = { ...snapshot.value, phase: 'disconnected',
         workspaces: snapshot.value.workspaces.map(workspace => ({ ...workspace, state: 'inactive', acknowledged: false })) };
-      report(new Error('PANEL_OPEN_REQUIRED'));
+      report(new Error('BROWSER_OFFLINE'));
     });
     window.addEventListener('pagehide', () => { clearInterval(timer); port.disconnect(); }, { once: true });
     heartbeat();

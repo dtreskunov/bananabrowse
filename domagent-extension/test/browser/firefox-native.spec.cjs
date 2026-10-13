@@ -51,6 +51,11 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
   const pageServer = http.createServer(async (req, res) => {
     if (await respondToForm(req, res)) return;
     res.setHeader('Content-Type', 'text/html');
+    if (req.url === '/strict-csp') {
+      res.setHeader('Content-Security-Policy', "script-src 'none'; object-src 'none'");
+      res.end('<title>Native strict CSP</title><h1 id="strict-heading">Native DOM</h1>');
+      return;
+    }
     res.end('<title>Native v5 page</title><h1>Grouped background fixture</h1>' + actionHtml);
   });
   await new Promise(resolve => pageServer.listen(0, '127.0.0.1', resolve));
@@ -65,7 +70,7 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
   const port = await freePort();
   let child, exit, rdp, client, parent, consoleActor, sidebarCommand;
   const launch = () => {
-    child = spawn(firefox.executablePath(), ['--headless', '--no-remote', '--profile', profile,
+    child = spawn(process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(), ['--headless', '--no-remote', '--profile', profile,
       '--start-debugger-server', String(port), 'about:blank'], { env: { ...process.env, TMPDIR: '/tmp' },
       stdio: ['ignore', 'pipe', 'pipe'] });
     exit = new Promise(resolve => child.once('close', resolve));
@@ -75,10 +80,10 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
     await exit; clearTimeout(timer);
   };
-  const connect = async () => {
-    rdp = await openNativeRdp(port);
+  const connect = async (addonPath = extension) => {
+    if (!rdp) rdp = await openNativeRdp(port);
     const rootActor = await rdp.request('root', 'getRoot');
-    const installed = await rdp.request(rootActor.addonsActor, 'installTemporaryAddon', { addonPath: extension });
+    const installed = await rdp.request(rootActor.addonsActor, 'installTemporaryAddon', { addonPath });
     const descriptor = (await rdp.request('root', 'listAddons')).addons.find(addon => addon.id === installed.addon.id);
     expect(descriptor.warnings).toEqual([]);
     const { processDescriptor } = await rdp.request('root', 'getProcess', { id: 0 });
@@ -96,7 +101,7 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
       const {ExtensionPermissions}=ChromeUtils.importESModule("resource://gre/modules/ExtensionPermissions.sys.mjs");
       const {ExtensionParent}=ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
       return ExtensionPermissions.add("domagent-secure@domagent",
-        {permissions:[],origins:["http://*/*","https://*/*"]},
+        {permissions:${JSON.stringify(addonPath === extension ? ['userScripts'] : [])},origins:["http://*/*","https://*/*"]},
         ExtensionParent.GlobalManager.getExtension("domagent-secure@domagent"));
     })()`);
     const watcher = await rdp.request(descriptor.actor, 'getWatcher');
@@ -116,7 +121,8 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
   const state = () => request({ type: 'ui.state' });
   launch();
   try {
-    await connect();
+    const legacy = process.env.DOMAGENT_LEGACY_FIREFOX_EXTENSION;
+    await connect(legacy || extension);
     expect(await evaluate('browser.permissions.contains({origins:["http://*/*","https://*/*"]})')).toBe(true);
     await request({ type: 'ui.configure', service_origin: origin });
     client = new Client({ name: 'v5-native-test', version: '1' });
@@ -128,6 +134,16 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
     await request({ type: 'ui.confirmPairing' });
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
     const device = (await state()).identity.device_id;
+    if (legacy) {
+      console.log('Legacy MV2 pairing authenticated; loading MV3 into the same persisted profile after restart.');
+      await stop(); rdp = null; launch();
+      await connect();
+      await expect.poll(async () => (await state()).phase).toBe('authenticated');
+      expect((await state()).identity.device_id).toBe(device);
+      expect((await state()).workspaces).toHaveLength(0);
+      expect((await state()).browser_info.extension_version).toBe(manifest.version);
+      console.log('Real MV2 5.0.4 -> MV3 same-profile identity/storage upgrade verified; no re-pairing.');
+    }
     const windowId = await evaluate('browser.windows.getCurrent().then(window=>window.id)');
     await new Promise(resolve => setTimeout(resolve, 500));
     await request({ type: 'ui.start', windowId });
@@ -136,7 +152,12 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
       arguments: { workspace_id: workspace.workspace_id } })).content[0].text);
     await expect.poll(async () => (await listing()).length).toBe(1);
     let target = (await listing())[0];
-    const call = (name, args = {}) => client.callTool({ name, arguments: { target_id: target.target_id, description, ...args } });
+    const call = async (name, args = {}) => {
+      const result = await client.callTool({ name, arguments: { target_id: target.target_id, description, ...args } });
+      if (result.isError && name === 'get_page_snapshot') console.log('Synthetic native snapshot refusal:',
+        result, await state(), await evaluate(`browser.tabs.query({groupId:${workspace.groupId}})`));
+      return result;
+    };
     expect((await call('navigate', { url: pageUrl })).isError).not.toBe(true);
     const waiting = await call('wait_for_page');
     if (waiting.isError) console.log('Native navigation fixture failure:', waiting,
@@ -144,14 +165,38 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
     expect(waiting.isError).not.toBe(true);
     await expect.poll(async () => (await listing())[0].page_state).toBe('ready');
     await exerciseActions(call);
+    expect((await call('navigate', { url: `${pageUrl}strict-csp` })).isError).not.toBe(true);
+    const content = await call('wait_for_page', { content_selector: '#strict-heading' });
+    expect(content.isError).not.toBe(true);
+    expect(JSON.parse(content.content[0].text).content_ready).toBe(true);
+    const main = await call('evaluate_script', { world: 'MAIN', script: 'globalThis.fixtureMainValue = 42; document.title' });
+    expect(main.isError).not.toBe(true);
+    expect(JSON.parse(main.content[0].text)).toMatchObject({ value: 'Native strict CSP', execution_world: 'MAIN' });
+    const user = await call('evaluate_script', { world: 'USER_SCRIPT',
+      script: '({ dom: document.querySelector("h1").textContent, page: typeof globalThis.fixtureMainValue, privileged: typeof browser, dynamic: new Function("return 42")() })' });
+    expect(user.isError).not.toBe(true);
+    expect(JSON.parse(user.content[0].text)).toMatchObject({ execution_world: 'USER_SCRIPT',
+      value: { dom: 'Native DOM', page: 'undefined', privileged: 'undefined', dynamic: 42 } });
+    const policy = await call('evaluate_script', { world: 'MAIN', script: 'new Function("return 42")()' });
+    expect(policy.isError).toBe(true);
+    const policyError = JSON.parse(policy.content[0].text);
+    expect(policyError.error).toBe('SCRIPT_POLICY_BLOCKED');
+    expect(policyError.diagnostics.name).toBe('EvalError');
+    expect(policyError.diagnostics.stack).toBeTruthy();
+    expect((await call('navigate', { url: pageUrl })).isError).not.toBe(true);
+    expect((await call('wait_for_page')).isError).not.toBe(true);
     const unshared = await evaluate(`browser.tabs.create({url:${JSON.stringify(pageUrl)},active:true})`);
     expect((await call('get_text', { selector: 'body' })).isError).not.toBe(true);
     expect((await listing()).some(tab => tab.tab_id === unshared.id)).toBe(false);
     await rdp.evaluate(parent.consoleActor, 'Services.wm.getMostRecentWindow("navigator:browser").SidebarController.hide()');
-    await expect.poll(async () => (await state()).workspaces[0].state).toBe('inactive');
+    await new Promise(resolve => setTimeout(resolve, 35000));
+    expect((await state()).workspaces[0].state).toBe('active');
+    expect((await call('get_text', { selector: 'body' })).isError).not.toBe(true);
+    await request({ type: 'ui.pauseAll' });
+    await expect.poll(async () => (await state()).workspaces[0].state).toBe('paused');
     expect((await call('get_text', { selector: 'body' })).isError).toBe(true);
     expect(await evaluate(`browser.tabs.query({groupId:${workspace.groupId}}).then(tabs=>tabs.length)`)).toBe(1);
-    await stop(); launch(); await connect();
+    await stop(); rdp = null; launch(); await connect();
     await expect.poll(async () => (await state()).phase).toBe('authenticated');
     expect((await state()).identity.device_id).toBe(device);
     expect((await state()).workspaces).toHaveLength(0);

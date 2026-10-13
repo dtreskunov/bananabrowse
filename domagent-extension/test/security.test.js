@@ -37,12 +37,16 @@ test('descriptions enforce exactly forty trimmed characters and safe page errors
     last_error: 'private text', timeout_ms: 10000 }), { inspection_stage: 'tab_status' });
 });
 
-test('Firefox uses a persistent background without broadening website permissions', () => {
+test('Firefox MV3 preserves extension identity and host scope while declaring optional native scripting', () => {
   const manifest = JSON.parse(readFileSync(new URL('../firefox/manifest.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.manifest_version, 2);
-  assert.equal(manifest.background.persistent, true);
+  assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.background.persistent, undefined);
   assert.deepEqual(manifest.background.scripts, ['background.js']);
-  assert.deepEqual(manifest.optional_permissions, ['http://*/*', 'https://*/*']);
+  assert.deepEqual(manifest.optional_permissions, ['userScripts']);
+  assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
+  assert.equal(manifest.browser_specific_settings.gecko.id, 'domagent-secure@domagent');
+  assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, '153.0');
+  assert.equal(manifest.action.default_popup, 'popup.html');
   assert(!manifest.permissions.some(permission => permission.startsWith('http')));
   assert.equal(manifest.externally_connectable, undefined);
 });

@@ -3,12 +3,14 @@ import { WebSocketServer } from 'ws';
 import {
   VERSION, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, HUMAN_WAIT_MS, EXECUTION_MS,
   WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
-  authPayload, workspacePayload, verify, navigationUrl, validOperationArgs, validTargetId,
-  validDescription, inspectionErrorDetails, waitErrorDetails, validBrowserInfo,
+  authPayload, workspacePayload, verify, navigationUrl, TARGET_ID_SCHEMA,
+  DESCRIPTION_SCHEMA, OPERATION_SCHEMAS, HANDOFF_SCHEMA, schemaArgumentErrors,
+  inspectionErrorDetails, waitErrorDetails, validBrowserInfo,
   validWorkspaceEndReason,
 } from '../shared/protocol.js';
 import { token } from './store.js';
-import { Fault, requireValue, failureCode, audit } from './errors.js';
+import { sanitizeDiagnostics } from '../shared/diagnostics.js';
+import { Fault, requireValue, requireArguments, dispatchDetails, failureCode, audit } from './errors.js';
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATES = new Set(['active','paused','inactive']);
@@ -20,8 +22,21 @@ const RESULT_ERRORS = new Set(['HANDOFF_REQUIRED','CAPABILITY_UNAVAILABLE','TARG
   'OPTION_NOT_FOUND','WAIT_TIMEOUT','RESULT_TOO_LARGE','SCRIPT_POLICY_BLOCKED','SCRIPT_SYNTAX_ERROR',
   'SCRIPT_RUNTIME_ERROR','SCRIPT_SERIALIZATION_ERROR','SCRIPT_EXECUTION_UNAVAILABLE','WORKSPACE_CHANGED',
   'WORKSPACE_PAUSED','WORKSPACE_INACTIVE','TAB_NOT_IN_WORKSPACE','DOCUMENT_NOT_CONTROLLABLE',
-  'TAB_LIMIT_REACHED','NOTIFICATION_UNAVAILABLE']);
+  'TAB_LIMIT_REACHED','NOTIFICATION_UNAVAILABLE','INPUT_REJECTED','INPUT_NOT_APPLIED']);
 const validInt = value => Number.isSafeInteger(value) && value >= 0;
+function supportsAdvancedArgs(session) {
+  const version = session.browser_info?.extension_version;
+  if (typeof version !== 'string' || !/^[0-9]+(?:\.[0-9]+){0,3}$/.test(version)) return false;
+  const parts = version.split('.').map(Number), minimum = [5, 0, 5];
+  for (let index = 0; index < minimum.length; index++) {
+    const value = parts[index] || 0;
+    if (value !== minimum[index]) return value > minimum[index];
+  }
+  return true;
+}
+const ADVANCED_ARGUMENTS = Object.freeze({
+  evaluate_script: 'world', wait_for_page: 'content_selector', request_handoff: 'suggested_text',
+});
 
 export class BridgeServer {
   constructor(store, config) {
@@ -139,7 +154,9 @@ export class BridgeServer {
       if (m.error) {
         requireValue(m.error && typeof m.error === 'object', 'INVALID_RESULT');
         const code = RESULT_ERRORS.has(m.error.code) ? m.error.code : 'OPERATION_FAILED';
-        call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error)));
+        const diagnostics = sanitizeDiagnostics(m.error.diagnostics);
+        call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error), dispatchDetails(m.error),
+          diagnostics ? { diagnostics } : {}));
         return;
       }
       requireValue(call.phase === 'executing', 'ACTION_NOT_READY', 403);
@@ -377,8 +394,10 @@ export class BridgeServer {
   }
   waitWorkspace(clientId, deviceId, description, timeoutMs = 300_000, signal, tenant) {
     requireValue(this.store.linked(clientId, deviceId, tenant), 'NOT_AUTHORIZED', 403);
-    requireValue(validDescription(description) && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1000 &&
-      timeoutMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
+    requireArguments(schemaArgumentErrors({ properties: {
+      description: DESCRIPTION_SCHEMA,
+      timeout_ms: { type: 'integer', minimum: 1000, maximum: HUMAN_WAIT_MS },
+    }, required: ['description', 'timeout_ms'] }, { description, timeout_ms: timeoutMs }));
     requireValue(this.waiters.size < 256, 'QUEUE_FULL', 429);
     return new Promise((resolve, reject) => {
       let finished = false;
@@ -424,9 +443,15 @@ export class BridgeServer {
   }
   async operate(clientId, targetId, operation, args, signal, tenant,
     description, waitMs = 300_000) {
-    requireValue(validTargetId(targetId) && (OPERATIONS.includes(operation) || operation === 'request_handoff') &&
-      validOperationArgs(operation, args) && validDescription(description), 'INVALID_ARGUMENTS');
-    requireValue(Number.isSafeInteger(waitMs) && waitMs >= 1000 && waitMs <= HUMAN_WAIT_MS, 'INVALID_ARGUMENTS');
+    const spec = operation === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[operation];
+    requireArguments(spec ? [] : [{ field: 'operation', reason: 'invalid_enum' }]);
+    requireArguments([
+      ...schemaArgumentErrors(spec, args),
+      ...schemaArgumentErrors({ properties: {
+        target_id: TARGET_ID_SCHEMA, description: DESCRIPTION_SCHEMA,
+        wait_timeout_ms: { type: 'integer', minimum: 1000, maximum: HUMAN_WAIT_MS },
+      }, required: ['target_id', 'description'] }, { target_id: targetId, description, wait_timeout_ms: waitMs }),
+    ]);
     const target = this.targets.get(targetId);
     if (!target || target.workspace.client_id !== clientId || target.workspace.tenant_id !== tenant) {
       const tombstone = this.tombstones.get(targetId);
@@ -435,7 +460,11 @@ export class BridgeServer {
       throw new Fault('NOT_AUTHORIZED', 403);
     }
     const workspace = target.workspace;
-    this.checkAuthority(workspace, target, operation);
+    const session = this.checkAuthority(workspace, target, operation);
+    const advanced = supportsAdvancedArgs(session), advancedField = ADVANCED_ARGUMENTS[operation];
+    // Self-reported version is only a compatibility hint, checked after caller authority.
+    requireValue(!advancedField || !Object.hasOwn(args, advancedField) || advanced, 'UPGRADE_REQUIRED');
+    if (operation === 'evaluate_script' && advanced) args = { world: 'MAIN', ...args };
     if (operation === 'navigate') {
       try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
     }
@@ -476,8 +505,12 @@ export class BridgeServer {
     });
   }
   async createTab(clientId, workspaceId, args, description, signal, tenant) {
-    requireValue(UUID.test(workspaceId || '') && validDescription(description) && args && typeof args === 'object' &&
-      Object.keys(args).every(k => k === 'url') && (args.url === undefined || typeof args.url === 'string'), 'INVALID_ARGUMENTS');
+    requireArguments([
+      ...schemaArgumentErrors({ properties: { url: { type: 'string', minLength: 1, maxLength: 2048 } } }, args),
+      ...schemaArgumentErrors({ properties: { workspace_id: { type: 'string', format: 'uuid' },
+        description: DESCRIPTION_SCHEMA }, required: ['workspace_id', 'description'] },
+      { workspace_id: workspaceId, description }),
+    ]);
     if (args.url !== undefined) {
       try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
     }

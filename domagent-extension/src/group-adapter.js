@@ -46,8 +46,6 @@ export class GroupAdapter extends BrowserAdapter {
   }
 
   registerPanel(windowId, port) {
-    const old = this.panels.get(windowId);
-    if (old && old.port !== port) this.onPanelClosed(windowId);
     this.panels.set(windowId, { port, touched: Date.now() });
   }
 
@@ -60,7 +58,6 @@ export class GroupAdapter extends BrowserAdapter {
   unregisterPanel(windowId, port) {
     if (this.panels.get(windowId)?.port !== port) return;
     this.panels.delete(windowId);
-    this.onPanelClosed(windowId);
   }
 
   async panelOpen(windowId) {
@@ -103,7 +100,6 @@ export class GroupAdapter extends BrowserAdapter {
     if (tab.windowId !== grant.windowId || tab.groupId !== grant.groupId || group.windowId !== grant.windowId) {
       fail('TAB_NOT_IN_WORKSPACE');
     }
-    if (!await this.panelOpen(grant.windowId)) fail('WORKSPACE_INACTIVE');
   }
 
   async execute(grant, operation, args, check, preview) {

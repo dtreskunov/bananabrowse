@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BrowserAdapter, injectionReason } from '../src/adapter.js';
+import { runInNewContext } from 'node:vm';
 
 function event() {
   const listeners = [];
@@ -52,6 +53,10 @@ function fixture(browser = 'chrome') {
         calls.push(['script', args]);
         return [{ result: args.args[0] === 'inspect' ? { url: 'https://site.example/' } : { value: 'page' } }];
       },
+    },
+    userScripts: {
+      async configureWorld(args) { calls.push(['user-world', args]); },
+      async execute(args) { calls.push(['user-script', args]); return [{ result: 'page', frameId: 0 }]; },
     },
   };
   const adapter = new BrowserAdapter(api, browser);
@@ -220,32 +225,75 @@ test('Chrome dispatcher only issues narrowly named tab evaluation/screenshot met
   assert.equal(methods[1][3].uniqueContextId, 'main-context');
 });
 
-test('Firefox remote script is passed as data to MAIN only, not a content-message dispatcher', async () => {
+test('Firefox caller source is browser-compiled in the explicit world, never evaluated with extension privileges', async () => {
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   const script = 'typeof browser';
   await f.adapter.execute(grant, 'evaluate_script', { script }, () => {});
   const scripts = f.calls.filter(call => call[0] === 'script').map(call => call[1]);
   assert.equal(scripts[0].world, 'ISOLATED');
-  assert.equal(scripts[1].world, 'MAIN');
-  assert.deepEqual(scripts[1].args, [script, 16384]);
-  assert.deepEqual(scripts[1].target, { tabId: 100, frameIds: [0] });
-  f.api.scripting.executeScript = async args => {
-    if (args.world === 'MAIN') return [{ result: { error: 'SCRIPT_POLICY_BLOCKED' } }];
-    return [{ result: { url: 'https://site.example/' } }];
-  };
-  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script }, () => {}), /SCRIPT_POLICY_BLOCKED/);
+  const native = f.calls.find(call => call[0] === 'user-script')[1];
+  assert.equal(native.world, 'MAIN');
+  assert(native.js[0].code.includes(script));
+  assert(!native.js[0].code.includes('eval('));
+  assert.deepEqual(native.target, { tabId: 100, frameIds: [0] });
+  const isolated = await f.adapter.execute({ ...grant, scriptWorldId: 'activation-world' },
+    'evaluate_script', { script, world: 'USER_SCRIPT' }, () => {});
+  assert.equal(isolated.execution_world, 'USER_SCRIPT');
+  assert.equal(f.calls.filter(call => call[0] === 'user-script').at(-1)[1].worldId, 'activation-world');
 });
 
 test('Firefox injection failures remain distinct from script and policy failures', async () => {
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   f.adapter.onWarning = () => {};
-  f.api.scripting.executeScript = async args => {
-    if (args.world === 'MAIN') throw new Error('Injection refused');
-    return [{ result: { url: 'https://site.example/' } }];
-  };
+  f.api.userScripts.execute = async () => { throw new Error('Injection refused'); };
   await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: '1+1' }, () => {}), /SCRIPT_EXECUTION_UNAVAILABLE/);
+});
+
+test('native script exception stacks survive classification and never trigger a second-world retry', async () => {
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  const native = new SyntaxError('Synthetic native parser failure');
+  f.api.userScripts.execute = async args => {
+    f.calls.push(['user-script', args]); return [{ error: native, frameId: 0 }];
+  };
+  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'throw new SyntaxError("Synthetic native parser failure")' }, () => {}), error => {
+    assert.equal(error.code, 'SCRIPT_SYNTAX_ERROR');
+    assert.equal(error.diagnostics.name, 'SyntaxError');
+    assert(error.diagnostics.stack.includes('Synthetic native parser failure'));
+    return true;
+  });
+
+  assert.equal(f.calls.filter(call => call[0] === 'user-script').length, 1);
+});
+
+test('content-selector waits share one timeout budget and preserve zero-timeout probe diagnostics', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  let ready = false;
+  f.api.scripting.executeScript = async args => [{
+    result: args.args[0] === 'inspect' ? { url: 'https://site.example/', document_nonce: 'doc' } : { ready },
+  }];
+  const pending = f.adapter.execute(grant, 'wait_for_page', { content_selector: '#ready', timeout_ms: 100 }, () => {});
+  await new Promise(resolve => setImmediate(resolve));
+  ready = true; t.mock.timers.tick(50);
+  assert.deepEqual(await pending, { state: 'loaded', url: 'https://site.example/', document: 'doc',
+    document_ready: true, content_ready: true });
+  ready = false;
+  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { content_selector: '#ready', timeout_ms: 0 }, () => {}), error =>
+    error.code === 'WAIT_TIMEOUT' && error.readiness_stage === 'content_readiness' && error.timeout_ms === 0);
+});
+
+test('captured native failures are errors even when the browser returns them as ordinary result data', async () => {
+  const f = fixture('firefox');
+  f.api.userScripts.execute = async args => [{ result: await runInNewContext(args.js[0].code), frameId: 0 }];
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  for (const script of ['throw new Error("Native runtime failure")', 'Promise.reject(new Error("Native async failure"))']) {
+    await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script }, () => {}), error =>
+      error.code === 'SCRIPT_RUNTIME_ERROR' && error.diagnostics.stack.includes('failure'));
+  }
 });
 
 test('Chrome distinguishes JavaScript errors and enforces the same output budget', async () => {
@@ -367,7 +415,8 @@ test('wait_for_page distinguishes loaded state from navigation started and block
   await new Promise(resolve => setImmediate(resolve));
   loading = false;
   t.mock.timers.tick(50);
-  assert.deepEqual(await waiting, { state: 'loaded', url: 'https://site.example/', document: 'document-1' });
+  assert.deepEqual(await waiting, { state: 'loaded', url: 'https://site.example/', document: 'document-1',
+    document_ready: true, content_ready: null });
   loading = true;
   await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}), /WAIT_TIMEOUT/);
   f.api.tabs.get = async () => ({ windowId: 10, pendingUrl: 'https://control.example/login', status: 'loading' });

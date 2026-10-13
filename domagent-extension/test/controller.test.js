@@ -23,7 +23,7 @@ async function fixture(t) {
     browserName: 'firefox', createdTabs: new Set(), attached: new Set(),
     async initialize() {}, async permissions() {},
     async browserInfo() { return { extension_version: '5.0.0', browser_name: 'firefox', browser_version: '146.0.1' }; },
-    capabilities() { return ['navigate', 'get_text', 'type_text', 'get_page_snapshot']; },
+    capabilities() { return ['navigate', 'get_text', 'type_text', 'get_page_snapshot', 'wait_for_page']; },
     async makeGroup() { return { groupId: 1, tabId: 100 }; },
     async panelOpen() { return open; },
     async protect(id) { calls.push(['protect', id]); },
@@ -33,6 +33,7 @@ async function fixture(t) {
     async releaseAction() {},
     async execute(tab, operation, args, check) { check(); calls.push(['execute', tab.tabId, operation]); return { text: 'Fixture' }; },
     api: {
+      windows: { async get() { return { id: 10, type: 'normal' }; } },
       tabGroups: { async get() { return { windowId: 10 }; },
         async query() { return [{ id: 1, windowId: 10 }, { id: 2, windowId: 10 }]; },
         async update(_id, args) { calls.push(['color', args.color]); } },
@@ -106,6 +107,57 @@ test('local UI reports starting until the fresh activation is acknowledged, incl
   assert.equal(f.controller.snapshot().workspaces[0].acknowledged, true);
 });
 
+test('unknown native URLs are not fabricated, published empty or demoted to navigation-only during document transitions', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  const target = workspace.tabs.get(100);
+  f.tabs[0].url = '';
+  f.tabs.push({ id: 101, windowId: 10, groupId: 1, url: '', status: 'loading' });
+  await f.controller.refresh();
+  assert.equal(target.url, 'https://page.example/');
+  assert.equal(target.pageState, 'loading');
+  assert.equal(workspace.tabs.has(101), false);
+  const snapshot = f.socket.sent.filter(message => message.type === 'workspace.sync').at(-1);
+  assert(snapshot.tabs.every(tab => tab.url));
+  assert(snapshot.tabs[0].capabilities.includes('get_text'));
+  f.tabs[0].url = 'https://page.example/new';
+  f.tabs[1].url = 'about:blank';
+  await f.controller.refresh();
+  assert.equal(target.pageState, 'ready');
+  assert.equal(workspace.tabs.get(101).pageState, 'navigation_only');
+});
+
+test('ordinary native form/click navigation retains loading capability through temporary neutral documents', async t => {
+  const f = await fixture(t), workspace = await start(f), tab = workspace.tabs.get(100);
+  f.adapter.onTabEvent(100, 'navigation_pending', 'https://page.example/post');
+  f.tabs[0].url = 'about:blank';
+  f.tabs[0].status = 'loading';
+  await f.controller.refresh();
+  assert.equal(tab.pageState, 'loading');
+  assert.equal(tab.url, 'https://page.example/');
+  assert.equal(tab.navigation.url, 'https://page.example/post');
+  const sync = f.socket.sent.filter(message => message.type === 'workspace.sync').at(-1);
+  assert(sync.tabs[0].capabilities.includes('wait_for_page'));
+  f.tabs[0].url = 'https://page.example/post';
+  f.tabs[0].status = 'complete';
+  await f.controller.refresh();
+  assert.equal(tab.pageState, 'ready');
+});
+
+test('a loading blank native tab is never signed with ordinary DOM capabilities during admission races', async t => {
+  const f = await fixture(t), workspace = await start(f), tab = workspace.tabs.get(100);
+  tab.url = 'about:blank'; tab.pageState = 'loading';
+  await f.controller.sync(workspace);
+  let signed = f.socket.sent.filter(message => message.type === 'workspace.sync').at(-1).tabs[0];
+  assert.equal(signed.page_state, 'navigation_only');
+  assert.deepEqual(signed.capabilities, ['navigate']);
+  f.adapter.onTabEvent(100, 'navigation_pending', 'https://page.example/new');
+  await f.controller.sync(workspace);
+  signed = f.socket.sent.filter(message => message.type === 'workspace.sync').at(-1).tabs[0];
+  assert.equal(signed.url, 'https://page.example/new');
+  assert.equal(signed.page_state, 'loading');
+  assert(signed.capabilities.includes('wait_for_page'));
+});
+
 test('grouped background tabs execute without per-action approval and unknown tabs remain inaccessible', async t => {
   const f = await fixture(t), workspace = await start(f);
   f.tabs.push({ id: 101, windowId: 10, groupId: 1, url: 'https://other.example/', title: 'Other task', status: 'complete' });
@@ -123,7 +175,7 @@ test('grouped background tabs execute without per-action approval and unknown ta
   assert.equal(f.socket.sent.at(-1).error.code, 'TAB_NOT_IN_WORKSPACE');
 });
 
-test('panel closure and user pause revoke before cleanup, leave tabs open and never replay queued calls', async t => {
+test('user pause revokes before cleanup; dashboard closure retains explicit group authority without replay', async t => {
   const f = await fixture(t), workspace = await start(f);
   const tab = workspace.tabs.get(100), work = command(f, workspace, tab);
   f.adapter.prepareAction = () => new Promise(() => {});
@@ -140,7 +192,13 @@ test('panel closure and user pause revoke before cleanup, leave tabs open and ne
   assert.notEqual(workspace.tabs.get(100).targetId, tab.targetId);
   f.setOpen(false);
   await f.controller.refresh();
-  assert.equal(workspace.state, 'inactive');
+  assert.equal(workspace.state, 'active');
+  assert.equal(workspace.tabs.size, 1);
+  await f.receive({ ...f.binding, type: 'workspace.active', workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  const background = command(f, workspace, workspace.tabs.get(100));
+  f.controller.enqueue(background); await flush();
+  assert(f.socket.sent.some(message => message.type === 'command.ready' && message.request_id === background.request_id));
   assert(!f.calls.some(call => call[0] === 'remove'));
 });
 
@@ -228,7 +286,7 @@ test('server restart reconnect republishes an inactive empty summary and clears 
   assert.equal(f.controller.currentError, 'HISTORY_UNAVAILABLE');
 });
 
-test('choosing a retained group requires native panel/user activation and never adopts by matching title', async t => {
+test('choosing a retained group requires explicit exact-group activation in a normal window, not sidebar presence', async t => {
   const f = await fixture(t);
   f.adapter.api.tabGroups.get = async groupId => ({ windowId: groupId === 2 ? 10 : 11, title: 'DomAgent - Atlas' });
   await f.controller.startWorkspace(10, 2);
@@ -236,7 +294,11 @@ test('choosing a retained group requires native panel/user activation and never 
   assert.equal(workspace.groupId, 2);
   assert.equal(f.calls.some(call => call[0] === 'remove'), false);
   f.setOpen(false);
-  await assert.rejects(f.controller.startWorkspace(10, 2), /PANEL_OPEN_REQUIRED/);
+  await f.controller.startWorkspace(10, 2);
+  assert.equal(workspace.state, 'active');
+  f.adapter.api.windows.get = async () => ({ type: 'popup' });
+  await assert.rejects(f.controller.startWorkspace(10, 2), /WORKSPACE_CHANGED/);
+  f.adapter.api.windows.get = async () => ({ type: 'normal' });
   f.setOpen(true);
   await assert.rejects(f.controller.startWorkspace(10, 3), /WORKSPACE_CHANGED/);
   assert.equal(f.controller.workspaces.size, 1);

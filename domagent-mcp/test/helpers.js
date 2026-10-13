@@ -36,7 +36,8 @@ export async function fixture(options = {}) {
     lastSeen: now(), lastPing: now(), authenticated: false, device: null, challenge: null,
     workspaces: new Set(), usedTargets: new Set() };
   await bridge.message(session, { type: 'hello', version: 5, tenant_id: client.tenant_id, key_id: key.key_id,
-    browser_info: { extension_version: '5.0.0', browser_name: 'chrome', browser_version: '150.0' } });
+    browser_info: Object.hasOwn(options, 'browserInfo') ? options.browserInfo :
+      { extension_version: '5.0.5', browser_name: 'chrome', browser_version: '150.0' } });
   const challenge = ws.sent.pop();
   await bridge.message(session, { type: 'proof', tenant_id: client.tenant_id,
     signature: await sign(key.key, authPayload(challenge)) });

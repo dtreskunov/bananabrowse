@@ -1,5 +1,5 @@
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
-export function pageHelper(operation, args = {}) {
+export async function pageHelper(operation, args = {}) {
   const nonce = () => [...crypto.getRandomValues(new Uint8Array(16))]
     .map(byte => byte.toString(16).padStart(2, '0')).join('');
   const documentKey = '__domagentDocumentNonce';
@@ -220,6 +220,15 @@ export function pageHelper(operation, args = {}) {
       .forEach(element => element.remove());
     return { cleared: true };
   }
+  if (operation === 'content_readiness') {
+    try {
+      const matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]);
+      return { ready: matches.some(element => !ignored(element) && visible(element)) };
+    } catch (error) {
+      if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+      throw error;
+    }
+  }
   let element;
   let activator;
   if (args.approval_token && operation !== 'prepare_action') {
@@ -382,17 +391,35 @@ export function pageHelper(operation, args = {}) {
   if (operation === 'type_text') {
     element.focus();
     if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-    if (element.isContentEditable) element.textContent = args.text;
-    else {
+    let inputMode = 'dom';
+    if (element.isContentEditable) {
+      const selection = document.getSelection();
+      if (!selection || typeof document.execCommand !== 'function') return { error: 'INPUT_REJECTED' };
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges(); selection.addRange(range);
+      const accepted = document.execCommand('insertText', false, args.text);
+      if (!accepted && element.textContent !== args.text) return { error: 'INPUT_REJECTED' };
+      inputMode = 'dom_editing';
+    } else {
+      const before = new InputEvent('beforeinput', {
+        bubbles: true, composed: true, cancelable: true, inputType: 'insertReplacementText', data: args.text,
+      });
+      if (!element.dispatchEvent(before)) return { error: 'INPUT_REJECTED' };
+      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, args.text);
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true, composed: true, inputType: 'insertReplacementText', data: args.text,
+      }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
     if ((element.isContentEditable ? element.textContent : element.value) !== args.text) {
-      return { error: 'OPERATION_FAILED' };
+      return { error: 'INPUT_NOT_APPLIED' };
     }
-    return { typed: true, input_mode: 'dom' };
+    return { typed: true, input_mode: inputMode, verification: 'dom_after_reconciliation' };
   }
   return { error: 'CAPABILITY_UNAVAILABLE' };
 }
@@ -461,27 +488,4 @@ export function sharingIndicator(details) {
   document.documentElement.append(host);
   globalThis.__domagentSharingHost = host;
   return { url: location.href };
-}
-
-// Only injected into MAIN. A CSP denying page eval is an unsupported capability,
-// not a reason to fall back to the extension or content-script realm.
-export async function pageEvaluate(script, maxOutputBytes = 16 * 1024) {
-  let result;
-  try {
-    result = await (0, eval)(script);
-  } catch (error) {
-    if (error?.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(error.message || '')) {
-      return { error: 'SCRIPT_POLICY_BLOCKED' };
-    }
-    return { error: error?.name === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR' };
-  }
-  try {
-    if (typeof result === 'function' || typeof result === 'symbol') return { error: 'SCRIPT_SERIALIZATION_ERROR' };
-    const json = JSON.stringify({ value: result === undefined ? null : result });
-    const wrapped = JSON.stringify({ content: [{ type: 'text', text: json }] });
-    if (new TextEncoder().encode(wrapped).length > maxOutputBytes) return { error: 'RESULT_TOO_LARGE' };
-    return JSON.parse(json);
-  } catch {
-    return { error: 'SCRIPT_SERIALIZATION_ERROR' };
-  }
 }

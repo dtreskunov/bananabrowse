@@ -2,7 +2,9 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.6 / extension5.0.4 is the current matched release.
+Service5.0.0-beta.7 / extension5.0.5 is the current matched release.
+Runtime consent policy is `task-group-run-v1`; v5 identity/signature bytes and
+schema3 are unchanged. Earlier5.0.4 extensions retain stricter sidebar gating.
 
 ## Tools
 
@@ -46,7 +48,9 @@ Every continuation checks activation/lease/cancellation. Tab creation publishes
 authority through a signed snapshot before its result can return a handle.
 
 Workspace: active/paused/inactive. Tab execution: idle/running/waiting_for_human.
-Page: ready/loading/navigation_only/unavailable.
+Page: ready/loading/navigation_only/unavailable. `wait_for_page` loaded is
+document readiness, not application readiness; optional `content_selector`
+adds a visible-match condition within the same0..10000ms deadline.
 Unknown/foreign handles are generic NOT_AUTHORIZED. Caller-owned bounded
 tombstones can explain WORKSPACE_PAUSED/INACTIVE or TAB_NOT_IN_WORKSPACE.
 Refused DOM is DOCUMENT_NOT_CONTROLLABLE, with fixed inspection_stage/
@@ -57,10 +61,18 @@ injection_reason/last_error/timeout_ms where available. Raw exceptions are omitt
 Start creates a named native group with a blank tab. Drag or menu Add grants
 existing-tab scope while active. Remove revokes immediately; re-add gets fresh
 handle. Website-created tabs/popup inheritance is excluded until explicitly added.
-Only grouped metadata is exposed. No focus change unless the user clicks a task
-row/menu/notification. End/close/lease loss leaves tabs/group open.
+Only grouped metadata is exposed. No tab/window focus change unless the user clicks a task
+row/menu/notification. End/lease loss leaves tabs/group open.
 Native panel restoration, browser restart and reconnect restore no runtime access.
 Pause cancels backlog; explicit Continue creates a fresh execution activation.
+
+The dashboard's presence is no longer the consent lease. A deliberate Run binds
+the actual group/window/client until Pause/End, group scope loss, disconnect,
+restart or revocation. Closing/minimizing the dashboard or browsing elsewhere
+does not revoke Run; background group verification renews the bounded server
+lease. Toolbar popup offers status, Pause all tasks and Open dashboard; opening
+it or the dashboard alone never starts another group. Existing site-created
+tab exclusion, group movement checks and protected-origin guards remain.
 
 Restart diagnostics are separate from authority: discovery includes service_epoch,
 service_started_at, current connection_id and terminal end_reason/ended_at.
@@ -101,10 +113,36 @@ reasons never overwrite the current healthy active-task status. Connection repai
 alone does not activate a task, and no task action automatically replays a mutation.
 
 System notification plus toolbar pending count announces human assistance.
+Optional `suggested_text` (max8000 units) stays in the pending request/local UI,
+not notifications/history. Copy is a local clipboard gesture, not Send or Done.
 Notification delivery failure is explicit; OS suppression cannot prove visibility.
 The user click focuses a bound task, never marks it Done or bypasses Pause.
 History holds at most200 metadata-only commands/events, not descriptions/source/
 values/URLs and not all JavaScript effects.
+
+## Native script worlds and diagnostics
+
+`evaluate_script.world` is MAIN (compatibility default) or USER_SCRIPT. Firefox
+MV3/min153 uses browser-compiled user-script source; Chrome MAIN retains the
+constrained debugger evaluator, while USER_SCRIPT requires browser enablement.
+USER_SCRIPT shares DOM, has per-activation scratch globals/CSP, no privileged
+extension APIs and messaging disabled. MAIN exposes the page's JS environment.
+Never silently switch worlds or repeat an uncertain mutation. Source is parsed
+and native exceptions serialized in-realm before browser Error cloning so names,
+messages, stacks and causes survive; caller source is never evaluated in the
+privileged extension realm. Site CSP headers are not modified.
+
+MCP failures retain isError/code plus bounded credential-redacted diagnostics
+and validation fields/limits/phase/dispatch status. Native dumps/source/values
+are not added to audit/activity logs. Result size limits remain; diagnostics
+truncation is explicit. Old peers receive UPGRADE_REQUIRED for new optional fields
+before script dispatch, without lost identity or broadened authorization.
+
+Contenteditable type_text uses a browser editing command instead of raw
+textContent assignment; ordinary controls use beforeinput/native setter/InputEvent.
+Bounded post-event readback detects tested editor reconciliation/rollback.
+INPUT_REJECTED/INPUT_NOT_APPLIED are not success and do not trigger fallbacks.
+DOM verification does not prove persistence, message delivery or trusted keystrokes.
 
 Grouped tabs can navigate away from browser-owned/refused current documents
 without injection into them, to ordinary permitted HTTP(S) destinations.

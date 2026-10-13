@@ -1,5 +1,5 @@
 export const VERSION = 5;
-export const POLICY_ID = 'grouped-workspace-v1';
+export const POLICY_ID = 'task-group-run-v1';
 export const WORKSPACE_LEASE_MS = 5000;
 export const WORKSPACE_TAB_LIMIT = 8;
 export const WORKSPACE_CONCURRENCY = 2;
@@ -51,11 +51,11 @@ export function validBrowserInfo(value) {
 }
 export function inspectionErrorDetails(error) {
   if (!['PAGE_UNAVAILABLE', 'DOCUMENT_NOT_CONTROLLABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
-      !['tab_status', 'document_injection', 'document_state', 'document_changed'].includes(error.inspection_stage)) return {};
+      !['tab_status', 'document_injection', 'document_state', 'document_changed', 'content_readiness'].includes(error.inspection_stage)) return {};
   const result = { inspection_stage: error.inspection_stage };
   if (['permission_denied', 'browser_restricted', 'frame_unavailable', 'helper_execution_failed',
     'empty_result', 'unknown'].includes(error.injection_reason)) result.injection_reason = error.injection_reason;
-  if (['PAGE_UNAVAILABLE', 'TARGET_STALE'].includes(error.last_error) &&
+  if (['PAGE_UNAVAILABLE', 'TARGET_STALE', ...(error.inspection_stage === 'content_readiness' ? READINESS_ERRORS : [])].includes(error.last_error) &&
       Number.isSafeInteger(error.timeout_ms) && error.timeout_ms >= 0 && error.timeout_ms <= PAGE_WAIT_MS) {
     result.last_error = error.last_error;
     result.timeout_ms = error.timeout_ms;
@@ -63,9 +63,14 @@ export function inspectionErrorDetails(error) {
   return result;
 }
 export function waitErrorDetails(error) {
-  if (error?.code !== 'WAIT_TIMEOUT' || !READINESS_ERRORS.includes(error.last_error) ||
-      !Number.isSafeInteger(error.timeout_ms) || error.timeout_ms <= 0 || error.timeout_ms > PAGE_WAIT_MS) return {};
-  return { last_error: error.last_error, timeout_ms: error.timeout_ms };
+  const contentReadiness = error?.readiness_stage === 'content_readiness';
+  const causes = contentReadiness ? [...READINESS_ERRORS, 'PAGE_UNAVAILABLE', 'TARGET_STALE'] : READINESS_ERRORS;
+  const codes = contentReadiness ? ['WAIT_TIMEOUT', ...causes] : ['WAIT_TIMEOUT'];
+  if (!codes.includes(error?.code) || !causes.includes(error.last_error) ||
+      !Number.isSafeInteger(error.timeout_ms) || error.timeout_ms < (contentReadiness ? 0 : 1) ||
+      error.timeout_ms > PAGE_WAIT_MS) return {};
+  return { last_error: error.last_error, timeout_ms: error.timeout_ms,
+    ...(contentReadiness ? { readiness_stage: 'content_readiness' } : {}) };
 }
 const output = { max_output_bytes: { type: 'integer', minimum: 1024, maximum: MAX_OUTPUT_BYTES,
   default: DEFAULT_OUTPUT_BYTES, description: 'Maximum UTF-8 bytes for the serialized MCP result, including its text-content wrapper. Default 16 KiB; hard maximum 64 KiB. Narrow the request before increasing.' } };
@@ -75,7 +80,7 @@ const readElements = { max_elements: { type: 'integer', minimum: 1, maximum: MAX
   default: DEFAULT_ELEMENTS, description: 'Maximum returned elements; default 50. Truncation is explicit.' } };
 const target = {
   selector: { type: 'string', minLength: 1, maxLength: 4096 },
-  ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}$' },
+  ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}(?![\\s\\S])' },
   document: { type: 'string', minLength: 8, maxLength: 128 },
 };
 const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS,
@@ -97,7 +102,10 @@ export const OPERATION_SCHEMAS = Object.freeze({
   type_text: operation({ ...targeted, text }, ['text'], true),
   get_text: operation({ ...targeted, ...readText, ...output }),
   evaluate_script: operation({ script: { ...text, minLength: 1,
-    description: 'JavaScript source/expression evaluated in the page, not a function body. Use document.title or (() => document.title)(); top-level return is invalid. Return only focused JSON data; page CSP may refuse evaluation.' }, ...output }, ['script']),
+    description: 'JavaScript source/expression evaluated in the page, not a function body. Maximum 65536 UTF-16 code units, not lines. Use document.title or (() => document.title)(); top-level return is invalid. Return only focused JSON data; page CSP may refuse evaluation.' },
+    world: { type: 'string', enum: ['MAIN', 'USER_SCRIPT'], default: 'MAIN',
+      description: 'Execution world. MAIN is the default; USER_SCRIPT requires native browser support and local enablement, never an isolated-world fallback.' },
+    ...output }, ['script']),
   get_screenshot: operation({}),
   get_interactive_elements: operation({ ...readElements, ...output }),
   get_page_snapshot: operation({ selector: target.selector, ...readText, ...readElements, ...output }),
@@ -111,28 +119,78 @@ export const OPERATION_SCHEMAS = Object.freeze({
     delta_x: { type: 'integer', minimum: -10_000, maximum: 10_000 },
     delta_y: { type: 'integer', minimum: -10_000, maximum: 10_000 },
   }, ['delta_y']),
-  wait_for_page: operation(timeout),
+  wait_for_page: operation({ ...timeout, content_selector: { ...target.selector,
+    description: 'Optional content readiness selector: wait for at least one visible match after the document settles. Maximum 4096 UTF-16 code units.' } }),
   clear_overlays: operation({}),
 });
 export const OPERATIONS = Object.freeze(Object.keys(OPERATION_SCHEMAS));
+export const HANDOFF_SCHEMA = operation({
+  suggested_text: { type: 'string', maxLength: 8000,
+    description: 'Optional text for the user to copy manually. Maximum 8000 UTF-16 code units; never inserted or submitted automatically.' },
+});
+export const DESCRIPTION_SCHEMA = Object.freeze({ type: 'string', minLength: MIN_DESCRIPTION_LENGTH,
+  maxLength: 500, unit: 'unicode_code_points', trimMinimum: true });
+const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![\\s\\S])';
 
+export function schemaArgumentErrors(spec, args) {
+  if (!spec || !args || typeof args !== 'object' || Array.isArray(args)) {
+    return [{ field: 'arguments', reason: 'expected_object' }];
+  }
+  const errors = [];
+  if (Object.keys(args).some(key => !Object.hasOwn(spec.properties, key))) {
+    errors.push({ field: 'arguments', reason: 'unexpected_field' });
+  }
+  for (const key of spec.required || []) {
+    if (!Object.hasOwn(args, key)) errors.push({ field: key, reason: 'required' });
+  }
+  for (const [key, field] of Object.entries(spec.properties)) {
+    if (!Object.hasOwn(args, key)) continue;
+    const value = args[key];
+    if (field.type === 'integer') {
+      if (!Number.isSafeInteger(value)) errors.push({ field: key, reason: 'expected_integer' });
+      else if (value < field.minimum || value > field.maximum) errors.push({
+        field: key, reason: 'out_of_range', limits: { minimum: field.minimum, maximum: field.maximum },
+      });
+      continue;
+    }
+    if (typeof value !== field.type) { errors.push({ field: key, reason: `expected_${field.type}` }); continue; }
+    if (field.type === 'string') {
+      const unit = field.unit || 'utf16_code_units';
+      const length = field.unit === 'unicode_code_points' ? [...value].length : value.length;
+      const minimumLength = field.trimMinimum ? [...value.trim()].length : length;
+      if (field.minLength !== undefined && minimumLength < field.minLength) errors.push({
+        field: key, reason: 'too_short', limits: { minimum: field.minLength },
+        actual_length: minimumLength, unit, ...(field.trimMinimum ? { measured_after_trim: true } : {}),
+      });
+      if (field.maxLength !== undefined && length > field.maxLength) errors.push({
+        field: key, reason: 'too_long', limits: { maximum: field.maxLength }, actual_length: length, unit,
+      });
+      if ((field.pattern && !new RegExp(field.pattern).test(value)) ||
+          (field.format === 'uuid' && !new RegExp(UUID_PATTERN).test(value))) {
+        errors.push({ field: key, reason: 'invalid_format' });
+      }
+    }
+    if (field.enum && !field.enum.includes(value)) errors.push({
+      field: key, reason: 'invalid_enum', limits: { allowed: [...field.enum] },
+    });
+  }
+  if (Object.hasOwn(spec.properties, 'ref')) {
+    if (args.ref !== undefined && args.document === undefined) errors.push({ field: 'document', reason: 'required_with_ref' });
+    if (args.ref !== undefined && args.selector !== undefined) errors.push({ field: 'selector', reason: 'conflicts_with_ref' });
+    if (args.document !== undefined && args.ref === undefined && args.selector === undefined) {
+      errors.push({ field: 'document', reason: 'requires_ref_or_selector' });
+    }
+  }
+  if (spec.anyOf && !spec.anyOf.some(choice => choice.required.every(key => Object.hasOwn(args, key)))) {
+    errors.push({ field: 'selector', reason: 'required_selector_or_ref_document' });
+  }
+  return errors;
+}
+export function operationArgumentErrors(name, args) {
+  return schemaArgumentErrors(name === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[name], args);
+}
 export function validOperationArgs(name, args) {
-  const spec = name === 'request_handoff' ? operation({}) : OPERATION_SCHEMAS[name];
-  if (!spec || !args || typeof args !== 'object' || Array.isArray(args)) return false;
-  if (Object.keys(args).some(key => !Object.hasOwn(spec.properties, key)) ||
-      spec.required.some(key => !Object.hasOwn(args, key))) return false;
-  if (args.ref !== undefined && (args.document === undefined || args.selector !== undefined)) return false;
-  if (args.document !== undefined && args.ref === undefined && args.selector === undefined) return false;
-  if (spec.anyOf && !spec.anyOf.some(choice => choice.required.every(key => Object.hasOwn(args, key)))) return false;
-  return Object.entries(args).every(([key, value]) => {
-    const field = spec.properties[key];
-    if (field.type === 'integer') return Number.isSafeInteger(value) && value >= field.minimum && value <= field.maximum;
-    if (typeof value !== field.type) return false;
-    if (typeof value === 'string' && (
-      value.length < (field.minLength || 0) || value.length > (field.maxLength || 4096) ||
-      (field.pattern && !new RegExp(field.pattern).test(value)))) return false;
-    return !field.enum || field.enum.includes(value);
-  });
+  return operationArgumentErrors(name, args).length === 0;
 }
 
 export function tenantId(value) {

@@ -1,9 +1,10 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TARGET_ID_SCHEMA, validOperationArgs,
-  waitErrorDetails, validDescription, inspectionErrorDetails } from '../shared/protocol.js';
-import { Fault, requireValue, failureCode, audit } from './errors.js';
+import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TARGET_ID_SCHEMA, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA,
+  schemaArgumentErrors, waitErrorDetails, inspectionErrorDetails } from '../shared/protocol.js';
+import { sanitizeDiagnostics } from '../shared/diagnostics.js';
+import { Fault, requireValue, requireArguments, validationDetails, dispatchDetails, failureCode, audit } from './errors.js';
 import { compactResult, textResult } from '../shared/results.js';
 import { RateLimiter } from './rate.js';
 import { SERVICE_VERSION } from './version.js';
@@ -18,8 +19,8 @@ const NOTES = {
   set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label. Disabled inputs, hidden ancestors, obstructions and replacement labels fail.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
   navigate: 'Navigate the authorized tab to ordinary HTTP(S), including from blank/browser-owned navigation-only documents. Protected destinations are blocked. navigation_started is not proof of loaded content. Never navigate just to test an account.',
-  wait_for_page: 'Wait for this tab to settle; returns loaded URL/document. Never replays navigation or POST.',
-  evaluate_script: 'Only for focused data absent from snapshots. JavaScript expression/source, not a function body: document.title works; top-level return does not. Page CSP may refuse. Default 16 KiB/hard 64 KiB; oversized JSON fails, never partial success. Syntax/runtime/serialization/policy errors are distinct. Never return credentials or bypass CSP.',
+  wait_for_page: 'Wait for this tab to settle; optionally require at least one visible content_selector match. Returns loaded URL/document. Never replays navigation or POST.',
+  evaluate_script: 'Only for focused data absent from snapshots. JavaScript expression/source, not a function body: document.title works; top-level return does not. Source is limited to 65536 UTF-16 code units, not lines. MAIN is the default world; USER_SCRIPT requires native support and local enablement, without fallback. Page CSP may refuse. Default 16 KiB/hard 64 KiB; oversized JSON fails, never partial success. Syntax/runtime/serialization/policy errors are distinct. Never return credentials or bypass CSP.',
 };
 const description = { type: 'string', minLength: 40, maxLength: 500,
   description: 'Useful explanation of the actual action. Minimum 40 Unicode code points after trimming; maximum 500 code points including surrounding whitespace. Length is not proof of consent.' };
@@ -39,7 +40,7 @@ export const tools = [
   { name: 'create_workspace_tab', description: 'Create one fresh background tab in the active native workspace group. No existing-tab adoption or focus stealing. Eight-tab capacity, protected destinations and signed publication enforced. An uncertain result must never be automatically retried.',
     inputSchema: schema({ workspace_id: id, url: { type: 'string', minLength: 1, maxLength: 2048 }, description }, ['workspace_id','description']) },
   { name: 'request_handoff', description: 'Ask for human assistance via a generic global browser system notification and toolbar pending indicator. Wait for explicit Done/Cancel; click/dismissal is not Done. Only this target tab blocks. NOTIFICATION_UNAVAILABLE means notification API delivery failed, not that the user saw an alert.',
-    inputSchema: schema({ target_id: target, description, wait_timeout_seconds: humanWait }, ['target_id','description']) },
+    inputSchema: schema({ target_id: target, description, wait_timeout_seconds: humanWait, ...HANDOFF_SCHEMA.properties }, ['target_id','description']) },
   ...OPERATIONS.map(name => ({ name,
     description: `${name} in an explicitly grouped tab of an active leased workspace. No routine approval prompt. ${NOTES[name] || ''}`,
     inputSchema: { ...schema({ target_id: target, ...OPERATION_SCHEMAS[name].properties, description },
@@ -47,7 +48,7 @@ export const tools = [
       ...(OPERATION_SCHEMAS[name].anyOf ? { anyOf: OPERATION_SCHEMAS[name].anyOf } : {}) },
   })),
 ];
-export const INSTRUCTIONS = 'DomAgent v5 requires matched v5 extensions. The actual native tab group plus an active, open-sidebar workspace defines authority, not foreground focus or an allowlist. Page tools require target_id and a useful 40–500 Unicode-code-point description; no ordinary human approval waits. Pause/End/sidebar closure/disconnect/lease loss stop unstarted work and leave tabs intact. Resume needs a fresh activation; cancelled work never replays. A running mutation may finish and cannot be undone; OUTCOME_UNKNOWN must not be retried automatically. ' +
+export const INSTRUCTIONS = 'DomAgent v5 requires matched v5 extensions. The actual native tab group plus an explicit user-started Run with a fresh workspace lease defines authority, not foreground focus or an allowlist. The task-group-run-v1 consent policy keeps Run independent of sidebar visibility. Existing 5.0.4 pairing and credentials remain valid; older extensions may retain stricter sidebar-dependent behavior. Update the extension to 5.0.5 for the new Run policy and features. Page tools require target_id and a useful 40–500 Unicode-code-point description; no ordinary human approval waits. Pause/End/disconnect/lease loss stop unstarted work and leave tabs intact. Resume needs a fresh activation; cancelled work never replays. A running mutation may finish and cannot be undone; OUTCOME_UNKNOWN must not be retried automatically. ' +
   'Start with list_browser_workspaces and list_workspace_tabs. Compare service_epoch/connection_id and workspace end_reason after interruption. SERVICE_RESTARTED or CONNECTION_LOST needs local Start/Resume, not re-pairing, credential replacement or automatic grant renewal. Old handles/tombstones do not persist across server restart; unknown handles can still return NOT_AUTHORIZED. A reconnecting updated extension can republish only inactive empty workspace summaries with no authority; last_session_end source extension_reported is diagnostic context. Pause/removal lifecycle remains caller-scoped; never replay cancelled work. Browser versions are self-reported diagnostics, not attestation. Uninspectable documents may retain navigation-only authority; DOCUMENT_NOT_CONTROLLABLE does not itself end the workspace or handle. Use capabilities and fresh signed metadata; never replay POST, bypass native viewers/CSP, or inject into protected management pages. ' +
   'Snapshot/text output defaults to 16 KiB (64 KiB hard UTF-8 serialized MCP text-wrapper cap), 4000 characters/50 elements, with explicit truncation. inspect_element is 4 KiB. Arbitrary script/mutation receipts cannot be partially successful. Narrow reads; use snapshot refs bound to document. Human assistance uses a generic system notification; OS do-not-disturb can suppress a successfully created alert. Only explicit Done completes a handoff, and it blocks only its tab. No tool activates a sidebar, resumes Pause, regroups existing tabs or broadens access.';
 
@@ -55,12 +56,11 @@ export async function callTool(name, args, client, bridge, signal) {
   try {
     requireValue(bridge.store.client(client.id, client.tenant_id)?.credential_hash === client.credential_hash,
       'NOT_AUTHORIZED', 403);
-    requireValue(args && typeof args === 'object' && !Array.isArray(args), 'INVALID_ARGUMENTS');
     const tool = tools.find(t => t.name === name);
     requireValue(tool, 'UNKNOWN_TOOL');
-    requireValue(Object.keys(args).every(k => Object.hasOwn(tool.inputSchema.properties, k)) &&
-      tool.inputSchema.required.every(k => Object.hasOwn(args, k)), 'INVALID_ARGUMENTS');
-    if (Object.hasOwn(args, 'description')) requireValue(validDescription(args.description), 'INVALID_ARGUMENTS');
+    const properties = { ...tool.inputSchema.properties };
+    if (Object.hasOwn(properties, 'description')) properties.description = DESCRIPTION_SCHEMA;
+    requireArguments(schemaArgumentErrors({ ...tool.inputSchema, properties }, args));
     let result;
     if (name === 'adopt_browser') {
       bridge.adoptionRates ||= new RateLimiter(bridge.now);
@@ -71,7 +71,6 @@ export async function callTool(name, args, client, bridge, signal) {
     else if (name === 'list_workspace_tabs') result = bridge.listTabs(client.id, args.workspace_id, client.tenant_id);
     else if (name === 'wait_for_workspace') {
       const seconds = args.timeout_seconds ?? 300;
-      requireValue(Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 600, 'INVALID_ARGUMENTS');
       result = await bridge.waitWorkspace(client.id, args.device_id, args.description, seconds * 1000, signal, client.tenant_id);
     } else if (name === 'create_workspace_tab') {
       result = await bridge.createTab(client.id, args.workspace_id, args.url === undefined ? {} : { url: args.url },
@@ -79,8 +78,6 @@ export async function callTool(name, args, client, bridge, signal) {
     } else {
       const { target_id, description: intent, wait_timeout_seconds, ...operationArgs } = args;
       const seconds = wait_timeout_seconds ?? 300;
-      requireValue(name !== 'request_handoff' || Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 600, 'INVALID_ARGUMENTS');
-      requireValue(validOperationArgs(name, operationArgs), 'INVALID_ARGUMENTS');
       result = await bridge.operate(client.id, target_id, name, operationArgs, signal, client.tenant_id, intent, seconds * 1000);
     }
     if (name === 'get_screenshot') {
@@ -97,8 +94,11 @@ export async function callTool(name, args, client, bridge, signal) {
   } catch (error) {
     const code = failureCode(error);
     audit('mcp_tool_failure', { client_id: client.id, code, ...inspectionErrorDetails(error) });
+    const diagnostics = sanitizeDiagnostics(error?.diagnostics);
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({
-      error: code, ...waitErrorDetails(error), ...inspectionErrorDetails(error),
+      error: code, ...(code === 'INVALID_ARGUMENTS' ? { code } : {}),
+      ...validationDetails(error), ...waitErrorDetails(error), ...inspectionErrorDetails(error), ...dispatchDetails(error),
+      ...(diagnostics ? { diagnostics } : {}),
     }) }] };
   }
 }

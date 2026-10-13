@@ -17,8 +17,8 @@ export function Setup({ snapshot }: { snapshot: Snapshot }) {
     <Notice code={localError.value || snapshot.current_error}/>
     {connected ? <>
       <button type="button" id="open-panel" class="primary main-action"
-        disabled={busy.value !== null} onClick={() => void run('Opening sidebar', openPanel)}>Open workspace sidebar</button>
-      <p class="intro">Opening the sidebar alone does not authorize an old task. Use Continue there when you are ready.</p>
+        disabled={busy.value !== null} onClick={() => void run('Opening dashboard', openPanel)}>Open dashboard</button>
+      <p class="intro">Opening the dashboard alone does not authorize an old task. Use Continue in the toolbar popup or dashboard when ready.</p>
       <button type="button" class="text-button" onClick={() => setEditing(true)}>Change service or pair again</button>
     </> : pairing && !editing ? <section id="pairing" aria-label="Pairing">
       <p>Tell your assistant this code:</p>
@@ -31,7 +31,8 @@ export function Setup({ snapshot }: { snapshot: Snapshot }) {
         <p class="pairing-label">{pairing.proposal?.client_label || 'An assistant'} wants to connect.</p>
         <p class="muted">The application name is not a verified human identity. Confirm only the assistant you asked to adopt this code.</p>
         <p class="intro">Start opens a task group using your normal logins. Its tabs can be controlled in the background,
-          including page JavaScript. Closing the sidebar stops new control, but cannot undo actions already started.</p>
+          including page JavaScript. Tasks keep running with the dashboard closed. Pause or End stops new control,
+          but cannot undo actions already started.</p>
         <button type="button" class="primary main-action" disabled={busy.value !== null}
           onClick={() => void run('Connecting assistant', confirmPairing)}>{busy.value || 'Connect and start workspace'}</button>
         <button type="button" class="text-button" disabled={busy.value !== null}

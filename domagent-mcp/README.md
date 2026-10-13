@@ -1,4 +1,4 @@
-# DomAgent service 5.0.0-beta.6
+# DomAgent service 5.0.0-beta.7
 
 Node 22.13+ authenticated tenant-scoped Streamable HTTP MCP and signed browser
 wire **v5**. Existing `/mcp/<tenant>` credentials/identities and
@@ -165,9 +165,18 @@ succeed.
 
 Run service tests with `node --test test/*.test.js`, syntax checks with
 `npm run check`, and coordinated extension builds with `npm run build`.
-Install the independent UI dependencies with
+Install the independent browser runtime dependencies with
+`npm --prefix ../domagent-extension ci --ignore-scripts` and UI dependencies with
 `npm --prefix ../domagent-extension/ui ci --ignore-scripts` before extension
 builds or the combined `npm test`. The UI owns its lockfile, Preact/signals,
 TypeScript and esbuild; builds type-check before bundling local CSS and fonts.
 Tests use in-memory DBs and isolated loopback sockets; no production database,
 browser, live migration or deployment is exercised.
+
+Extension5.0.5 advertises explicit Run (`task-group-run-v1`) independent of its
+optional sidebar dashboard. Wire5/schema3 and existing v5 signature bytes remain
+compatible; new optional world/content_selector/suggested_text requests require
+updated peers, otherwise UPGRADE_REQUIRED precedes dispatch. Catalogue remains21.
+Validation errors expose fields/reasons/limits/units, isError:true and
+not_dispatched; execution failures carry sanitized available native diagnostics
+(names/messages/stacks/causes/layer/phase/world). Audit logs remain metadata-only.

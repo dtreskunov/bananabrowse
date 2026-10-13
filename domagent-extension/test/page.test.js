@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { pageEvaluate, pageHelper, sharingIndicator } from '../src/page.js';
+import { pageHelper, sharingIndicator } from '../src/page.js';
 beforeEach(t => {
   const width = globalThis.innerWidth, height = globalThis.innerHeight;
   globalThis.innerWidth = 800; globalThis.innerHeight = 600;
   t.after(() => { globalThis.innerWidth = width; globalThis.innerHeight = height; });
 });
 
-test('password/CAPTCHA presence does not block normal inspection or page text', () => {
+test('password/CAPTCHA presence does not block normal inspection or page text', async () => {
   const originalDocument = globalThis.document;
   const originalComputed = globalThis.getComputedStyle;
   const originalLocation = globalThis.location;
@@ -20,8 +20,8 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
     body, querySelectorAll: selector => selector === 'body' ? [body] : [],
   };
   try {
-    assert.equal(pageHelper('inspect').url, 'https://site.example/login');
-    assert.deepEqual(pageHelper('get_text', { selector: 'body' }), {
+    assert.equal((await pageHelper('inspect')).url, 'https://site.example/login');
+    assert.deepEqual(await pageHelper('get_text', { selector: 'body' }), {
       text: 'Login page', text_truncated: false, truncated: false, rendered: true, text_source: 'rendered',
     });
   } finally {
@@ -31,22 +31,8 @@ test('password/CAPTCHA presence does not block normal inspection or page text', 
   }
 });
 
-test('page eval distinguishes syntax/runtime/serialization errors and bounds encoded output', async () => {
-  assert.deepEqual(await pageEvaluate('1 + 1'), { value: 2 });
-  assert.deepEqual(await pageEvaluate('undefined'), { value: null });
-  assert.deepEqual(await pageEvaluate('throw new Error("runtime failure")'), { error: 'SCRIPT_RUNTIME_ERROR' });
-  assert.deepEqual(await pageEvaluate('return document.title;'), { error: 'SCRIPT_SYNTAX_ERROR' });
-  assert.deepEqual(await pageEvaluate('1n'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
-  assert.deepEqual(await pageEvaluate('(() => { const x = {}; x.self = x; return x; })()'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
-  assert.deepEqual(await pageEvaluate('throw new EvalError("call to eval() blocked by CSP")'), { error: 'SCRIPT_POLICY_BLOCKED' });
-  assert.deepEqual(await pageEvaluate('"x".repeat(20000)'), { error: 'RESULT_TOO_LARGE' });
-  assert.deepEqual(await pageEvaluate('"😀".repeat(5000)'), { error: 'RESULT_TOO_LARGE' });
-  assert.deepEqual(await pageEvaluate('() => 1'), { error: 'SCRIPT_SERIALIZATION_ERROR' });
-  assert.deepEqual(await pageEvaluate('({ data: "<script>not markup</script>" })'),
-    { value: { data: '<script>not markup</script>' } });
-});
 
-test('missing elements and invalid CSS selectors are distinct from a stale target', () => {
+test('missing elements and invalid CSS selectors are distinct from a stale target', async () => {
   const originalDocument = globalThis.document;
   const selectors = [];
   globalThis.document = {
@@ -58,9 +44,9 @@ test('missing elements and invalid CSS selectors are distinct from a stale targe
   };
   try {
     for (const operation of ['click', 'type_text', 'get_text']) {
-      assert.deepEqual(pageHelper(operation, { selector: 'button[type="submit"]' }),
+      assert.deepEqual(await pageHelper(operation, { selector: 'button[type="submit"]' }),
         { error: 'ELEMENT_NOT_FOUND' });
-      assert.deepEqual(pageHelper(operation, { selector: 'button[' }), { error: 'INVALID_SELECTOR' });
+      assert.deepEqual(await pageHelper(operation, { selector: 'button[' }), { error: 'INVALID_SELECTOR' });
     }
     assert(selectors.includes('button[type="submit"]'));
   } finally {
@@ -99,9 +85,9 @@ test('page decoration contains no positive consent controls; only a trusted nega
   }
 });
 
-test('isolated document nonce rejects helper work targeting a different document', t => {
+test('isolated document nonce rejects helper work targeting a different document', async t => {
   const saved = globalThis.document;
   t.after(() => { globalThis.document = saved; });
   globalThis.document = { querySelector() { throw new Error('Must not touch the new document'); } };
-  assert.deepEqual(pageHelper('click', { selector: 'button', document_nonce: 'old-document' }), { error: 'TARGET_STALE' });
+  assert.deepEqual(await pageHelper('click', { selector: 'button', document_nonce: 'old-document' }), { error: 'TARGET_STALE' });
 });

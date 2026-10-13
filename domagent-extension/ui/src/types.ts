@@ -4,6 +4,7 @@ export interface Command {
   description: string;
   human: boolean;
   executing: boolean;
+  suggested_text?: string;
 }
 export interface TaskTab {
   target_id: string;
@@ -47,6 +48,9 @@ export interface Snapshot {
   history_unavailable?: boolean;
   saved_connections: { origin: string; tenant_id: string; label: string }[];
   connection_info?: { service_epoch: string; connection_id: string; service_started_at: number | null } | null;
+  active_workspace_count?: number;
+  starting_workspace_count?: number;
+  pending_human_count?: number;
 }
 
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -57,7 +61,8 @@ const optionalString = (value: unknown): boolean => value === undefined || value
 const optionalText = (value: unknown): boolean => value === undefined || string(value);
 function command(value: unknown): value is Command {
   return object(value) && string(value.request_id) && string(value.operation) && string(value.description) &&
-    typeof value.human === 'boolean' && typeof value.executing === 'boolean';
+    typeof value.human === 'boolean' && typeof value.executing === 'boolean' &&
+    (value.suggested_text === undefined || string(value.suggested_text) && value.suggested_text.length <= 8000);
 }
 function tab(value: unknown): value is TaskTab {
   return object(value) && string(value.target_id) && number(value.tabId) && string(value.title) &&
@@ -95,6 +100,9 @@ function isSnapshot(value: unknown): value is Snapshot {
   if (value.last_session_end != null && !(object(value.last_session_end) &&
       string(value.last_session_end.reason) && number(value.last_session_end.at))) return false;
   if (value.history_unavailable !== undefined && typeof value.history_unavailable !== 'boolean') return false;
+  if (value.active_workspace_count !== undefined && !number(value.active_workspace_count)) return false;
+  if (value.starting_workspace_count !== undefined && !number(value.starting_workspace_count)) return false;
+  if (value.pending_human_count !== undefined && !number(value.pending_human_count)) return false;
   if (value.connection_info != null && !(object(value.connection_info) &&
       string(value.connection_info.service_epoch) && string(value.connection_info.connection_id) &&
       (value.connection_info.service_started_at === null || number(value.connection_info.service_started_at)))) return false;

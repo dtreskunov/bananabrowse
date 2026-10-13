@@ -11,7 +11,7 @@ async function fixture(engine, colorScheme, work) {
   const assets = path.join(root, 'dist/chrome');
   const server = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
-    if (!/^\/(?:panel\.html|options\.html|ui\.(?:js|css)|fonts\/[\w.-]+)$/.test(pathname)) {
+    if (!/^\/(?:panel\.html|popup\.html|options\.html|ui\.(?:js|css)|fonts\/[\w.-]+)$/.test(pathname)) {
       res.writeHead(404); res.end(); return;
     }
     const file = path.join(assets, pathname.slice(1));
@@ -41,6 +41,10 @@ async function fixture(engine, colorScheme, work) {
       globalThis.fixturePermissions = true;
       globalThis.fixturePermissionRequests = [];
       globalThis.fixturePanelOpens = [];
+      globalThis.fixtureCopied = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        async writeText(text) { fixtureCopied.push(text); },
+      } });
       const port = { postMessage() {}, disconnect() {}, onMessage: { addListener(fn) { render = fn; } },
         onDisconnect: { addListener() {} } };
       globalThis.chrome = {
@@ -59,6 +63,10 @@ async function fixture(engine, colorScheme, work) {
             if (message.type === 'ui.confirmPairing') {
               snapshot.identity = { client_label: snapshot.pairing.proposal.client_label };
               snapshot.pairing = null; snapshot.phase = 'authenticated';
+            }
+            if (message.type === 'ui.pauseAll') {
+              snapshot.active_workspace_count = 0;
+              snapshot.workspaces = snapshot.workspaces.map(workspace => ({ ...workspace, state: 'paused', tabs: [] }));
             }
             return { ok: true, value: message.type === 'ui.state' ? structuredClone(snapshot) : undefined };
           },
@@ -79,6 +87,40 @@ async function fixture(engine, colorScheme, work) {
 }
 
 for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
+  test(`${name}: toolbar popup pauses all running groups without depending on dashboard visibility`, async () => {
+    await fixture(engine, 'light', async (page, origin) => {
+      await page.goto(`${origin}/popup.html`);
+      await page.evaluate(() => updateFixture({ current_error: null, active_workspace_count: 2 }));
+      await expect(page.getByRole('heading', { name: '2 running task groups' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Pause all tasks' })).toBeVisible();
+      await page.getByRole('button', { name: 'Pause all tasks' }).click();
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.pauseAll')))
+        .toEqual([{ type: 'ui.pauseAll' }]);
+      await page.getByRole('button', { name: 'Open dashboard' }).click();
+      expect(await page.evaluate(() => fixturePanelOpens)).toEqual([{ windowId: 1 }]);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => ['ui.start','ui.startNew'].includes(request.type)))).toEqual([]);
+    });
+  });
+
+  test(`${name}: suggested handoff text is copyable without sending or completing the task`, async () => {
+    await fixture(engine, 'light', async page => {
+      await page.evaluate(() => updateFixture({ current_error: null, workspaces: [{
+        workspace_id: 'copy-workspace', windowId: 1, groupId: 456, state: 'active', acknowledged: true,
+        tabs: [{ tabId: 10, target_id: 'copy-tab', title: 'Synthetic editor', url: 'https://example.com/',
+          page_state: 'ready', commands: [{ request_id: 'copy-help', operation: 'request_handoff',
+            description: 'Paste this fictitious text only if the intended task still requires it.',
+            suggested_text: 'Synthetic message\nSecond line', human: true, executing: false }] }],
+      }] }));
+      await expect(page.getByLabel('Suggested text')).toHaveValue('Synthetic message\nSecond line');
+      await page.getByRole('button', { name: 'Copy text' }).click();
+      expect(await page.evaluate(() => fixtureCopied)).toEqual(['Synthetic message\nSecond line']);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.decision'))).toEqual([]);
+      await page.getByRole('button', { name: 'Done', exact: true }).click();
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.decision')))
+        .toEqual([{ type: 'ui.decision', request_id: 'copy-help', action: 'done' }]);
+    });
+  });
+
   test(`${name}: independent setup keeps domain, code and final local start in one flow`, async () => {
     await fixture(engine, 'light', async (page, origin) => {
       await page.goto(`${origin}/options.html`);
@@ -103,7 +145,7 @@ for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
       await expect(page.getByRole('heading', { name: 'Assistant connected' })).toBeVisible();
       expect(await page.evaluate(() => fixtureRequests.filter(request => ['ui.confirmPairing', 'ui.start'].includes(request.type))))
         .toEqual([{ type: 'ui.confirmPairing' }, { type: 'ui.start', windowId: 1 }]);
-      expect(await page.evaluate(() => fixturePanelOpens)).toEqual([{ windowId: 1 }]);
+      expect(await page.evaluate(() => fixturePanelOpens)).toEqual([]);
       expect(await page.evaluate(() => fixturePermissionRequests.at(-1))).toEqual({ origins: ['http://*/*', 'https://*/*'] });
     });
   });

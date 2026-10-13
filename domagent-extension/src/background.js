@@ -72,6 +72,10 @@ async function uiAction(message) {
   if (message.type === 'ui.start') return controller.startWorkspace(message.windowId, message.groupId);
   if (message.type === 'ui.startNew') return controller.startNewWorkspace(message.windowId);
   if (message.type === 'ui.decision') return controller.decide(message.request_id, message.action);
+  if (message.type === 'ui.pauseAll') {
+    const tasks = [...controller.workspaces.values()].map(workspace => controller.stopWorkspace(workspace, 'paused'));
+    return Promise.all(tasks);
+  }
   const workspace = controller.workspaces.get(message.workspace_id);
   if (!workspace) fail('WORKSPACE_INACTIVE');
   if (message.type === 'ui.pause') return controller.stopWorkspace(workspace, 'paused');
@@ -104,10 +108,13 @@ async function uiAction(message) {
 
 async function uiSnapshot(windowId) {
   const snapshot = controller.snapshot();
-  if (windowId === undefined) return { ...snapshot, available_groups: [] };
+  const counts = { active_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active').length,
+    starting_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active' && !workspace.acknowledged).length,
+    pending_human_count: snapshot.pending_human.length };
+  if (windowId === undefined) return { ...snapshot, ...counts, available_groups: [] };
   // Native previews stay on the trusted local UI boundary, never in signed MCP state.
   const [groups, tabs] = await Promise.all([api.tabGroups.query({ windowId }), api.tabs.query({ windowId })]);
-  return { ...snapshot,
+  return { ...snapshot, ...counts,
     available_groups: groups.slice(0, 20).map(group => {
       const members = tabs.filter(tab => tab.groupId === group.id);
       return { groupId: group.id, title: group.title || 'Untitled group', tab_count: members.length,
@@ -120,7 +127,7 @@ async function uiSnapshot(windowId) {
 api.runtime.onMessage.addListener((message, sender, respond) => {
   if (!isUiSender(sender, api.runtime)) { respond({ ok: false, error: { code: 'NOT_AUTHORIZED' } }); return false; }
   const run = () => uiAction(message);
-  const immediate = ['ui.state', 'ui.pause', 'ui.end', 'ui.disconnect', 'ui.decision'].includes(message.type);
+  const immediate = ['ui.state', 'ui.pause', 'ui.pauseAll', 'ui.end', 'ui.disconnect', 'ui.decision'].includes(message.type);
   const work = immediate ? run() : localMutation.then(run, run);
   if (!immediate) localMutation = work;
   work.then(value => respond({ ok: true, value }), error => {
@@ -160,30 +167,6 @@ async function goToHuman(requestId) {
 api.notifications.onClicked.addListener(requestId => {
   const pending = requestId === 'domagent-human' ? [...controller.notificationTasks.keys()][0] : requestId;
   if (pending) void goToHuman(pending).catch(error => controller.report(error));
-});
-action.onClicked.addListener(tab => {
-  const opening = adapter.openPanel(tab);
-  void opening.then(async () => {
-    await ready;
-    if (fatal) throw fatal;
-    const human = [...controller.notificationTasks.keys()][0];
-    if (human) return goToHuman(human);
-    if (!controller.record?.identity) return api.runtime.openOptionsPage();
-    const workspace = [...controller.workspaces.values()].find(workspace => workspace.windowId === tab.windowId);
-    if (workspace?.state === 'paused' || workspace?.state === 'active') return;
-    const permission = await api.permissions.contains({ origins: ['http://*/*', 'https://*/*'] });
-    if (!permission) return;
-    if (!workspace) {
-      const groups = await api.tabGroups.query({ windowId: tab.windowId });
-      if (groups.some(group => group.title?.startsWith('DomAgent - '))) return;
-    }
-    const deadline = Date.now() + 3000;
-    while (!await adapter.panelOpen(tab.windowId)) {
-      if (Date.now() >= deadline) fail('PANEL_OPEN_REQUIRED');
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    await controller.startWorkspace(tab.windowId);
-  }).catch(error => controller.report(error));
 });
 api.runtime.onInstalled.addListener(details => {
   if (details.reason === 'install') void api.runtime.openOptionsPage().catch(error => controller.report(error));

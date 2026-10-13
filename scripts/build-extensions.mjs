@@ -27,6 +27,7 @@ for (const browser of ['chrome', 'firefox']) {
   });
   await cp(path.join(source, browser, 'icons'), path.join(output, 'icons'), { recursive: true });
   await cp(path.join(source, 'ui/dist'), output, { recursive: true });
+  await cp(path.join(source, 'node_modules/acorn/LICENSE'), path.join(output, 'licenses/acorn.txt'));
   for (const file of ['options.html', 'popup.html', 'request.html', 'panel.html']) {
     await cp(path.join(source, 'ui', file), path.join(output, file));
   }

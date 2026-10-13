@@ -7,6 +7,7 @@ import {
 } from '../../shared/protocol.js';
 import { boundedResult, checkBinding, errorCode, fail, id, originList, protectedUnion } from './security.js';
 import { ActivityHistory } from './activity.js';
+import { diagnosticDetails } from '../../shared/diagnostics.js';
 
 export class Controller {
   constructor({ adapter, keys, storage, extensionUrl, Socket = WebSocket,
@@ -32,20 +33,26 @@ export class Controller {
     this.endingTasks = new Set();
     this.history = new ActivityHistory(storage, () => this.report(new Error('HISTORY_UNAVAILABLE')));
     this.adapter.onWarning = error => this.report(error);
-    this.adapter.onPanelClosed = windowId => {
-      for (const workspace of this.workspaces.values()) {
-        if (workspace.windowId === windowId) void this.stopWorkspace(workspace, 'inactive', 'PANEL_CLOSED').catch(error => this.report(error));
-      }
-    };
     this.adapter.onGroupsChanged = () => { void this.refresh().catch(error => this.report(error)); };
-    this.adapter.onTabEvent = (tabId, event) => {
+    this.adapter.onTabEvent = (tabId, event, destination) => {
       for (const workspace of this.workspaces.values()) {
         const tab = [...workspace.tabs.values()].find(tab => tab.tabId === tabId);
         if (!tab) continue;
         if (event === 'closed' || event === 'detached' || event === 'protected_pending') {
           this.dropTab(workspace, tab, 'TAB_NOT_IN_WORKSPACE', event === 'protected_pending');
           void this.sync(workspace).catch(error => this.report(error));
-        } else if (event === 'navigation') {
+        } else if (event === 'navigation' || event === 'navigation_pending') {
+          if (event === 'navigation_pending') {
+            tab.navigation = null;
+            if (/^https?:/.test(destination || '')) {
+              try { tab.navigation = { from: tab.url, url: navigationUrl(destination, tab.protected_origins) }; }
+              catch (error) {
+                this.dropTab(workspace, tab, 'HANDOFF_REQUIRED');
+                void this.sync(workspace).catch(error => this.report(error));
+                continue;
+              }
+            }
+          }
           tab.documentGeneration++;
           tab.pageState = 'loading';
           for (const task of [...tab.queue]) {
@@ -68,6 +75,7 @@ export class Controller {
     console.error('DomAgent:', code);
     this.failures = [...this.failures.slice(-4), code];
     this.currentError = code;
+    this.currentErrorWorld = error?.diagnostics?.execution_world || null;
     this.changed();
   }
 
@@ -118,6 +126,7 @@ export class Controller {
           page_state: tab.pageState, commands: tab.queue.map(task => ({
             request_id: task.message.request_id, operation: task.message.operation,
             description: task.message.description, human: task.human, executing: task.executing,
+            ...(task.message.args.suggested_text ? { suggested_text: task.message.args.suggested_text } : {}),
           })),
         })),
       })),
@@ -363,7 +372,7 @@ export class Controller {
 
   async startWorkspace(windowId, selectedGroupId) {
     if (!this.connection) fail('BROWSER_OFFLINE');
-    if (!await this.adapter.panelOpen(windowId)) fail('PANEL_OPEN_REQUIRED');
+    if ((await this.adapter.api.windows.get(windowId)).type !== 'normal') fail('WORKSPACE_CHANGED');
     await this.adapter.permissions();
     await Promise.all([...this.endingTasks]);
     let workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
@@ -413,7 +422,6 @@ export class Controller {
 
   async startNewWorkspace(windowId) {
     if (!this.connection) fail('BROWSER_OFFLINE');
-    if (!await this.adapter.panelOpen(windowId)) fail('PANEL_OPEN_REQUIRED');
     await this.adapter.permissions();
     const workspace = [...this.workspaces.values()].find(workspace => workspace.windowId === windowId);
     if (workspace) await this.endWorkspace(workspace);
@@ -440,11 +448,13 @@ export class Controller {
       state: workspace.state, revision: ++workspace.revision,
       ...(workspace.state !== 'active' && workspace.endReason ? { end_reason: workspace.endReason } : {}),
       lease_ms: WORKSPACE_LEASE_MS,
-      tabs: workspace.state === 'active' ? [...workspace.tabs.values()].sort((a, b) => a.tabId - b.tabId).map(tab => ({
-        target_id: tab.targetId, tab_id: tab.tabId, title: tab.title, url: tab.url,
-        page_state: tab.pageState, capabilities: tab.pageState === 'navigation_only' || tab.pageState === 'unavailable'
-          ? ['navigate'] : [...this.adapter.capabilities()],
-      })) : [],
+      tabs: workspace.state === 'active' ? [...workspace.tabs.values()].sort((a, b) => a.tabId - b.tabId).map(tab => {
+        const url = tab.navigation?.url || tab.url;
+        const pageState = /^https?:/.test(url) ? tab.pageState : 'navigation_only';
+        return { target_id: tab.targetId, tab_id: tab.tabId, title: tab.title, url,
+          page_state: pageState, capabilities: pageState === 'navigation_only' || pageState === 'unavailable'
+            ? ['navigate'] : [...this.adapter.capabilities()] };
+      }) : [],
     };
     const signature = await sign(this.record.privateKey, workspacePayload(message));
     if (this.connection !== connection || this.workspaces.get(workspace.id) !== workspace ||
@@ -464,7 +474,6 @@ export class Controller {
   async scanWorkspace(workspace) {
     if (workspace.state !== 'active') return;
     const activation = workspace.activationId;
-    if (!await this.adapter.panelOpen(workspace.windowId)) { await this.stopWorkspace(workspace, 'inactive', 'VISIBILITY_LOST'); return; }
     if (!await this.groupExists(workspace)) {
       await this.endWorkspace(workspace, 'WORKSPACE_CHANGED');
       this.report(new Error('GROUP_UNAVAILABLE'));
@@ -480,9 +489,18 @@ export class Controller {
       if (!tabs.some(tab => tab.id === excluded)) workspace.previouslyExcluded.add(excluded);
     }
     for (const current of tabs) {
+      if (!current.url && !current.pendingUrl) {
+        const tracked = workspace.tabs.get(current.id);
+        if (tracked) tracked.pageState = 'loading';
+        continue;
+      }
       if (workspace.tabs.has(current.id)) {
         const tab = workspace.tabs.get(current.id);
         const currentUrl = current.pendingUrl || current.url || '';
+        if (tab.navigation && !/^https?:/.test(currentUrl)) {
+          tab.pageState = 'loading';
+          continue;
+        }
         if (/^https?:/.test(currentUrl)) {
           try { navigationUrl(currentUrl, this.protectedOrigins()); }
           catch {
@@ -517,12 +535,12 @@ export class Controller {
       }
       const tab = { targetId: crypto.randomUUID(), tabId: current.id, groupId: workspace.groupId,
         windowId: workspace.windowId, title: (current.title || 'Untitled').slice(0, 160), url: url.slice(0, 2048),
+        scriptWorldId: `domagent-${workspace.activationId}`,
         pageState: ordinary ? (current.status === 'loading' ? 'loading' : 'ready') : 'navigation_only',
         protected_origins: this.protectedOrigins(), queue: [], documentGeneration: 0 };
       await this.adapter.protect(tab.tabId, tab.protected_origins);
       if (ordinary) await this.adapter.attach(tab.tabId);
-      if (workspace.state !== 'active' || workspace.activationId !== activation ||
-          !await this.adapter.panelOpen(workspace.windowId)) {
+      if (workspace.state !== 'active' || workspace.activationId !== activation) {
         await this.adapter.release(tab.tabId);
         return;
       }
@@ -645,7 +663,6 @@ export class Controller {
   async prepare(workspace, tab, task) {
     try {
       this.check(workspace, tab, task);
-      if (!await this.adapter.panelOpen(workspace.windowId)) fail('WORKSPACE_INACTIVE');
       if (tab) {
         task.preview = await this.adapter.prepareAction(tab, task.message.operation, task.message.args,
           () => this.check(workspace, tab, task));
@@ -661,7 +678,8 @@ export class Controller {
         return;
       }
       this.finishTask(workspace, tab, task, { code: error.code === 'PAGE_UNAVAILABLE'
-        ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error) });
+        ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error),
+        ...diagnosticDetails(error, { layer: 'extension', phase: 'preparation' }) });
     } finally { task.preparing = false; }
   }
 
@@ -692,7 +710,6 @@ export class Controller {
         let timer;
         try {
           this.check(workspace, tab, task);
-          if (!await this.adapter.panelOpen(workspace.windowId)) fail('WORKSPACE_INACTIVE');
           this.check(workspace, tab, task);
           this.history.record('execution_started', { request_id: message.request_id, operation: task.message.operation });
           const operation = task.human ? Promise.resolve({ state: 'completed', user_confirmed: true }) :
@@ -704,6 +721,8 @@ export class Controller {
           });
           const value = await Promise.race([operation, timeout]);
           this.check(workspace, tab, task, true);
+          if (task.message.operation === 'evaluate_script' && this.currentError === 'SCRIPT_EXECUTION_UNAVAILABLE' &&
+              this.currentErrorWorld === value.execution_world) this.currentError = null;
           if (tab && task.message.operation === 'navigate') await this.sync(workspace);
           this.finishTask(workspace, tab, task, null, boundedResult(value));
         } catch (error) {
@@ -712,7 +731,9 @@ export class Controller {
             tab.pageState = 'unavailable'; await this.sync(workspace);
           }
           this.finishTask(workspace, tab, task, { code: error.code === 'PAGE_UNAVAILABLE'
-            ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error), ...waitErrorDetails(error) });
+            ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error), ...inspectionErrorDetails(error), ...waitErrorDetails(error),
+            ...(error.dispatch_status === 'not_dispatched' ? { dispatch_status: 'not_dispatched' } : {}),
+            ...diagnosticDetails(error, { layer: 'extension', phase: 'execution' }) });
         } finally {
           clearTimeout(timer); task.abort = null;
           if (!task.human) workspace.running--;
@@ -737,7 +758,14 @@ export class Controller {
       workspace.excluded.delete(created.id);
       await this.refreshWorkspace(workspace);
       this.check(workspace, null, task);
-      const tab = workspace.tabs.get(created.id);
+      let tab = workspace.tabs.get(created.id);
+      const admissionDeadline = this.now() + 3000;
+      while (!tab && this.now() < admissionDeadline) {
+        this.check(workspace, null, task);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        await this.refreshWorkspace(workspace);
+        tab = workspace.tabs.get(created.id);
+      }
       if (!tab) fail('TAB_NOT_IN_WORKSPACE');
       if (task.message.args.url) await this.adapter.execute(tab, 'navigate', { url: task.message.args.url },
         () => this.check(workspace, null, task));

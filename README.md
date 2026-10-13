@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.6**, extensions **5.0.4**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.6).
+Service **5.0.0-beta.7**, extensions **5.0.5**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.7).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -26,9 +26,9 @@ See [migration](docs/V5-MIGRATION.md). Old browser wire versions are rejected.
    with the native sidebar as a dashboard. Blank/browser-owned pages are
    navigation-only; no privileged injection is attempted.
 
-If the browser does not allow opening its panel after asynchronous setup, click
-the toolbar to start. Pairing itself creates no authority until the native panel
-is open and the workspace explicitly activated.
+Pairing itself creates no authority until the task is explicitly activated.
+The local Connect and start workspace action grants permission and starts a
+fresh group without depending on dashboard opening; use Open dashboard to watch.
 
 The code is an expiring invitation, not an MCP credential. Application provisioning
 and credential-vault configuration remain separate; never paste durable tokens in
@@ -36,8 +36,10 @@ chat or extension settings.
 
 ## Grouped-tab consent
 
-An **active workspace + open DomAgent sidebar + actual group membership** grants
-access. Ordinary page actions, including arbitrary JavaScript, execute without
+An **explicitly started task + actual native group membership** grants access.
+The sidebar is an optional dashboard: closing it does not stop a running task.
+Use the toolbar popup's **Pause all tasks** or the dashboard's Pause/End to stop
+new control. Ordinary page actions, including arbitrary JavaScript, execute without
 repeated per-action prompts.
 
 - User-added existing tabs become available; remove them to revoke.
@@ -45,8 +47,9 @@ repeated per-action prompts.
 - Website-created/inherited popups are excluded until explicitly added.
 - Unrelated tabs are not exposed. Two executions across tabs, one per tab.
 - Pause cancels unstarted work. Resume never replays old mutations.
-- Closing/replacing the native sidebar, End, disconnect or stale visibility
-  lease ends authority within its bounded lease; **tabs remain open**.
+- End, Pause, disconnect, restart, revoked access or loss of verified group scope
+  ends authority within its bounded lease; **tabs remain open**. Foreground focus,
+  minimization and dashboard closure do not revoke an explicit Run.
 - Browser/worker restart restores identity only. Explicit Resume is required.
 - Service/connection generation and bounded end reasons distinguish a stopped
   session from broken pairing. Updated reconnecting extensions can republish
@@ -103,6 +106,7 @@ no browser-user account/membership ceremony.
 
 ```sh
 npm --prefix domagent-mcp ci --ignore-scripts
+npm --prefix domagent-extension ci --ignore-scripts
 npm --prefix domagent-extension/ui ci --ignore-scripts
 npm --prefix domagent-mcp test
 npm --prefix domagent-mcp run build
@@ -136,7 +140,36 @@ actions remain in Diagnostics and must be checked before repeating them.
 Run `npm --prefix domagent-extension/ui run typecheck` or `npm --prefix
 domagent-extension/ui test` independently. The coordinated `domagent-mcp` build
 checks UI types and packages both browsers; its test command also runs the UI
-state tests. These commands require only this checkout and its two lockfiles.
+state tests. These commands require only this checkout and its three independent lockfiles.
+
+## Native scripting and richer diagnostics
+
+Firefox requires **153+** and uses Manifest V3. Updating in the same profile
+preserves the extension ID, IndexedDB device keys and pairing; the first Run/
+Continue can request the optional `userScripts` permission. Chrome remains145+;
+`USER_SCRIPT` additionally needs **Allow user scripts** enabled in the extension's
+browser settings. These are setup permissions, not per-action approvals.
+
+`evaluate_script` accepts `world: "MAIN" | "USER_SCRIPT"` (defaultMAIN).
+MAIN accesses page globals; USER_SCRIPT shares the DOM but has isolated globals,
+an extension-configured user-script CSP and no privileged extension APIs/messaging.
+Firefox browser-compiles source instead of calling page eval. Chrome MAIN retains
+its constrained debugger evaluator. Modes never silently switch/retry. Browser-
+internal/protected pages and refused documents remain excluded. Source limits
+remain65536 UTF-16 units, output16KiB default/64KiB maximum.
+
+Errors carry sanitized exception/message/stack/cause diagnostics, validation
+fields/limits and execution phase; credentials/headers/URL secrets are redacted,
+truncation explicit and diagnostics are not copied into activity logs.
+`wait_for_page` optionally accepts `content_selector`: one shared timeout waits
+for document readiness plus a visible match (use a row OR an empty-state marker).
+Without it, loaded means document-ready only. `type_text` uses browser editing
+commands for contenteditable and checks bounded post-event DOM reconciliation;
+this is not proof of server persistence or native keystrokes. Human handoff can
+include `suggested_text` with explicit Copy; Copy does not send or mean Done.
+Old5.0.4 peers retain their stricter sidebar behavior and ordinary calls, but new
+world/content/handoff fields require5.0.5 or return UPGRADE_REQUIRED before dispatch.
+No collection/batch/iteration tools or background jobs were added.
 
 Shared-profile scripts can read page data and cause account actions. Pause/End
 cannot undo sent requests, scheduled effects in other contexts or site workers.

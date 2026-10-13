@@ -17,7 +17,7 @@ function fixture(browserName = 'chrome') {
   adapter.registerPanel(1, port);
   return { api, adapter, port, updates, close() { open = false; } };
 }
-test('native panel evidence and a fresh trusted heartbeat are both required; alive ports alone never authorize', async t => {
+test('dashboard presence evidence expires independently and its closure does not revoke a Run', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: 10000 });
   const f = fixture();
   assert.equal(await f.adapter.panelOpen(1), true);
@@ -32,7 +32,7 @@ test('native panel evidence and a fresh trusted heartbeat are both required; ali
   let closed;
   f.adapter.onPanelClosed = id => { closed = id; };
   f.adapter.unregisterPanel(1, f.port);
-  assert.equal(closed, 1);
+  assert.equal(closed, undefined);
   assert.equal(await f.adapter.panelOpen(1), false);
   const ff = fixture('firefox');
   assert.equal(await ff.adapter.panelOpen(1), true);

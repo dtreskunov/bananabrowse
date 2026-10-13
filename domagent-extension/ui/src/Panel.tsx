@@ -6,6 +6,7 @@ import { ActionsMenu } from './components/ActionsMenu';
 import type { MenuItem } from './components/ActionsMenu';
 import { TaskSelector } from './components/TaskSelector';
 import { Notice } from './components/Notice';
+import { HandoffText } from './components/HandoffText';
 
 function focusTask(workspace: Workspace): Promise<unknown> {
   const tab = workspace.tabs.find(tab => tab.commands.some(command => command.human)) || workspace.tabs[0];
@@ -113,6 +114,7 @@ export function Panel({ snapshot }: { snapshot: Snapshot }) {
           {tab.page_state === 'navigation_only' && <p class="tab-meta">Navigation only until a supported page opens.</p>}
           {tab.commands.map(command => <div class="command" key={command.request_id}>
             <h3>{operationLabel(command.operation)}</h3><p>{command.description}</p>
+            {command.human && command.suggested_text && <HandoffText text={command.suggested_text}/>}
             {command.human && !command.executing && <div class="command-controls">
               <button type="button" class="primary" disabled={blocked} onClick={() => void run('Confirming help', () =>
                 request('decision', { request_id: command.request_id, action: 'done' }))}>Done</button>
@@ -132,8 +134,8 @@ export function Panel({ snapshot }: { snapshot: Snapshot }) {
       <footer class="access-footer">
         <p>{active ? 'Only this task group is accessible.' : 'No task tabs are being controlled.'} Other tabs stay private.</p>
         <details><summary>About browser access</summary><p>Grouped tabs can be controlled in the background, including page scripts.
-          Your normal website logins are used; this is not a sandbox. Pause, End, or closing this sidebar stops new control
-          and leaves tabs open. Requests and account changes already started cannot be undone.</p></details>
+          Your normal website logins are used; this is not a sandbox. Closing this dashboard does not stop a running task.
+          Pause or End stops new control and leaves tabs open. Requests and account changes already started cannot be undone.</p></details>
       </footer>
     </main>
   </>;

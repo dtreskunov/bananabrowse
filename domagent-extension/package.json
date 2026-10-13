@@ -1,0 +1,10 @@
+{
+  "name": "@domagent/extension-runtime",
+  "private": true,
+  "version": "5.0.5",
+  "type": "module",
+  "description": "Dependencies for the independently bundled browser runtime.",
+  "dependencies": {
+    "acorn": "8.15.0"
+  }
+}

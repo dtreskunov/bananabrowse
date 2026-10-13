@@ -12,6 +12,22 @@ export function requireValue(condition, code, status = 400) {
   if (!condition) throw new Fault(code, status);
 }
 
+export function requireArguments(argumentErrors) {
+  if (argumentErrors.length) throw Object.assign(new Fault('INVALID_ARGUMENTS'), {
+    phase: 'validation', dispatch_status: 'not_dispatched', argument_errors: argumentErrors,
+  });
+}
+
+export function validationDetails(error) {
+  if (error?.code !== 'INVALID_ARGUMENTS' || error.phase !== 'validation' ||
+      error.dispatch_status !== 'not_dispatched' || !Array.isArray(error.argument_errors)) return {};
+  return { phase: 'validation', dispatch_status: 'not_dispatched', argument_errors: error.argument_errors };
+}
+
+export function dispatchDetails(error) {
+  return error?.dispatch_status === 'not_dispatched' ? { dispatch_status: 'not_dispatched' } : {};
+}
+
 export function failureCode(error) {
   return error instanceof Fault ? error.code : 'INTERNAL_ERROR';
 }

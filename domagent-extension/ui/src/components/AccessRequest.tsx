@@ -8,7 +8,7 @@ export function AccessRequest({ snapshot }: { snapshot: Snapshot }) {
     <h2>Browser access requested</h2>
     <p>{snapshot.identity?.client_label || 'Your assistant'} is waiting.</p>
     <p class="request-intent">{pending.description}</p>
-    <small>Review Task tabs, then Continue to allow control. Opening this prompt alone grants nothing.</small>
+    <small>Review Task tabs, then Continue to approve Allow all for that group. There are no per-action prompts. Opening this card alone grants nothing.</small>
     <button type="button" class="text-button" disabled={busy.value !== null}
       onClick={() => void run('Declining request', () => request('declineAccess', { request_id: pending.request_id }))}>
       Decline request

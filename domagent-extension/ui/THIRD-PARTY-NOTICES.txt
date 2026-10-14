@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 Preact, @preact/signals and @preact/signals-core are MIT-licensed. Their full
-licenses are included in licenses/. The Figtree font uses the SIL Open Font License 1.1; see
-fonts/LICENSE-Figtree.txt in the compiled package.
+licenses are included in licenses/. Browser/system fonts are used; no font files
+are bundled.
 
 Acorn is MIT-licensed; its full license is included in licenses/acorn.txt.

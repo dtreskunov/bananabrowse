@@ -144,6 +144,22 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
       expect((await state()).browser_info.extension_version).toBe(manifest.version);
       console.log('Real MV2 5.0.4 -> MV3 same-profile identity/storage upgrade verified; no re-pairing.');
     }
+    expect(await evaluate('typeof browser.theme.getCurrent')).toBe('function');
+    const themeDirectory = path.join(directory, 'native-theme');
+    await fs.mkdir(themeDirectory, { recursive: true });
+    await fs.writeFile(path.join(themeDirectory, 'manifest.json'), JSON.stringify({
+      manifest_version: 3, name: 'Disposable native sidebar theme', version: '1.0.0',
+      browser_specific_settings: { gecko: { id: 'domagent-theme@example.test' } },
+      permissions: ['theme'], background: { scripts: ['theme.js'] },
+    }));
+    await fs.writeFile(path.join(themeDirectory, 'theme.js'), `browser.theme.update({
+      colors:{sidebar:"#20242a",sidebar_text:"#eef2f6",sidebar_border:"#414850",
+        sidebar_highlight:"#80b7f0",sidebar_highlight_text:"#18222c"},
+      properties:{color_scheme:"dark"}
+    });`);
+    const rootActor = await rdp.request('root', 'getRoot');
+    await rdp.request(rootActor.addonsActor, 'installTemporaryAddon', { addonPath: themeDirectory });
+    await expect.poll(() => evaluate('getComputedStyle(document.body).backgroundColor')).toBe('rgb(32, 36, 42)');
     const windowId = await evaluate('browser.windows.getCurrent().then(window=>window.id)');
     await new Promise(resolve => setTimeout(resolve, 500));
     const awaitingAccess = client.callTool({ name: 'wait_for_workspace', arguments: {

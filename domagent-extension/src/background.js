@@ -135,6 +135,7 @@ async function uiSnapshot(windowId) {
         tab_titles: members.slice(0, 3).map(tab => (tab.title || 'New tab').slice(0, 160)) };
     }),
     workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === windowId),
+    activity_feed: snapshot.activity_feed.filter(entry => entry.windowId === windowId),
   };
 }
 

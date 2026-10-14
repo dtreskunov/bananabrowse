@@ -1,24 +1,19 @@
-@font-face { font-family: Figtree; src: url('./fonts/figtree-400.ttf') format('truetype'); font-weight: 400; font-display: swap; }
-@font-face { font-family: Figtree; src: url('./fonts/figtree-500.ttf') format('truetype'); font-weight: 500; font-display: swap; }
 :root {
   color-scheme: light dark;
-  --font-ui: Figtree, system-ui, sans-serif;
-  --surface: #fff; --surface-fg: #242424; --surface-raised: #fafafa;
-  --muted: #656565; --border: rgba(127,127,127,.25); --border-strong: rgba(127,127,127,.4);
-  --wash: rgba(127,127,127,.1); --primary: #1a73e8; --primary-fg: #fff;
-  --focus-ring: #1a73e8; --danger: #b3261e; --success: #26753e;
-  --warning: #945b00; --warning-bg: rgba(183,121,31,.08);
-  --shadow-color: rgba(0,0,0,.16); --radius-md: 4px; --radius-lg: 6px;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --surface: #111; --surface-raised: #191919; --surface-fg: #eee;
-    --muted: #aaa; --primary: #367ee8; --focus-ring: #8ab4f8;
-    --danger: #ff8f87; --success: #80cd96; --warning: #edbc71; --shadow-color: rgba(0,0,0,.4);
-  }
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --surface: Canvas; --surface-fg: CanvasText;
+  --surface-raised: color-mix(in srgb, var(--surface-fg) 3%, var(--surface));
+  --muted: color-mix(in srgb, var(--surface-fg) 66%, var(--surface));
+  --border: color-mix(in srgb, var(--surface-fg) 18%, var(--surface));
+  --border-strong: color-mix(in srgb, var(--surface-fg) 30%, var(--surface));
+  --wash: color-mix(in srgb, var(--surface-fg) 6%, var(--surface));
+  --primary: Highlight; --primary-fg: HighlightText;
+  --focus-ring: Highlight; --danger: light-dark(#b3261e, #ff8f87); --success: light-dark(#26753e, #80cd96);
+  --warning: light-dark(#945b00, #edbc71); --warning-bg: rgba(183,121,31,.08);
+  --shadow-color: light-dark(rgba(0,0,0,.16), rgba(0,0,0,.4)); --radius-md: 4px; --radius-lg: 6px;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--surface); color: var(--surface-fg); font: 14px/1.45 var(--font-ui); }
+body { margin: 0; background: var(--surface); color: var(--surface-fg); font: 14px/1.55 var(--font-ui); }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); padding: 8px 12px; }
 button:hover:not(:disabled) { background: var(--wash); }
@@ -40,7 +35,7 @@ summary { cursor: pointer; }
 .app-header { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .brand { flex: 1; min-width: 0; }
 .brand small { display: block; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.panel-content { padding: 20px 16px; }
+.panel-content { padding: 24px 18px; }
 .section-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .task-status { margin-bottom: 20px; }
 .status-title { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
@@ -105,3 +100,6 @@ summary { cursor: pointer; }
 .access-request p { margin-bottom: 6px; font-size: 13px; }
 .access-request .request-intent { overflow-wrap: anywhere; }
 .access-request small { display: block; margin-bottom: 8px; font-size: 12px; }
+@media (forced-colors: active) {
+  :root { --surface: Canvas !important; --surface-fg: CanvasText !important; --primary: Highlight !important; --primary-fg: HighlightText !important; --border: ButtonBorder !important; --muted: GrayText !important; }
+}

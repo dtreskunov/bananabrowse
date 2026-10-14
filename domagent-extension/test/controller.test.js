@@ -175,6 +175,61 @@ test('grouped background tabs execute without per-action approval and unknown ta
   assert.equal(f.socket.sent.at(-1).error.code, 'TAB_NOT_IN_WORKSPACE');
 });
 
+test('session feed exposes allow-all scope approval and queued/running/completed intent without persisting descriptions', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  const approvals = f.controller.activityFeed.filter(entry => entry.operation === 'workspace_approval');
+  assert.equal(approvals.length, 1); assert.equal(approvals[0].policy, 'allow_all');
+  const tab = workspace.tabs.get(100);
+  const message = command(f, workspace, tab, { description: 'Read a deliberately distinctive session-local status fixture.' });
+  let finish;
+  f.adapter.execute = async () => new Promise(resolve => { finish = resolve; });
+  f.controller.enqueue(message); await flush();
+  assert.equal(f.controller.activityFeed.find(entry => entry.id === message.request_id).status, 'ready');
+  const executing = f.controller.executeReady({ ...f.binding, request_id: message.request_id,
+    target_id: tab.targetId, execution_timeout_ms: 25000 });
+  await flush();
+  assert.equal(f.controller.activityFeed.find(entry => entry.id === message.request_id).status, 'running');
+  finish({ text: 'Synthetic result' }); await executing;
+  const completed = f.controller.activityFeed.find(entry => entry.id === message.request_id);
+  assert.equal(completed.status, 'complete');
+  assert.equal(completed.description, message.description);
+  await f.controller.history.persist();
+  assert(!JSON.stringify(await f.controller.storage.get()).includes(message.description));
+  for (let index = 0; index < 205; index++) f.controller.updateFeed(`retained-${index}`, {
+    windowId: workspace.windowId, workspace_id: workspace.id, operation: 'get_text',
+    description: 'Synthetic retained status', status: 'complete',
+  });
+  await f.receive({ ...f.binding, type: 'workspace.active', workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  assert.equal(f.controller.activityFeed.filter(entry => entry.operation === 'workspace_approval').length, 0);
+  assert.equal(f.controller.activityFeed.length, 200);
+});
+
+test('late indicator completion is removed after Pause and cosmetic failure never keeps authority active', async t => {
+  const f = await fixture(t), workspace = await start(f), tab = workspace.tabs.get(100);
+  const frames = [];
+  let complete;
+  f.adapter.setControlFrame = async (_tab, visible) => {
+    frames.push(visible);
+    if (visible) await new Promise(resolve => { complete = resolve; });
+  };
+  const painting = f.controller.refreshControlFrames(workspace);
+  await flush();
+  await f.controller.stopWorkspace(workspace, 'paused');
+  complete(); await painting;
+  assert.deepEqual(frames, [true, false]);
+  assert.equal(workspace.state, 'paused');
+  assert.equal(workspace.tabs.size, 0);
+  assert.equal(tab.frameUpdating, false);
+  f.adapter.setControlFrame = async () => { throw new Error('Synthetic decoration refusal'); };
+  await f.controller.startWorkspace(10);
+  await f.receive({ ...f.binding, type: 'workspace.active', workspace_id: workspace.id,
+    activation_id: workspace.activationId, revision: workspace.revision });
+  await flush();
+  assert.equal(workspace.state, 'active');
+  assert.equal(workspace.tabs.get(100).indicator_error, 'CONTROL_FRAME_UNAVAILABLE');
+});
+
 test('user pause revokes before cleanup; dashboard closure retains explicit group authority without replay', async t => {
   const f = await fixture(t), workspace = await start(f);
   const tab = workspace.tabs.get(100), work = command(f, workspace, tab);

@@ -14,7 +14,7 @@ export async function pageHelper(operation, args = {}) {
     bindings.delete(args.approval_token);
     return { released: true };
   }
-  const marker = '[data-domagent-sharing]';
+  const marker = '[data-domagent-sharing],[data-domagent-control-frame]';
   const parent = node => node.parentElement || node.getRootNode()?.host;
   const ignored = element => {
     for (let node = element; node; node = parent(node)) {

@@ -6,8 +6,8 @@ import { ActionsMenu } from './components/ActionsMenu';
 import type { MenuItem } from './components/ActionsMenu';
 import { TaskSelector } from './components/TaskSelector';
 import { Notice } from './components/Notice';
-import { HandoffText } from './components/HandoffText';
 import { AccessRequest } from './components/AccessRequest';
+import { ActivityFeed } from './components/ActivityFeed';
 
 function focusTask(workspace: Workspace): Promise<unknown> {
   const tab = workspace.tabs.find(tab => tab.commands.some(command => command.human)) || workspace.tabs[0];
@@ -114,19 +114,11 @@ export function Panel({ snapshot }: { snapshot: Snapshot }) {
           </button>
           {tab.page_state === 'unavailable' && <p class="tab-error">Page inspection unavailable. Your assistant may still navigate away.</p>}
           {tab.page_state === 'navigation_only' && <p class="tab-meta">Navigation only until a supported page opens.</p>}
-          {tab.commands.map(command => <div class="command" key={command.request_id}>
-            <h3>{operationLabel(command.operation)}</h3><p>{command.description}</p>
-            {command.human && command.suggested_text && <HandoffText text={command.suggested_text}/>}
-            {command.human && !command.executing && <div class="command-controls">
-              <button type="button" class="primary" disabled={blocked} onClick={() => void run('Confirming help', () =>
-                request('decision', { request_id: command.request_id, action: 'done' }))}>Done</button>
-              <button type="button" disabled={blocked} onClick={() => void run('Cancelling help', () =>
-                request('decision', { request_id: command.request_id, action: 'cancel' }))}>Cancel</button>
-            </div>}
-          </div>)}
+          {tab.indicator_error && <p class="tab-meta">Page frame unavailable; the native group and toolbar still show control.</p>}
         </article>)}
       </section>}
-      <details class="activity"><summary>Recent activity</summary>
+      <ActivityFeed snapshot={snapshot}/>
+      <details class="activity"><summary>Diagnostic event history</summary>
         {snapshot.activity.length ? <ul>{snapshot.activity.slice(-20).reverse().map(event => <li key={event.id}>
           <time>{new Date(event.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
           {event.event.replaceAll('_', ' ')}{event.operation ? ` · ${operationLabel(event.operation)}` : ''}{event.code ? ` · ${event.code}` : ''}

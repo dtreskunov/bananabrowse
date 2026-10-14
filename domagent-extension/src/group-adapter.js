@@ -1,6 +1,7 @@
 import { BrowserAdapter } from './adapter.js';
 import { fail } from './security.js';
 import { navigationUrl, WORKSPACE_LEASE_MS } from '../../shared/protocol.js';
+import { controlFrame } from './control-frame.js';
 
 export class GroupAdapter extends BrowserAdapter {
   constructor(api, browserName) {
@@ -78,6 +79,26 @@ export class GroupAdapter extends BrowserAdapter {
     const window = windowId ?? this.selectedWindowId ?? (await this.api.windows.getCurrent()).id;
     if ((await this.api.windows.get(window)).type !== 'normal') fail('TARGET_STALE');
     return (await this.api.tabs.query({ windowId: window, active: true }))[0] || null;
+  }
+
+  async setControlFrame(grant, visible) {
+    const target = { tabId: grant.tabId, frameIds: [0] };
+    if (visible) {
+      await this.assertWorkspace(grant);
+      const current = await this.api.tabs.get(grant.tabId);
+      navigationUrl(current.pendingUrl || current.url, grant.protected_origins);
+      await this.api.scripting.insertCSS({ target, files: ['control-frame.css'], origin: 'USER' });
+    } else await this.api.scripting.removeCSS({ target, files: ['control-frame.css'], origin: 'USER' });
+    const result = await this.api.scripting.executeScript({ target, world: 'ISOLATED', func: controlFrame, args: [visible] });
+    if (!result?.[0]?.result || result[0].error) fail('CONTROL_FRAME_UNAVAILABLE');
+    return result[0].result.visible;
+  }
+
+  async release(tabId, options) {
+    void this.setControlFrame({ tabId }, false).catch(error => {
+      console.warn('DomAgent controlled-page indicator cleanup unavailable; control remains revoked.');
+    });
+    return super.release(tabId, options);
   }
 
   async makeGroup(windowId, label) {

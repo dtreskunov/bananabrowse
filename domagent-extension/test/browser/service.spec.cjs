@@ -134,6 +134,15 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     expect(blank.page_state).toBe('navigation_only');
     expect((await call('navigate', { target_id: blank.target_id, url: pageUrl })).isError).not.toBe(true);
     await expect.poll(async () => (await listing())[0]?.page_state).toBe('ready');
+    const controlledTabId = (await state()).workspaces[0].tabs[0].tabId;
+    const frameVisible = () => options.evaluate(tabId => chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: () => {
+        const frame = document.querySelector('[data-domagent-control-frame]');
+        return frame ? getComputedStyle(frame).pointerEvents : null;
+      },
+    }).then(results => results[0].result), controlledTabId);
+    await expect.poll(frameVisible).toBe('none');
     const privilegedSettings = await context.newPage();
     await privilegedSettings.goto('chrome://extensions/');
     await privilegedSettings.evaluate(extensionId => new Promise((resolve, reject) => {
@@ -194,6 +203,7 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     await expect.poll(async () => (await listing()).length).toBe(2);
     const current = (await listing())[0];
     await request({ type: 'ui.pause', workspace_id: first.workspace_id });
+    await expect.poll(frameVisible).toBe(null);
     const paused = await call('get_text', { target_id: current.target_id, selector: 'h1' });
     expect(paused.isError).toBe(true);
     expect(await options.evaluate(id => chrome.tabs.get(id).then(tab => tab.id), unshared.id)).toBe(unshared.id);

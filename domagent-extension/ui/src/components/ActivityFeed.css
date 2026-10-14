@@ -1,0 +1,28 @@
+.activity-feed { margin-top: 30px; }
+.activity-feed > header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.activity-feed > header .section-label { margin: 0; font-size: 11px; }
+.activity-feed ol { list-style: none; padding: 0; margin: 0; display: grid; gap: 16px; }
+.feed-card { display: flex; align-items: flex-start; gap: 12px; padding: 18px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+.feed-symbol { flex: none; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: var(--wash); border-radius: 50%; }
+.feed-symbol svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.feed-content { flex: 1; min-width: 0; }
+.feed-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 11px; color: var(--muted); }
+.feed-status { font-weight: 600; }
+.feed-meta time { font-variant-numeric: tabular-nums; flex: none; }
+.feed-content h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.feed-intent { font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.feed-target { color: var(--muted); font-size: 12px; margin-top: 10px; overflow-wrap: anywhere; }
+.policy-chip { display: inline-flex; align-items: center; margin-top: 12px; font-size: 10px; color: var(--muted); padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px; }
+.feed-failure { margin-top: 10px; font-size: 12px; color: var(--warning); }
+.status-running .feed-symbol, .status-ready .feed-symbol { color: var(--primary); }
+.status-complete .feed-symbol, .status-approved .feed-symbol { color: var(--success); }
+.status-failed .feed-symbol { color: var(--danger); }
+.status-uncertain .feed-symbol, .status-needs_help .feed-symbol { color: var(--warning); }
+.status-running { border-left: 3px solid var(--primary); }
+.status-needs_help { border-left: 3px solid var(--warning); }
+.status-approved { border-left: 3px solid var(--success); }
+.feed-empty { padding: 26px 16px; border: 1px dashed var(--border); border-radius: 10px; color: var(--muted); }
+.feed-empty h3 { font-size: 14px; margin-bottom: 8px; color: var(--surface-fg); }
+.feed-empty p, .feed-privacy { font-size: 12px; line-height: 1.6; }
+.feed-privacy { color: var(--muted); margin-top: 16px; }
+@media (max-width: 340px) { .feed-card { gap: 10px; padding: 16px 12px; } }

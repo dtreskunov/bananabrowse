@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent Secure Pairing",
-  "version": "5.0.7",
+  "version": "5.0.8",
   "minimum_chrome_version": "145",
   "description": "Work with your assistant in locally activated tab groups and keep track in the native sidebar.",
   "permissions": ["debugger", "tabs", "storage", "scripting", "userScripts", "webNavigation", "notifications", "declarativeNetRequest", "sidePanel", "tabGroups", "contextMenus", "clipboardWrite"],

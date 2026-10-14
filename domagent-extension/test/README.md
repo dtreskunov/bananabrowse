@@ -94,6 +94,17 @@ standalone userScripts succeeds. They do not fabricate a user gesture or claim
 physical dialog approval. Renderer fixtures exercise first-click scripting,
 second-click website access, declines and no premature activation/confirmation.
 
+Native UI qualification reads theme.getCurrent with no theme-management
+permission, then uses a separate disposable theme extension to verify the real
+sidebar colors update. 320px light/dark screenshots check system typography,
+spacious feed statuses, Allow-all policy, no horizontal clipping and theme reset.
+No custom-font assets may appear in release packages. Viewport-frame fixtures
+assert identical underlying button layout, pointer-events:none, underlying
+clicks and removal; actual Chrome checks user-origin CSS insertion/removal.
+Controller tests cover late decoration after Pause and nonfatal frame refusal,
+session-only intent privacy, status transitions and no duplicate approval after
+feed retention. These indicators are informational, not trusted page consent.
+
 Restart patch tests stop/recreate the actual Chrome fixture service while the
 native panel/group remains open, verify epoch/connection changes and inactive
 empty signed reprojection without replay, then require explicit local Resume and

@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.9**, extensions **5.0.7**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.9).
+Service **5.0.0-beta.10**, extensions **5.0.8**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.10).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -134,12 +134,28 @@ See [service CLI/API](domagent-mcp/README.md),
 ## Independent extension frontend
 
 The extension uses its own [UI package](domagent-extension/ui/package.json):
-Preact, signals, strict TypeScript and a type-check-first esbuild build. Neutral
-light/dark design tokens, local Figtree fonts, compact task rows, a keyboard task
+Preact, signals, strict TypeScript and a type-check-first esbuild build.
+Native system typography/colors, supported Firefox sidebar-theme values, a keyboard task
 selector and an overflow actions menu adapt BananaClaw's UI patterns without any
 cross-project imports, shared dependency tree, backend or runtime requirement.
-Fonts and notices are included in both extension packages; no CDN or remote UI
-assets are used.
+License notices are included in both extension packages; no custom fonts, CDN
+or remote UI assets are used. Firefox theme updates are read without changing
+the browser theme; Chrome uses native system color/font fallbacks.
+
+The sidebar has a spacious session-local activity feed with agent intent and
+queued/ready/running/complete/stopped/error/uncertain/human-help indicators.
+Scope approval is explicitly Allow all; no per-action approval policy/buttons
+are introduced. Intent stays in memory (bounded to 200 records), separate from
+metadata-only durable diagnostic history, and is cleared across client switches.
+Complete is a tool receipt, not a claim that every website effect persisted.
+
+Controlled ordinary pages get a noninteractive viewport frame using packaged
+user-origin CSS, removed on Pause/End/scope loss and refreshed after navigation.
+The frame changes no layout and captures no pointer events. Pages can remove or
+spoof this cosmetic indicator: it is never consent or authority. Native group/
+toolbar indicators remain available for refused/protected documents and frame
+failures; cosmetic work never delays control teardown or heartbeat. The frame is
+best effort: fullscreen/top-layer content or page DOM changes can hide it.
 
 The sidebar derives one current status and main action from transport, task and
 fresh-activation acknowledgement. **Continue** can reconnect and activate the

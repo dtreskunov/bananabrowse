@@ -35,6 +35,8 @@ export class Controller {
     this.accessRequests = new Map();
     this.endingTasks = new Set();
     this.history = new ActivityHistory(storage, () => this.report(new Error('HISTORY_UNAVAILABLE')));
+    this.activityFeed = [];
+    this.feedClientId = null;
     this.adapter.onWarning = error => this.report(error);
     this.adapter.onGroupsChanged = () => { void this.refresh().catch(error => this.report(error)); };
     this.adapter.onTabEvent = (tabId, event, destination) => {
@@ -82,6 +84,15 @@ export class Controller {
     this.changed();
   }
 
+  updateFeed(id, fields) {
+    const entry = this.activityFeed.find(entry => entry.id === id);
+    if (entry) Object.assign(entry, fields, { updated_at: this.now() });
+    else if (fields.operation && fields.description) {
+      this.activityFeed.push({ id, time: this.now(), updated_at: this.now(), ...fields });
+      this.activityFeed = this.activityFeed.slice(-200);
+    }
+  }
+
   resolveConnectionError() {
     if (['NOT_AUTHORIZED', 'BROWSER_OFFLINE', 'WORKSPACE_INACTIVE', 'WORKSPACE_PAUSED',
       'PANEL_OPEN_REQUIRED', 'WORKSPACE_CHANGED', 'GROUP_UNAVAILABLE', 'OUTCOME_UNKNOWN'].includes(this.currentError)) this.currentError = null;
@@ -120,6 +131,7 @@ export class Controller {
         state: this.pairing.state, proposal: this.pairing.proposal } : null,
       failures: this.failures, current_error: this.currentError,
       activity: this.history.entries, history_unavailable: this.history.unavailable,
+      activity_feed: this.activityFeed,
       workspaces: [...this.workspaces.values()].map(workspace => ({
         workspace_id: workspace.id, windowId: workspace.windowId, groupId: workspace.groupId,
         state: workspace.state, end_reason: workspace.endReason || null, ended_at: workspace.endedAt ?? null,
@@ -131,6 +143,7 @@ export class Controller {
             description: task.message.description, human: task.human, executing: task.executing,
             ...(task.message.args.suggested_text ? { suggested_text: task.message.args.suggested_text } : {}),
           })),
+          indicator_error: tab.indicator_error || null,
         })),
       })),
       pending_human: [...this.notificationTasks.values()].map(({ workspace, tab, task }) => ({
@@ -325,6 +338,8 @@ export class Controller {
       else if (!endReason && previousEpoch) endReason = 'CONNECTION_LOST';
       this.connection = { epoch: message.epoch, connection_id: message.connection_id, tenant_id: message.tenant_id,
         client_id: message.client_id, client_label: message.client_label };
+      if (this.feedClientId !== message.client_id) this.activityFeed = [];
+      this.feedClientId = message.client_id;
       this.serviceStartedAt = Number.isSafeInteger(message.service_started_at) ? message.service_started_at : null;
       this.record.last_service_epoch = message.epoch;
       this.record.protected_origins = protectedUnion(this.config.service_origin, message.protected_origins);
@@ -369,7 +384,19 @@ export class Controller {
       const workspace = this.workspaces.get(message.workspace_id);
       if (workspace && workspace.activationId === message.activation_id && message.revision === workspace.revision) {
         workspace.ackRevision = message.revision;
-        if (workspace.state === 'active') this.resolveConnectionError();
+        if (workspace.state === 'active') {
+          this.resolveConnectionError();
+          void this.refreshControlFrames(workspace).catch(error => this.report(error));
+          const key = `grant:${workspace.activationId}`;
+          if (workspace.feedApprovalActivation !== workspace.activationId) {
+            workspace.feedApprovalActivation = workspace.activationId;
+            this.updateFeed(key, {
+              windowId: workspace.windowId, workspace_id: workspace.id, operation: 'workspace_approval',
+              description: 'All actions in this task group are allowed until you Pause or End.',
+              status: 'approved', policy: 'allow_all',
+            });
+          }
+        }
         this.changed();
       }
       return;
@@ -620,6 +647,7 @@ export class Controller {
           if (workspace.state === 'active') {
             workspace.localLease = this.now() + WORKSPACE_LEASE_MS;
             await this.sync(workspace);
+            if (workspace.ackRevision > 0) void this.refreshControlFrames(workspace).catch(error => this.report(error));
           }
         } catch (error) {
           await this.stopWorkspace(workspace, 'inactive', 'WORKSPACE_CHANGED');
@@ -641,9 +669,38 @@ export class Controller {
     this.history.record('sharing_ended', { target_id: tab.targetId, code });
   }
 
+  async refreshControlFrames(workspace) {
+    if (!this.adapter.setControlFrame || workspace.state !== 'active' || workspace.ackRevision === 0) return;
+    const activation = workspace.activationId;
+    for (const tab of workspace.tabs.values()) {
+      if (tab.frameUpdating || tab.frameGeneration === tab.documentGeneration || tab.pageState !== 'ready') continue;
+      tab.frameUpdating = true;
+      const generation = tab.documentGeneration;
+      try {
+        await this.adapter.setControlFrame(tab, true);
+        if (workspace.state !== 'active' || workspace.activationId !== activation ||
+            workspace.tabs.get(tab.tabId) !== tab || tab.documentGeneration !== generation) {
+          await this.adapter.setControlFrame(tab, false);
+        } else tab.indicator_error = null;
+      } catch (error) {
+        tab.indicator_error = 'CONTROL_FRAME_UNAVAILABLE';
+        console.warn('DomAgent controlled-page indicator unavailable; native group/badge remain the control indicators.');
+      } finally {
+        tab.frameGeneration = generation; tab.frameUpdating = false;
+        this.changed();
+      }
+    }
+  }
+
   async stopWorkspace(workspace, state = 'inactive', reason = state === 'paused' ? 'USER_PAUSED' : 'USER_ENDED') {
     if (!validWorkspaceEndReason(reason)) fail('INVALID_ARGUMENT');
+    const wasActive = workspace.state === 'active';
     workspace.state = state; workspace.localLease = 0;
+    if (wasActive) this.updateFeed(crypto.randomUUID(), { windowId: workspace.windowId,
+      workspace_id: workspace.id, operation: 'workspace_stopped', description: state === 'paused'
+        ? 'You paused this task group. New actions are stopped; tabs stay open.'
+        : 'Browser control ended. Tabs stay open; effects already started cannot be undone.',
+      status: 'cancelled', code: reason });
     workspace.endReason = reason; workspace.endedAt = this.now();
     for (const tab of [...workspace.tabs.values()]) this.dropTab(workspace, tab,
       state === 'paused' ? 'WORKSPACE_PAUSED' : 'WORKSPACE_INACTIVE');
@@ -695,6 +752,9 @@ export class Controller {
       const queue = tab?.queue || workspace.tasks;
       if (queue.length >= 16 || queue.some(old => old.message.request_id === message.request_id)) fail('QUEUE_FULL');
       queue.push(task);
+      this.updateFeed(message.request_id, { windowId: workspace.windowId, workspace_id: workspace.id,
+        operation: message.operation, description: message.description, title: tab?.title || 'Task group',
+        status: task.human ? 'needs_help' : 'queued', policy: 'allow_all' });
       workspace.seen.add(message.request_id);
       this.history.record('command_requested', { target_id: message.target_id, request_id: message.request_id,
         operation: message.operation });
@@ -730,6 +790,7 @@ export class Controller {
         if (task.documentGeneration !== tab.documentGeneration && task.message.operation !== 'wait_for_page') fail('TARGET_STALE');
       }
       task.ready = true;
+      this.updateFeed(task.message.request_id, { status: 'ready' });
       this.send({ type: 'command.ready', request_id: task.message.request_id, target_id: task.message.target_id });
     } catch (error) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') {
@@ -766,6 +827,7 @@ export class Controller {
             message.execution_timeout_ms <= 0) fail('INVALID_MESSAGE');
         task.deadline = this.now() + message.execution_timeout_ms;
         task.executing = true;
+        this.updateFeed(task.message.request_id, { status: 'running' });
         if (!task.human) workspace.running++;
         let timer;
         try {
@@ -849,6 +911,13 @@ export class Controller {
 
   finishTask(workspace, tab, task, error, value) {
     if (task.cancelled) return;
+    let status = 'complete';
+    if (error?.code === 'OUTCOME_UNKNOWN') status = 'uncertain';
+    else if (error && ['COMMAND_CANCELLED', 'ACTION_DECLINED', 'WORKSPACE_PAUSED', 'WORKSPACE_INACTIVE'].includes(error.code)) status = 'cancelled';
+    else if (error) status = 'failed';
+    this.updateFeed(task.message.request_id, { windowId: workspace.windowId, workspace_id: workspace.id,
+      operation: task.message.operation, description: task.message.description, title: tab?.title || 'Task group',
+      policy: 'allow_all', status, ...(error ? { code: error.code } : {}) });
     task.cancelled = true; task.abort?.();
     const queue = tab?.queue || workspace.tasks;
     const index = queue.indexOf(task);

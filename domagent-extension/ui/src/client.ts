@@ -3,6 +3,8 @@ import { decodeSnapshot, isRecord } from './types';
 import type { Snapshot } from './types';
 import { suggestedSelection } from './presentation';
 import { serviceOrigin } from '../../../shared/protocol.js';
+import { initializeTheme } from './theme';
+import type { ThemeApi } from './theme';
 
 interface Port {
   postMessage(message: { type: string; windowId: number }): void;
@@ -21,6 +23,7 @@ interface BrowserApi {
   permissions: { request(options: { origins?: string[]; permissions?: string[] }): Promise<boolean> };
   sidePanel?: { open(options: { windowId: number }): Promise<void> };
   sidebarAction?: { open(): Promise<void> };
+  theme?: ThemeApi;
 }
 declare const browser: BrowserApi | undefined;
 declare const chrome: BrowserApi;
@@ -136,6 +139,9 @@ export async function initialize(): Promise<void> {
   const current = await api.windows.getCurrent();
   if (!Number.isSafeInteger(current.id)) throw new Error('INVALID_MESSAGE');
   windowId = current.id!;
+  void initializeTheme(api.theme, windowId).catch(error => {
+    console.error('DomAgent browser theme unavailable:', error instanceof Error ? error.message : 'INVALID_MESSAGE');
+  });
   if (isPanel) {
     const port = api.runtime.connect({ name: 'domagent-panel' });
     const heartbeat = () => {

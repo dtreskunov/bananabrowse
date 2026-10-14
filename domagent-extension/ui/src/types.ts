@@ -13,6 +13,7 @@ export interface TaskTab {
   url: string;
   page_state: string;
   commands: Command[];
+  indicator_error?: string | null;
 }
 export interface Workspace {
   workspace_id: string;
@@ -23,6 +24,19 @@ export interface Workspace {
   ended_at?: number | null;
   acknowledged?: boolean;
   tabs: TaskTab[];
+}
+export interface FeedEntry {
+  id: string;
+  time: number;
+  updated_at: number;
+  windowId: number;
+  workspace_id: string;
+  operation: string;
+  description: string;
+  status: 'queued' | 'ready' | 'running' | 'complete' | 'failed' | 'cancelled' | 'uncertain' | 'needs_help' | 'approved';
+  policy?: 'allow_all';
+  title?: string;
+  code?: string;
 }
 export interface TaskGroup {
   groupId: number;
@@ -45,6 +59,7 @@ export interface Snapshot {
   current_error?: string | null;
   last_session_end?: { reason: string; at: number } | null;
   activity: { id: string; event: string; time: number; operation?: string; code?: string }[];
+  activity_feed?: FeedEntry[];
   history_unavailable?: boolean;
   saved_connections: { origin: string; tenant_id: string; label: string }[];
   connection_info?: { service_epoch: string; connection_id: string; service_started_at: number | null } | null;
@@ -68,7 +83,8 @@ function command(value: unknown): value is Command {
 }
 function tab(value: unknown): value is TaskTab {
   return object(value) && string(value.target_id) && number(value.tabId) && string(value.title) &&
-    string(value.url) && string(value.page_state) && Array.isArray(value.commands) && value.commands.every(command);
+    string(value.url) && string(value.page_state) && Array.isArray(value.commands) && value.commands.every(command) &&
+    optionalString(value.indicator_error);
 }
 function workspace(value: unknown): value is Workspace {
   return object(value) && string(value.workspace_id) && number(value.windowId) && number(value.groupId) &&
@@ -109,6 +125,13 @@ function isSnapshot(value: unknown): value is Snapshot {
   if (value.access_requests !== undefined && (!Array.isArray(value.access_requests) ||
       !value.access_requests.every(request => object(request) && string(request.request_id) &&
         string(request.description) && number(request.expires_at)))) return false;
+  if (value.activity_feed !== undefined && (!Array.isArray(value.activity_feed) ||
+      !value.activity_feed.every(entry => object(entry) && string(entry.id) && number(entry.time) &&
+        number(entry.updated_at) && number(entry.windowId) && string(entry.workspace_id) &&
+        string(entry.operation) && string(entry.description) &&
+        ['queued','ready','running','complete','failed','cancelled','uncertain','needs_help','approved'].includes(String(entry.status)) &&
+        (entry.policy === undefined || entry.policy === 'allow_all') &&
+        optionalText(entry.title) && optionalText(entry.code)))) return false;
   if (value.pending_human_count !== undefined && !number(value.pending_human_count)) return false;
   if (value.connection_info != null && !(object(value.connection_info) &&
       string(value.connection_info.service_epoch) && string(value.connection_info.connection_id) &&

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Independent typed Preact extension UI with locally bundled styles and fonts.",
+  "description": "Independent typed Preact extension UI with bundled styles and native system typography.",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && node build.mjs",

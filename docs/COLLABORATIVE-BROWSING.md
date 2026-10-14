@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.9 / extension5.0.7 is the current matched release.
+Service 5.0.0-beta.10 / extension 5.0.8 is the current matched release.
 Runtime consent policy is `task-group-run-v1`; v5 identity/signature bytes and
 schema3 are unchanged. Earlier5.0.4 extensions retain stricter sidebar gating.
 
@@ -108,7 +108,7 @@ leaving native group/tabs intact; creating a fresh task uses a new workspace/han
 not replay or re-pairing. Historical OUTCOME_UNKNOWN stays in Settings after fresh
 activation resolves the current warning; inspect old outcomes before retrying.
 The compact light/dark Preact sidebar uses an independent typed UI package,
-locally bundled CSS/fonts, one primary action, a keyboard task selector and
+locally bundled CSS and system fonts, one primary action, a keyboard task selector and
 secondary actions/settings/diagnostics in an overflow menu. Historical end
 reasons never overwrite the current healthy active-task status. Connection repair
 alone does not activate a task, and no task action automatically replays a mutation.
@@ -128,6 +128,23 @@ Notification delivery failure is explicit; OS suppression cannot prove visibilit
 The user click focuses a bound task, never marks it Done or bypasses Pause.
 History holds at most200 metadata-only commands/events, not descriptions/source/
 values/URLs and not all JavaScript effects.
+The trusted dashboard separately keeps a bounded 200-entry in-memory feed of
+agent intent and command status, scoped to this client/window. Completed intent
+is not written to history/storage; client switches clear it. Allow-all approval
+appears once per fresh signed activation, not repeatedly when retention trims it.
+Human-help controls remain bound to the live request, not a historical feed card.
+The dashboard shows the latest 100 entries plus all live requests, so retention
+never hides pending human controls.
+
+System fonts replace bundled Figtree. Firefox theme.getCurrent/onUpdated map
+supported sidebar/popup colors; native CSS system colors are the cross-browser
+fallback, with forced-colors support. No images/remote theme resources are loaded.
+Ordinary controlled documents have a packaged noninteractive viewport border,
+not a browser tab-strip frame. It is cosmetic and removable/spoofable by the page;
+no page indicator is read to grant authority. Native group/toolbar are the
+control fallback. Decoration failures are explicit but nonfatal, and revocation
+does not await decoration cleanup. Fullscreen/top-layer content and page DOM
+changes can hide the best-effort viewport frame.
 
 ## Native script worlds and diagnostics
 

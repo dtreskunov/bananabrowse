@@ -80,6 +80,14 @@ cover expression/statements/Promises, strict directives, syntax/no-dispatch,
 runtime/async stacks and no page eval. Native source capture occurs before Firefox
 clones Error, rather than claiming an extension dispatcher stack is the page stack.
 
+Agent access-request tests cover coalescing, scoped decline, expiry/cancel/
+revocation, notification failure, real proof reconnect and no implicit Pause
+override. Actual Chrome integration verifies native notification registration and
+local popup Start; Firefox integration verifies the authenticated created receipt
+after the real API call because its headless alert backend can auto-close alerts.
+Neither proves OS visibility/DND. Renderer popup/dashboard tests and controller
+review-click tests assert no automatic activation and stale-alert inactivity.
+
 Permission-category regression tests invoke Firefox153's actual parent permission
 API with already-granted permissions: combined userScripts/host origins fails,
 standalone userScripts succeeds. They do not fabricate a user gesture or claim

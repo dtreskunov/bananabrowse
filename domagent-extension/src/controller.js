@@ -1,5 +1,5 @@
 import {
-  VERSION, POLICY_ID, LIVENESS_MS, WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
+  VERSION, POLICY_ID, LIVENESS_MS, HUMAN_WAIT_MS, WORKSPACE_LEASE_MS, WORKSPACE_TAB_LIMIT, WORKSPACE_CONCURRENCY,
   authPayload, workspacePayload, serviceOrigin, tenantId, sign, pairingStartPayload, pairingStatusPayload,
   pairingConfirmPayload, pairingCancelPayload, validBrowserInfo, validDescription, OPERATIONS,
   navigationUrl, inspectionErrorDetails, waitErrorDetails, validOperationArgs,
@@ -12,8 +12,10 @@ import { diagnosticDetails } from '../../shared/diagnostics.js';
 export class Controller {
   constructor({ adapter, keys, storage, extensionUrl, Socket = WebSocket,
     fetcher = (...args) => fetch(...args), now = () => Date.now(), changed = () => {},
-    notify = async () => {}, clearNotification = async () => {} }) {
-    Object.assign(this, { adapter, keys, storage, Socket, fetcher, now, changed, notify, clearNotification });
+    notify = async () => {}, clearNotification = async () => {},
+    notifyAccess = async () => {}, clearAccessNotification = async () => {} }) {
+    Object.assign(this, { adapter, keys, storage, Socket, fetcher, now, changed, notify, clearNotification,
+      notifyAccess, clearAccessNotification });
     const url = new URL(extensionUrl);
     this.extension_origin = `${url.protocol}//${url.host}`;
     this.config = { service_origin: '', enabled: false, local_protected_origins: [] };
@@ -30,6 +32,7 @@ export class Controller {
     this.currentError = null;
     this.syncing = false;
     this.notificationTasks = new Map();
+    this.accessRequests = new Map();
     this.endingTasks = new Set();
     this.history = new ActivityHistory(storage, () => this.report(new Error('HISTORY_UNAVAILABLE')));
     this.adapter.onWarning = error => this.report(error);
@@ -133,6 +136,9 @@ export class Controller {
       pending_human: [...this.notificationTasks.values()].map(({ workspace, tab, task }) => ({
         request_id: task.message.request_id, workspace_id: workspace.id, tabId: tab.tabId,
         description: task.message.description,
+      })),
+      access_requests: [...this.accessRequests.values()].map(request => ({
+        request_id: request.id, description: request.description, expires_at: request.deadline,
       })),
     };
   }
@@ -342,6 +348,22 @@ export class Controller {
       return;
     }
     if (!this.connection) fail('NOT_AUTHORIZED');
+    if (message.type === 'workspace.request' || message.type === 'workspace.request.cancel') {
+      checkBinding(message, this.connection);
+      if (message.client_id !== this.connection.client_id) fail('NOT_AUTHORIZED');
+      id(message.request_id);
+      if (message.type === 'workspace.request.cancel') { this.removeAccessRequest(message.request_id); return; }
+      if (!validDescription(message.description) || !Number.isSafeInteger(message.remaining_ms) ||
+          message.remaining_ms <= 0 || message.remaining_ms > HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
+      const previous = this.accessRequests.get(message.request_id);
+      if (previous) { previous.deadline = this.now() + message.remaining_ms; this.changed(); return; }
+      if (this.accessRequests.size >= 8) fail('QUEUE_FULL');
+      const request = { id: message.request_id, description: message.description,
+        deadline: this.now() + message.remaining_ms, connection: this.connection };
+      this.accessRequests.set(request.id, request); this.changed();
+      void this.announceAccess(request).catch(error => this.report(error));
+      return;
+    }
     if (message.type === 'ping') { this.lastPing = this.now(); this.send({ type: 'pong' }); return; }
     if (message.type === 'workspace.active') {
       const workspace = this.workspaces.get(message.workspace_id);
@@ -370,6 +392,43 @@ export class Controller {
     fail('INVALID_MESSAGE');
   }
 
+  async announceAccess(request) {
+    try {
+      await this.notifyAccess(request.id);
+      if (this.accessRequests.get(request.id) !== request || this.connection !== request.connection) {
+        await this.clearAccessNotification(request.id); return;
+      }
+      this.send({ type: 'workspace.request.received', request_id: request.id, status: 'created', ...request.connection });
+    } catch (error) {
+      this.report(Object.assign(new Error('NOTIFICATION_UNAVAILABLE'), { code: 'NOTIFICATION_UNAVAILABLE', cause: error }));
+      if (this.accessRequests.get(request.id) === request && this.connection === request.connection) {
+        this.send({ type: 'workspace.request.received', request_id: request.id, status: 'failed', ...request.connection,
+          ...diagnosticDetails(error, { layer: 'browser', phase: 'notification' }) });
+        this.removeAccessRequest(request.id);
+      }
+    }
+  }
+
+  removeAccessRequest(id) {
+    if (!this.accessRequests.delete(id)) return;
+    void this.clearAccessNotification(id).catch(error => this.report(error));
+    this.changed();
+  }
+
+  declineAccess(id) {
+    const request = this.accessRequests.get(id);
+    if (!request || request.connection !== this.connection) fail('COMMAND_EXPIRED');
+    this.send({ type: 'workspace.request.decline', request_id: id, ...request.connection });
+    this.removeAccessRequest(id);
+  }
+
+  reviewAccess(id, openControls) {
+    const request = this.accessRequests.get(id);
+    if (!request || request.connection !== this.connection || request.deadline <= this.now()) return Promise.resolve();
+    try { return Promise.resolve(openControls()); }
+    catch (error) { return Promise.reject(error); }
+  }
+
   async startWorkspace(windowId, selectedGroupId) {
     if (!this.connection) fail('BROWSER_OFFLINE');
     if ((await this.adapter.api.windows.get(windowId)).type !== 'normal') fail('WORKSPACE_CHANGED');
@@ -381,6 +440,7 @@ export class Controller {
       workspace = null;
       if (selectedGroupId === undefined) fail('GROUP_UNAVAILABLE');
     }
+
     if (selectedGroupId !== undefined) {
       if (!Number.isSafeInteger(selectedGroupId) || selectedGroupId < 0) fail('INVALID_ARGUMENT');
       const group = await this.adapter.api.tabGroups.get(selectedGroupId);
@@ -839,11 +899,13 @@ export class Controller {
       }
     }
     if (this.connection) await this.refresh();
+    for (const request of this.accessRequests.values()) if (request.deadline <= this.now()) this.removeAccessRequest(request.id);
   }
 
   loseConnection(socket, generation) {
     if (!this.current(socket, generation)) return;
     this.connection = null; this.socket = null; this.phase = 'disconnected'; this.generation++;
+    for (const request of [...this.accessRequests.values()]) this.removeAccessRequest(request.id);
     for (const workspace of this.workspaces.values()) {
       void this.stopWorkspace(workspace, 'inactive', 'CONNECTION_LOST').catch(error => this.report(error));
     }

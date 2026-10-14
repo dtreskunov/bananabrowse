@@ -146,7 +146,19 @@ test('v5 native Firefox: pairing, native sidebar lease, grouped background actio
     }
     const windowId = await evaluate('browser.windows.getCurrent().then(window=>window.id)');
     await new Promise(resolve => setTimeout(resolve, 500));
+    const awaitingAccess = client.callTool({ name: 'wait_for_workspace', arguments: {
+      device_id: device, description, timeout_seconds: 30,
+    } }).then(result => ({ result }), error => ({ error }));
+    await expect.poll(async () => (await state()).access_requests?.length).toBe(1);
+    expect((await state()).workspaces).toHaveLength(0);
+    // Firefox's headless alert backend can immediately close OS alerts. The
+    // authenticated receipt proves create() completed, not physical visibility.
+    await expect.poll(() => app.bridge.accessRequests.get(device)?.notification_status).toBe('created');
     await request({ type: 'ui.start', windowId });
+    const accessResult = await awaitingAccess;
+    expect(accessResult.error).toBeUndefined();
+    expect(accessResult.result.isError).not.toBe(true);
+    await expect.poll(async () => (await state()).access_requests.length).toBe(0);
     const workspace = (await state()).workspaces[0];
     const listing = async () => JSON.parse((await client.callTool({ name: 'list_workspace_tabs',
       arguments: { workspace_id: workspace.workspace_id } })).content[0].text);

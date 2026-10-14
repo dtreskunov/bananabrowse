@@ -3,6 +3,7 @@ import { api, busy, chooseGroup, continueTask, localError, openPanel, request, r
 import { deriveView, taskGroups } from './presentation';
 import { TaskSelector } from './components/TaskSelector';
 import { Notice } from './components/Notice';
+import { AccessRequest } from './components/AccessRequest';
 
 export function Popup({ snapshot }: { snapshot: Snapshot }) {
   const count = snapshot.active_workspace_count ?? snapshot.workspaces.filter(workspace => workspace.state === 'active').length;
@@ -19,6 +20,7 @@ export function Popup({ snapshot }: { snapshot: Snapshot }) {
     </div><p>{help ? `${help} task${help === 1 ? '' : 's'} need your help.` :
       count ? 'Tasks continue even when the dashboard is closed.' : view.message}</p></div>
     <Notice code={localError.value || snapshot.current_error}/>
+    <AccessRequest snapshot={snapshot}/>
     {!count && snapshot.identity && <TaskSelector groups={taskGroups(snapshot)} value={selection.value || ''}
       onChange={chooseGroup} disabled={blocked || view.mode === 'starting'}/>}
     <button class="primary main-action" type="button" disabled={blocked || (!count && (!view.action || view.mode === 'choose'))}

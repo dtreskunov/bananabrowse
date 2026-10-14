@@ -79,6 +79,7 @@ export function failureMessage(code: string): string {
     OUTCOME_UNKNOWN: 'A previous action could not be confirmed. Check its outcome before repeating it.',
     HISTORY_UNAVAILABLE: 'Activity history could not be saved. Current controls are still available.',
     NOTIFICATION_UNAVAILABLE: 'The help notification could not be delivered. Check notification settings.',
+    CONTROL_POPUP_UNAVAILABLE: 'The browser could not open the controls automatically. Click the DomAgent toolbar button to review the pending request.',
     PAIRING_UNAVAILABLE: 'This pairing request expired. Start again for a fresh code.',
     PAIRING_CODE_COLLISION: 'The code could not be reserved. Start again for another code.',
     PLATFORM_UNSUPPORTED: 'Update the browser to use native tab groups and sidebar controls.',

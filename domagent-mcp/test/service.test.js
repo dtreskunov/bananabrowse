@@ -34,9 +34,9 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
   try {
     const a = f.store.createClient('A'), b = f.store.createClient('B');
     const metadata = await (await fetch(`${f.base}/.well-known/domagent`)).json();
-    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.8');
+    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.9');
     const health = await (await fetch(`${f.base}/health`)).json();
-    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.8', protocol_version: 5 });
+    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.9', protocol_version: 5 });
     assert(!JSON.stringify(metadata).includes('oidc'));
     const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
     for (const [credential, tenant, extra] of [
@@ -54,7 +54,7 @@ test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata re
       { jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-03-26',
         capabilities: {}, clientInfo: { name: 'test', version: '1' } } },
       { Authorization: `Bearer ${a.credential}`, Accept: 'application/json, text/event-stream' });
-    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.8');
+    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.9');
     assert.equal((await fetch(`${f.base}/mcp/${a.tenant_id}`)).status, 405);
     assert.equal((await post(f.base, '/api/setup-requests', { agent_name: 'A' })).status, 404);
   } finally { await f.close(); }
@@ -416,7 +416,7 @@ test('create result cannot invent authority, protected destination denied, inter
   } finally { f.close(); }
 });
 
-test('passive workspace wait sends no prompt; bounded/cancelled waits grant nothing', async () => {
+test('workspace wait prompts an inactive updated peer but never grants authority itself', async () => {
   const f = await fixture();
   try {
     const immediate = await f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 300_000, undefined, f.client.tenant_id);
@@ -424,7 +424,9 @@ test('passive workspace wait sends no prompt; bounded/cancelled waits grant noth
     await f.sync({ revision: 2, state: 'inactive', tabs: [] });
     const length = f.ws.sent.length, signal = new AbortController();
     const waiting = capture(f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 300_000, signal.signal, f.client.tenant_id));
-    await flush(); assert.equal(f.ws.sent.length, length);
+    await flush(); assert.equal(f.ws.sent.length, length + 1);
+    assert.equal(f.ws.sent.at(-1).type, 'workspace.request');
+    assert.equal(f.bridge.targets.size, 0);
     signal.abort(); assert.equal((await waiting).error.code, 'COMMAND_CANCELLED');
     assert.equal(f.bridge.targets.size, 0);
     assert.throws(() => f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 601_000, undefined, f.client.tenant_id), /INVALID_ARGUMENTS/);

@@ -10,6 +10,7 @@ import {
 } from '../shared/protocol.js';
 import { token } from './store.js';
 import { sanitizeDiagnostics } from '../shared/diagnostics.js';
+import { RateLimiter } from './rate.js';
 import { Fault, requireValue, requireArguments, dispatchDetails, failureCode, audit } from './errors.js';
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -24,10 +25,10 @@ const RESULT_ERRORS = new Set(['HANDOFF_REQUIRED','CAPABILITY_UNAVAILABLE','TARG
   'WORKSPACE_PAUSED','WORKSPACE_INACTIVE','TAB_NOT_IN_WORKSPACE','DOCUMENT_NOT_CONTROLLABLE',
   'TAB_LIMIT_REACHED','NOTIFICATION_UNAVAILABLE','INPUT_REJECTED','INPUT_NOT_APPLIED']);
 const validInt = value => Number.isSafeInteger(value) && value >= 0;
-function supportsAdvancedArgs(session) {
+function supportsAdvancedArgs(session, minimum = [5, 0, 5]) {
   const version = session.browser_info?.extension_version;
   if (typeof version !== 'string' || !/^[0-9]+(?:\.[0-9]+){0,3}$/.test(version)) return false;
-  const parts = version.split('.').map(Number), minimum = [5, 0, 5];
+  const parts = version.split('.').map(Number);
   for (let index = 0; index < minimum.length; index++) {
     const value = parts[index] || 0;
     if (value !== minimum[index]) return value > minimum[index];
@@ -45,6 +46,8 @@ export class BridgeServer {
     this.startedAt = this.now();
     this.connections = new Map(); this.workspaces = new Map(); this.targets = new Map();
     this.calls = new Map(); this.waiters = new Set(); this.tombstones = new Map(); this.sockets = new Set();
+    this.accessRequests = new Map();
+    this.accessRates = new RateLimiter(this.now);
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
     this.wss.on('connection', (ws, req) => this.connected(ws, req));
     this.timer = setInterval(() => this.sweep(), 250);
@@ -122,11 +125,30 @@ export class BridgeServer {
         client_label: this.store.client(session.client_id).label, epoch: this.epoch,
         connection_id: session.connection_id, service_started_at: this.startedAt,
         protected_origins: this.config.protectedOrigins });
+      for (const waiter of [...this.waiters]) waiter.check();
       return;
     }
     requireValue(this.current(session), 'NOT_AUTHORIZED', 403);
     session.lastSeen = this.now();
     if (m.type === 'pong') return;
+    if (m.type === 'workspace.request.received' || m.type === 'workspace.request.decline') {
+      requireValue(m.client_id === session.client_id && m.epoch === this.epoch &&
+        m.connection_id === session.connection_id && UUID.test(m.request_id || ''), 'NOT_AUTHORIZED', 403);
+      const request = this.accessRequests.get(session.device.id);
+      if (!request || request.id !== m.request_id) return;
+      if (m.type === 'workspace.request.decline') {
+        for (const waiter of [...request.waiters]) waiter.cancel('ACTION_DECLINED');
+      } else {
+        requireValue(['created','failed'].includes(m.status), 'INVALID_MESSAGE');
+        request.notification_status = m.status;
+        if (m.status === 'failed') {
+          const diagnostics = sanitizeDiagnostics(m.diagnostics);
+          for (const waiter of [...request.waiters]) waiter.cancel(Object.assign(new Fault('NOTIFICATION_UNAVAILABLE'),
+            diagnostics ? { diagnostics } : {}));
+        }
+      }
+      return;
+    }
     if (m.type === 'session.status') {
       requireValue(validWorkspaceEndReason(m.end_reason) &&
         (m.previous_service_epoch === null || UUID.test(m.previous_service_epoch || '')), 'INVALID_MESSAGE');
@@ -404,23 +426,57 @@ export class BridgeServer {
       const finish = (error, value) => {
         if (finished) return; finished = true; clearTimeout(timer);
         signal?.removeEventListener('abort', abort); this.waiters.delete(waiter);
+        this.detachAccessRequest(waiter);
         error ? reject(error) : resolve(value);
       };
       const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
       const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), timeoutMs);
       const credentialHash = this.store.client(clientId, tenant).credential_hash;
-      const waiter = { check: () => {
+      const waiter = { clientId, deviceId, credentialHash, description, deadline: this.now() + timeoutMs, check: () => {
         if (!this.store.linked(clientId, deviceId, tenant) || this.store.client(clientId)?.credential_hash !== credentialHash) {
           finish(new Fault('NOT_AUTHORIZED', 403)); return;
         }
         const workspace = [...this.workspaces.values()].find(w => {
           this.expire(w); return w.client_id === clientId && w.device_id === deviceId && w.state === 'active';
         });
-        if (workspace) finish(null, { device_id: deviceId, ...this.workspaceMetadata(workspace) });
-      }, cancel: abort };
+        if (workspace) { finish(null, { device_id: deviceId, ...this.workspaceMetadata(workspace) }); return; }
+        const session = this.connections.get(deviceId);
+        if (!session || !this.current(session)) return;
+        if (!supportsAdvancedArgs(session, [5, 0, 7])) { finish(new Fault('UPGRADE_REQUIRED')); return; }
+        try { this.attachAccessRequest(waiter, session); }
+        catch (error) { finish(error); }
+      }, cancel: reason => finish(reason instanceof Fault ? reason : new Fault(reason || 'COMMAND_CANCELLED')) };
       this.waiters.add(waiter); signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort(); else waiter.check();
     });
+  }
+  attachAccessRequest(waiter, session) {
+    let request = this.accessRequests.get(waiter.deviceId);
+    if (!request) {
+      this.accessRates.take(`access:${waiter.clientId}:${waiter.deviceId}`, 8);
+      request = { id: randomUUID(), clientId: waiter.clientId, deviceId: waiter.deviceId,
+        description: waiter.description, waiters: new Set(), connectionId: null, deadline: waiter.deadline };
+      this.accessRequests.set(waiter.deviceId, request);
+    }
+    requireValue(request.clientId === waiter.clientId, 'NOT_AUTHORIZED', 403);
+    request.waiters.add(waiter); waiter.accessRequest = request;
+    const deadline = Math.max(...[...request.waiters].map(current => current.deadline));
+    if (request.connectionId === session.connection_id && request.deadline === deadline) return;
+    request.deadline = deadline;
+    const sent = this.send(session, { type: 'workspace.request', request_id: request.id,
+      client_id: session.client_id, epoch: this.epoch, connection_id: session.connection_id,
+      description: request.description, remaining_ms: Math.max(1, deadline - this.now()) });
+    request.connectionId = sent ? session.connection_id : null;
+  }
+  detachAccessRequest(waiter) {
+    const request = waiter.accessRequest;
+    if (!request) return;
+    request.waiters.delete(waiter); waiter.accessRequest = null;
+    if (request.waiters.size || this.accessRequests.get(request.deviceId) !== request) return;
+    this.accessRequests.delete(request.deviceId);
+    const session = this.connections.get(request.deviceId);
+    if (session && this.current(session)) this.send(session, { type: 'workspace.request.cancel',
+      request_id: request.id, client_id: session.client_id, epoch: this.epoch, connection_id: session.connection_id });
   }
   async slot(workspace, deadline, signal) {
     if (workspace.running < WORKSPACE_CONCURRENCY) { workspace.running++; return; }

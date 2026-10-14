@@ -1,4 +1,4 @@
-# DomAgent service 5.0.0-beta.8
+# DomAgent service 5.0.0-beta.9
 
 Node 22.13+ authenticated tenant-scoped Streamable HTTP MCP and signed browser
 wire **v5**. Existing `/mcp/<tenant>` credentials/identities and
@@ -148,8 +148,11 @@ uses the same handshake, addresses the workspace ID, reserves capacity and
 returns a handle only after a new signed snapshot publishes it. An uncertain
 mutation/create result is `OUTCOME_UNKNOWN`; never auto-retry.
 
-`wait_for_workspace({device_id,description,timeout_seconds?})` is passive
-(default 300/max 600 seconds). Only genuine human waits use SSE heartbeats.
+`wait_for_workspace({device_id,description,timeout_seconds?})` requests a trusted
+local browser-access prompt when inactive (default300/max600seconds), immediate
+when active. New coalesced WSS request/received/decline/cancel messages carry
+connection/client bindings and TTL, not authority. Inactive peers below5.0.7
+require update; ordinary active legacy use remains. Only genuine human waits use SSE heartbeats.
 `request_handoff` blocks its tab, not other tabs/concurrency slots; the extension
 must announce a generic global system notification and toolbar pending count,
 and return `NOTIFICATION_UNAVAILABLE` on API delivery failure. Notification

@@ -63,8 +63,11 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     });
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     context.on('console', message => { if (message.type() === 'error' || message.text().startsWith('DomAgent panel')) console.error('Fixture extension:', message.text()); });
-    const options = await context.newPage();
-    await options.goto(`chrome-extension://${new URL(worker.url()).host}/options.html`);
+    const optionsUrl = `chrome-extension://${new URL(worker.url()).host}/options.html`;
+    await worker.evaluate(() => chrome.runtime.openOptionsPage());
+    await expect.poll(() => context.pages().some(page => page.url() === optionsUrl)).toBe(true);
+    const options = context.pages().find(page => page.url() === optionsUrl);
+    await expect(options.locator('#app')).toBeVisible();
     const request = message => options.evaluate(message => chrome.runtime.sendMessage(message), message).then(response => {
       if (!response.ok) throw new Error(response.error.code);
       return response.value;
@@ -101,7 +104,26 @@ test('v5 Chrome actual service: reverse pairing, native lease, background group 
     if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') await options.getByRole('button', { name: 'Open dashboard' }).click();
     const windowId = await options.evaluate(() => chrome.windows.getCurrent().then(window => window.id));
     await new Promise(resolve => setTimeout(resolve, 500));
-    if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') await request({ type: 'ui.start', windowId });
+    if (process.env.DOMAGENT_OPTIONAL_PERMISSIONS !== '1') {
+      const waiting = client.callTool({ name: 'wait_for_workspace', arguments: {
+        device_id: (await state()).identity.device_id, description, timeout_seconds: 30,
+      } }).then(result => ({ result }), error => ({ error }));
+      await expect.poll(async () => (await state()).access_requests?.length).toBe(1);
+      expect((await state()).workspaces).toHaveLength(0);
+      const accessId = (await state()).access_requests[0].request_id;
+      await expect.poll(() => options.evaluate(accessId => chrome.notifications.getAll().then(notifications =>
+        Object.hasOwn(notifications, `domagent-access-${accessId}`)), accessId)).toBe(true);
+      const controls = await context.newPage();
+      await controls.goto(`chrome-extension://${new URL(worker.url()).host}/popup.html`);
+      await expect(controls.getByRole('heading', { name: 'Browser access requested' })).toBeVisible();
+      expect((await state()).workspaces).toHaveLength(0);
+      await controls.getByRole('button', { name: 'Start', exact: true }).click();
+      const accepted = await waiting;
+      expect(accepted.error).toBeUndefined();
+      expect(accepted.result.isError).not.toBe(true);
+      await expect.poll(async () => (await state()).access_requests.length).toBe(0);
+      await controls.close();
+    }
     else await expect.poll(async () => (await state()).workspaces[0]?.state).toBe('active');
     const first = (await state()).workspaces[0];
     await expect.poll(async () => (await app.bridge.listWorkspaces(clientInfo.id, clientInfo.tenant_id)[0]?.workspaces[0]?.tab_count)).toBe(1);

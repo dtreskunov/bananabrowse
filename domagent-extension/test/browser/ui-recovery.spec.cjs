@@ -80,6 +80,9 @@ async function fixture(engine, colorScheme, work, firefoxPermissions) {
               snapshot.active_workspace_count = 0;
               snapshot.workspaces = snapshot.workspaces.map(workspace => ({ ...workspace, state: 'paused', tabs: [] }));
             }
+            if (message.type === 'ui.declineAccess') {
+              snapshot.access_requests = snapshot.access_requests.filter(request => request.request_id !== message.request_id);
+            }
             return { ok: true, value: message.type === 'ui.state' ? structuredClone(snapshot) : undefined };
           },
         },
@@ -100,6 +103,24 @@ async function fixture(engine, colorScheme, work, firefoxPermissions) {
 }
 
 for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
+  test(`${name}: agent access request is actionable in trusted popup/dashboard without auto-start`, async () => {
+    await fixture(engine, 'light', async (page, origin) => {
+      const pending = [{ request_id: 'access-fixture', expires_at: Date.now() + 60000,
+        description: 'Review the task group before allowing this synthetic browser operation.' }];
+      await page.evaluate(pending => updateFixture({ current_error: null, access_requests: pending }), pending);
+      await expect(page.getByRole('heading', { name: 'Browser access requested' })).toBeVisible();
+      expect(await page.evaluate(() => fixtureRequests.filter(request => ['ui.start','ui.startNew'].includes(request.type)))).toEqual([]);
+      await page.goto(`${origin}/popup.html`);
+      await page.evaluate(pending => updateFixture({ current_error: null, access_requests: pending }), pending);
+      await expect(page.getByRole('heading', { name: 'Browser access requested' })).toBeVisible();
+      await page.getByRole('button', { name: 'Decline request' }).click();
+      expect(await page.evaluate(() => fixtureRequests.filter(request => request.type === 'ui.declineAccess')))
+        .toEqual([{ type: 'ui.declineAccess', request_id: 'access-fixture' }]);
+      await expect(page.getByRole('heading', { name: 'Browser access requested' })).toHaveCount(0);
+      expect(await page.evaluate(() => fixtureRequests.filter(request => ['ui.start','ui.startNew'].includes(request.type)))).toEqual([]);
+    });
+  });
+
   test(`${name}: Firefox permission upgrade requests userScripts alone and fresh setup uses separate gestures`, async () => {
     await fixture(engine, 'light', async page => {
       await page.getByRole('combobox', { name: 'Task tabs' }).click();

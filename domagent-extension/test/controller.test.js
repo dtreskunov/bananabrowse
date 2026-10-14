@@ -249,6 +249,59 @@ test('startup and restored native panels do not restore workspace authority', as
   assert.equal(f.controller.workspaces.size, 0);
 });
 
+test('server access prompts notify once and do not activate or override a paused group', async t => {
+  const f = await fixture(t), workspace = await start(f);
+  await f.controller.stopWorkspace(workspace, 'paused');
+  const notifications = [], cleared = [];
+  f.controller.notifyAccess = async id => notifications.push(id);
+  f.controller.clearAccessNotification = async id => cleared.push(id);
+  const request = { type: 'workspace.request', ...f.binding, client_id: 'client-1',
+    request_id: crypto.randomUUID(), description, remaining_ms: 60000 };
+  await f.receive(request); await flush();
+  assert.deepEqual(notifications, [request.request_id]);
+  assert.equal(workspace.state, 'paused');
+  assert.equal(workspace.tabs.size, 0);
+  assert.equal(f.controller.snapshot().access_requests[0].description, description);
+  let opened = 0;
+  await f.controller.reviewAccess(request.request_id, async () => { opened++; });
+  assert.equal(opened, 1);
+  assert.equal(workspace.state, 'paused');
+  assert.equal(workspace.tabs.size, 0);
+  await f.receive({ ...request, remaining_ms: 100000 }); await flush();
+  assert.equal(notifications.length, 1);
+  assert(f.socket.sent.some(message => message.type === 'workspace.request.received' && message.status === 'created'));
+  f.controller.declineAccess(request.request_id); await flush();
+  assert.equal(f.controller.accessRequests.size, 0);
+  assert.deepEqual(cleared, [request.request_id]);
+  assert.equal(f.socket.sent.at(-1).type, 'workspace.request.decline');
+  assert.equal(workspace.state, 'paused');
+  await f.controller.reviewAccess(request.request_id, async () => { opened++; });
+  assert.equal(opened, 1);
+});
+
+test('failed or cancelled access notifications are explicit and cannot leave stale grant-shaped UI', async t => {
+  const f = await fixture(t);
+  const request = { type: 'workspace.request', ...f.binding, client_id: 'client-1',
+    request_id: crypto.randomUUID(), description, remaining_ms: 60000 };
+  f.controller.notifyAccess = async () => { throw new Error('Synthetic native notification error'); };
+  await f.receive(request); await flush();
+  assert.equal(f.controller.accessRequests.size, 0);
+  assert(f.socket.sent.some(message => message.type === 'workspace.request.received' && message.status === 'failed'));
+  assert.equal(f.controller.currentError, 'NOTIFICATION_UNAVAILABLE');
+  let complete;
+  const cleared = [];
+  f.controller.notifyAccess = () => new Promise(resolve => { complete = resolve; });
+  f.controller.clearAccessNotification = async id => cleared.push(id);
+  request.request_id = crypto.randomUUID();
+  await f.receive(request);
+  await f.receive({ ...request, type: 'workspace.request.cancel' });
+  complete(); await flush();
+  assert.equal(f.controller.accessRequests.size, 0);
+  assert(cleared.includes(request.request_id));
+  assert(!f.socket.sent.some(message => message.request_id === request.request_id && message.status === 'created'));
+  assert.equal(f.controller.workspaces.size, 0);
+});
+
 test('server restart reconnect republishes an inactive empty summary and clears resolved pairing errors only', async t => {
   const f = await fixture(t), workspace = await start(f);
   const oldEpoch = f.binding.epoch, oldHandle = workspace.tabs.get(100).targetId;

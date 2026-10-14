@@ -6,8 +6,8 @@ Normal logins/cookies are reused: this is **not** an isolated browser profile.
 
 ## Version and upgrade
 
-Service **5.0.0-beta.8**, extensions **5.0.6**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.8).
+Service **5.0.0-beta.9**, extensions **5.0.7**, browser wire **v5**, DB schema **3**.
+Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.9).
 Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
 Never disable production browser signature/security checks.
 
@@ -73,6 +73,18 @@ repeated per-action prompts.
 Human assistance uses a global system notification and pending toolbar count.
 The user's click takes them to the task; explicit Done/Cancel completes it.
 OS notifications may be suppressed; API delivery failure is explicit.
+
+When no task is active, the agent calls `wait_for_workspace` for the intended
+paired device instead of telling the user to find a sharing control. The server
+sends a bounded access request over its authenticated browser connection. A
+generic native notification and toolbar badge lead to a trusted popup/dashboard
+with the agent's intent, task-group selector, Continue and Decline. Notification
+click alone never starts a group, overrides Pause or grants browser permissions.
+Requests coalesce, clear on acceptance/decline/timeout/cancellation/revocation,
+and are delivered after reconnect if the bound browser was offline. Notification
+API failure returns NOTIFICATION_UNAVAILABLE; creation does not prove OS visibility.
+Prompting requires extension5.0.7; older active peers still work, but inactive
+older peers receive UPGRADE_REQUIRED rather than an unknown-message disconnect.
 
 ## MCP surface and limits
 

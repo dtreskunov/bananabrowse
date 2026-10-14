@@ -13,7 +13,7 @@ const menu = api.menus || api.contextMenus;
 
 async function badge() {
   const state = controller.snapshot();
-  const count = state.pending_human.length;
+  const count = state.pending_human.length + state.access_requests.length;
   const active = state.workspaces.some(workspace => workspace.state === 'active');
   await action.setBadgeText({ text: count ? `${count}` : active ? 'ON' : '' });
   await action.setBadgeBackgroundColor({ color: count ? '#be6824' : '#365375' });
@@ -41,6 +41,14 @@ controller = new Controller({
       message: `${remaining} browser task(s) need your help. Click to go to a task.`,
     });
   },
+  notifyAccess: async requestId => {
+    await api.notifications.create(`domagent-access-${requestId}`, {
+      type: 'basic', iconUrl: api.runtime.getURL('icons/icon128.png'),
+      title: 'DomAgent browser access requested',
+      message: 'Your assistant is waiting for browser access. Click to review the task and Continue.',
+    });
+  },
+  clearAccessNotification: requestId => api.notifications.clear(`domagent-access-${requestId}`),
 });
 const ready = controller.initialize().catch(error => { fatal = error; controller.report(error); });
 let localMutation = Promise.resolve();
@@ -72,6 +80,7 @@ async function uiAction(message) {
   if (message.type === 'ui.start') return controller.startWorkspace(message.windowId, message.groupId);
   if (message.type === 'ui.startNew') return controller.startNewWorkspace(message.windowId);
   if (message.type === 'ui.decision') return controller.decide(message.request_id, message.action);
+  if (message.type === 'ui.declineAccess') return controller.declineAccess(message.request_id);
   if (message.type === 'ui.pauseAll') {
     const tasks = [...controller.workspaces.values()].map(workspace => controller.stopWorkspace(workspace, 'paused'));
     return Promise.all(tasks);
@@ -132,7 +141,7 @@ async function uiSnapshot(windowId) {
 api.runtime.onMessage.addListener((message, sender, respond) => {
   if (!isUiSender(sender, api.runtime)) { respond({ ok: false, error: { code: 'NOT_AUTHORIZED' } }); return false; }
   const run = () => uiAction(message);
-  const immediate = ['ui.state', 'ui.pause', 'ui.pauseAll', 'ui.end', 'ui.disconnect', 'ui.decision'].includes(message.type);
+  const immediate = ['ui.state', 'ui.pause', 'ui.pauseAll', 'ui.end', 'ui.disconnect', 'ui.decision', 'ui.declineAccess'].includes(message.type);
   const work = immediate ? run() : localMutation.then(run, run);
   if (!immediate) localMutation = work;
   work.then(value => respond({ ok: true, value }), error => {
@@ -170,6 +179,13 @@ async function goToHuman(requestId) {
   await adapter.openPanel({ windowId: task.workspace.windowId });
 }
 api.notifications.onClicked.addListener(requestId => {
+  if (requestId.startsWith('domagent-access-')) {
+    void controller.reviewAccess(requestId.slice('domagent-access-'.length), () => action.openPopup())
+      .catch(error => controller.report(Object.assign(new Error('CONTROL_POPUP_UNAVAILABLE'), {
+      code: 'CONTROL_POPUP_UNAVAILABLE', cause: error,
+    })));
+    return;
+  }
   const pending = requestId === 'domagent-human' ? [...controller.notificationTasks.keys()][0] : requestId;
   if (pending) void goToHuman(pending).catch(error => controller.report(error));
 });

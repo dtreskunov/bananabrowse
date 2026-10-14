@@ -51,6 +51,7 @@ export interface Snapshot {
   active_workspace_count?: number;
   starting_workspace_count?: number;
   permissions?: { websites: boolean; scripting: boolean };
+  access_requests?: { request_id: string; description: string; expires_at: number }[];
   pending_human_count?: number;
 }
 
@@ -105,6 +106,9 @@ function isSnapshot(value: unknown): value is Snapshot {
   if (value.starting_workspace_count !== undefined && !number(value.starting_workspace_count)) return false;
   if (value.permissions !== undefined && !(object(value.permissions) &&
       typeof value.permissions.websites === 'boolean' && typeof value.permissions.scripting === 'boolean')) return false;
+  if (value.access_requests !== undefined && (!Array.isArray(value.access_requests) ||
+      !value.access_requests.every(request => object(request) && string(request.request_id) &&
+        string(request.description) && number(request.expires_at)))) return false;
   if (value.pending_human_count !== undefined && !number(value.pending_human_count)) return false;
   if (value.connection_info != null && !(object(value.connection_info) &&
       string(value.connection_info.service_epoch) && string(value.connection_info.connection_id) &&

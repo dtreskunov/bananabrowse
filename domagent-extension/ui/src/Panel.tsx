@@ -7,6 +7,7 @@ import type { MenuItem } from './components/ActionsMenu';
 import { TaskSelector } from './components/TaskSelector';
 import { Notice } from './components/Notice';
 import { HandoffText } from './components/HandoffText';
+import { AccessRequest } from './components/AccessRequest';
 
 function focusTask(workspace: Workspace): Promise<unknown> {
   const tab = workspace.tabs.find(tab => tab.commands.some(command => command.human)) || workspace.tabs[0];
@@ -92,6 +93,7 @@ export function Panel({ snapshot }: { snapshot: Snapshot }) {
       </div>
       {snapshot.identity && <TaskSelector groups={groups} value={selection.value || ''} onChange={chooseGroup}
         disabled={blocked || active || view.mode === 'starting'}/>}
+      <AccessRequest snapshot={snapshot}/>
       <Notice code={localError.value || snapshot.current_error}/>
       {view.action && <button type="button" class="primary main-action" disabled={blocked || view.mode === 'choose'}
         onClick={() => {

@@ -2,7 +2,7 @@
 
 Policy `grouped-workspace-v1` replaces the v4 one-tab/window and per-action approval
 ceremony. Persistent identity and runtime browser authority are separate.
-Service5.0.0-beta.8 / extension5.0.6 is the current matched release.
+Service5.0.0-beta.9 / extension5.0.7 is the current matched release.
 Runtime consent policy is `task-group-run-v1`; v5 identity/signature bytes and
 schema3 are unchanged. Earlier5.0.4 extensions retain stricter sidebar gating.
 
@@ -10,8 +10,9 @@ schema3 are unchanged. Earlier5.0.4 extensions retain stricter sidebar gating.
 
 - `adopt_browser({pairing_code})`: authenticated proposal, final local confirmation.
 - `list_browser_workspaces()`: caller-linked devices, versions, connection and workspace state.
-- `wait_for_workspace({device_id,description,timeout_seconds?})`: passive human wait,
-  default300/max600seconds; no remote panel opening or grant creation.
+- `wait_for_workspace({device_id,description,timeout_seconds?})`: default300/max600
+  seconds; immediate if active, otherwise requests local browser access through a
+  coalesced extension notification/control prompt. No remote activation or grants.
 - `list_workspace_tabs({workspace_id})`: active grouped targets and bounded metadata.
 - `create_workspace_tab({workspace_id,url?,description})`: fresh background tab,
   no adoption of existing unshared tabs, eight-tab capacity.
@@ -113,6 +114,14 @@ reasons never overwrite the current healthy active-task status. Connection repai
 alone does not activate a task, and no task action automatically replays a mutation.
 
 System notification plus toolbar pending count announces human assistance.
+Inactive workspace requests use separate per-request native notification IDs.
+Only the authenticated bound client/device can issue, acknowledge or decline
+them. Notification click opens trusted controls, never Run. The same local
+permission/group/activation checks apply to Continue. Concurrent waits share a
+request; new requests are bounded/rate-limited. Timeout/cancel/decline/revocation
+clear pending state; stale clicked alerts cannot start anything. A disconnected
+browser clears local prompts; a still-pending server wait re-announces after proof
+reconnect. No prompt/authority survives a server restart.
 Optional `suggested_text` (max8000 units) stays in the pending request/local UI,
 not notifications/history. Copy is a local clipboard gesture, not Send or Done.
 Notification delivery failure is explicit; OS suppression cannot prove visibility.

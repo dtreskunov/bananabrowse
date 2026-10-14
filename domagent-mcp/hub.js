@@ -95,7 +95,11 @@ export class Hub {
         if (!conn.authenticated || code === 'NOT_AUTHORIZED') { this.disconnected(conn, code); ws.close(1008, code); }
       }).finally(() => { conn.queued--; });
     });
-    ws.on('close', () => { clearTimeout(timeout); this.sockets.delete(ws); this.disconnected(conn); });
+    // Let already-received frames (typically a final `bye`) finish before tearing the connection down.
+    ws.on('close', () => {
+      clearTimeout(timeout); this.sockets.delete(ws);
+      void conn.processing.finally(() => this.disconnected(conn));
+    });
     ws.on('error', () => { audit('ws_failure', { code: 'CONNECTION_ERROR' }); this.disconnected(conn); ws.terminate(); });
   }
   send(conn, message) {
@@ -161,11 +165,12 @@ export class Hub {
       audit('browser_connected', { browser_id: browser.id });
       return;
     }
+    if (m.type === 'bye') { conn.graceful = true; return; }
+    if (conn.ws.readyState !== 1) return;
     requireValue(this.current(conn), 'NOT_AUTHORIZED', 401);
     conn.lastSeen = this.now();
     switch (m.type) {
       case 'pong': return;
-      case 'bye': conn.graceful = true; return;
       case 'sync': return this.sync(conn, m);
       case 'pairing.code': return this.registerCode(conn, m);
       case 'pairing.cancel': this.dropCodes(conn.browser_id, 'PAIRING_UNAVAILABLE'); return;

@@ -373,3 +373,21 @@ test('a pending group reported after commit does not resolve request_session wit
   assert.equal((await pending).tabs.length, 1);
   extension.close();
 });
+
+test('a final bye followed immediately by close is recorded as a graceful disconnect', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const extension = new FakeExtension(fixture.base);
+  await extension.register();
+  await extension.connect();
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = function (chunk, ...rest) { lines.push(String(chunk)); return write.call(this, chunk, ...rest); };
+  try {
+    extension.send({ type: 'bye' });
+    extension.ws.close(1000);
+    await extension.closed;
+    await delay(50);
+  } finally { process.stdout.write = write; }
+  assert(lines.some(line => line.includes('"browser_disconnected"') && line.includes('"GRACEFUL"')), lines.join(''));
+  assert(!lines.some(line => line.includes('ws_failure')));
+});

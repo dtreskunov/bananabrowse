@@ -66,7 +66,12 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
   };
   const findTarget = async suffix => {
     const target = await rdp.event(packet => packet.type === 'target-available-form' && packet.target.url.endsWith(suffix));
-    return target.target.consoleActor;
+    const actor = target.target.consoleActor;
+    // The target exists before the page script has booted the controller.
+    if (suffix === '/app.html') {
+      await expect.poll(() => rdp.evaluateRaw(actor, 'typeof globalThis.domagent?.controller'), { timeout: 15_000 }).toBe('object');
+    }
+    return actor;
   };
   const app = expression => rdp.evaluate(appConsole, `(() => { const c = globalThis.domagent.controller; return (${expression}); })()`);
   const poll = (expression, options) => expect.poll(() => app(expression), { timeout: 15_000, ...options });

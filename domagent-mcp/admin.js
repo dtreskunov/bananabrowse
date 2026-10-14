@@ -1,60 +1,56 @@
 #!/usr/bin/env node
-import { pathToFileURL } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
-import { Store } from './store.js';
-import { preview, migrate, verifyMigration } from './migrate.js';
-import { loadConfig } from './config.js';
-import { audit, failureCode, requireValue } from './errors.js';
+import { randomBytes } from 'node:crypto';
+import { Store, hash } from './store.js';
+import { AGENT_ID_PATTERN, validName } from '../shared/protocol.js';
 
-export const USAGE = 'Usage: DOMAGENT_DB=<db> node admin.js client create|provision <label> | client list | client rename <id> <label> | client rotate|revoke <id> | device list | device rename <id> <label> | device revoke <id> | workspace status | migration dry-run|migrate|verify [--service-stopped]\n';
-export function adminCommand(store, resource, verb, args = []) {
-  if (resource === 'client' && ['create','provision'].includes(verb)) {
-    requireValue(args.length === 1, 'INVALID_ARGUMENTS');
-    return store.createClient(args[0]);
+const [command, ...args] = process.argv.slice(2);
+const usage = `Usage:
+  admin.js agent-key <agent-id> "<Name>" [homepage]   Generate an API key and print its .env line
+  admin.js browsers                                    List registered browsers
+  admin.js browser-revoke <browser-id>                 Revoke a browser, its pairings and sessions
+  admin.js pairings                                    List agent/browser pairings
+  admin.js pairing-revoke <agent-id> <browser-id>      Remove one pairing and its sessions
+  admin.js sessions                                    List sessions
+
+Database: DOMAGENT_DB (default ./data/domagent.db). The running service picks up
+revocations within a few seconds. Agent configuration changes need a restart.`;
+
+function fail(message) { console.error(message); process.exit(2); }
+
+if (command === 'agent-key') {
+  const [id, name, homepage = ''] = args;
+  if (!id || !AGENT_ID_PATTERN.test(id)) fail('Agent ID must be 1-32 lowercase letters, digits or hyphens.');
+  if (!validName(name || '')) fail('Provide a display name of at most 80 characters.');
+  if (homepage) {
+    try { new URL(homepage); } catch { fail('Homepage must be a URL.'); }
   }
-  if (resource === 'client' && verb === 'rotate') {
-    requireValue(args.length === 1, 'INVALID_ARGUMENTS');
-    return store.rotateClient(args[0]);
-  }
-  if (['client','device'].includes(resource) && verb === 'list') {
-    requireValue(!args.length, 'INVALID_ARGUMENTS');
-    return resource === 'client' ? store.listClients() : store.listDevices();
-  }
-  if (['client','device'].includes(resource) && verb === 'rename') {
-    requireValue(args.length === 2, 'INVALID_ARGUMENTS');
-    store.rename(resource, ...args); return { id: args[0], renamed: true };
-  }
-  if (['client','device'].includes(resource) && verb === 'revoke') {
-    requireValue(args.length === 1, 'INVALID_ARGUMENTS');
-    store.revoke(resource, args[0]); return { id: args[0], revoked: true };
-  }
-  requireValue(false, 'INVALID_COMMAND');
+  const key = `da_${randomBytes(32).toString('base64url')}`;
+  const variable = `DOMAGENT_AGENT_${id.toUpperCase().replaceAll('-', '_')}`;
+  console.log(`API key (shown once; store it in the agent's secret manager):\n${key}\n`);
+  console.log(`Add to the service environment and restart:\n${variable}="${name}|${homepage}|sha256:${hash(key)}"`);
+  console.log(`\nMCP endpoint: <DOMAGENT_ORIGIN>/mcp/${id}  (Authorization: Bearer <key>)`);
+  process.exit(0);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.umask(0o077);
-  let store, db;
-  try {
-    const [resource, verb, ...args] = process.argv.slice(2), path = process.env.DOMAGENT_DB || './data/domagent.db';
-    let result;
-    if (resource === 'migration') {
-      requireValue(['dry-run','migrate','verify'].includes(verb), 'INVALID_COMMAND');
-      requireValue(verb !== 'migrate' || args.length === 1 && args[0] === '--service-stopped', 'STOP_SERVICE_BEFORE_MIGRATION');
-      requireValue(verb === 'migrate' || !args.length, 'INVALID_ARGUMENTS');
-      db = new DatabaseSync(path, { readOnly: verb !== 'migrate' });
-      db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
-      result = verb === 'migrate' ? migrate(db) : verb === 'verify' ? verifyMigration(db) : preview(db);
-    } else if (resource === 'workspace' && verb === 'status') {
-      const config = loadConfig();
-      const secret = config.operatorSecret();
-      requireValue(!args.length && secret, 'LIVE_STATUS_REQUIRES_OPERATOR_SECRET');
-      const response = await fetch(`${config.origin}/api/operator/workspaces`, {
-        headers: { Authorization: `Bearer ${secret}` }, redirect: 'error',
-        signal: AbortSignal.timeout(5000),
-      });
-      requireValue(response.ok, 'LIVE_STATUS_UNAVAILABLE'); result = await response.json();
-    } else { store = new Store(path); result = adminCommand(store, resource, verb, args); }
-    // Only explicit provisioning/rotation prints a newly created credential once.
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  } catch (error) { audit('admin_command_failed', { code: failureCode(error) }); process.stderr.write(USAGE); process.exitCode = 1; }
-  finally { store?.close(); db?.close(); }
-}
+if (!command || command === 'help' || command === '--help') { console.log(usage); process.exit(command ? 0 : 2); }
+
+const store = new Store(process.env.DOMAGENT_DB || './data/domagent.db');
+const time = value => new Date(value).toISOString();
+try {
+  if (command === 'browsers') {
+    for (const row of store.listBrowsers()) {
+      console.log(`${row.id}\t${row.name}\tpairings=${row.pairings}\tlast_seen=${time(row.last_seen)}`);
+    }
+  } else if (command === 'browser-revoke') {
+    if (!store.deleteBrowser(args[0])) fail('No such browser.');
+    console.log(`Revoked ${args[0]}.`);
+  } else if (command === 'pairings') {
+    for (const row of store.listPairings()) console.log(`${row.agent_id}\t${row.browser_id}\tsince=${time(row.created_at)}`);
+  } else if (command === 'pairing-revoke') {
+    if (!store.unpair(args[0], args[1])) fail('No such pairing.');
+    console.log(`Removed pairing ${args[0]} ↔ ${args[1]}.`);
+  } else if (command === 'sessions') {
+    for (const row of store.listSessions()) {
+      console.log(`${row.id}\t${row.agent_id}\t${row.browser_id}\t${row.title}\texpires=${time(row.expires_at)}`);
+    }
+  } else fail(usage);
+} finally { store.close(); }

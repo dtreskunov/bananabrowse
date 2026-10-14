@@ -1,125 +1,56 @@
-import { connectionUrl, keyId, serviceOrigin, tenantId } from '../../shared/protocol.js';
+import { keyId, serviceOrigin } from '../../shared/protocol.js';
 import { fail } from './security.js';
+
+const DATABASE = 'domagent-v6';
+const RECORD = 'self';
 
 export class IndexedStore {
   constructor(indexedDB = globalThis.indexedDB) {
     this.indexedDB = indexedDB;
     this.opening = null;
   }
-
   open() {
     if (!this.opening) this.opening = new Promise((resolve, reject) => {
-      // Legacy origin-only keys deliberately stay in the old database. They
-      // cannot authenticate a tenant and must never be adopted during upgrade.
-      const request = this.indexedDB.open('domagent-device-v2', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('services', { keyPath: 'connection_url' });
+      const request = this.indexedDB.open(DATABASE, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('identity', { keyPath: 'id' });
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error('Device key database upgrade blocked'));
+      request.onblocked = () => reject(new Error('Identity database upgrade blocked'));
     });
     return this.opening;
   }
-
-  async get(connection) {
+  async transact(mode, run) {
     const db = await this.open();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction('services', 'readonly');
-      const request = tx.objectStore('services').get(connection);
-      tx.oncomplete = () => resolve(request.result);
+      const tx = db.transaction('identity', mode);
+      const request = run(tx.objectStore('identity'));
+      tx.oncomplete = () => resolve(request?.result);
       tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('Device key read aborted'));
+      tx.onabort = () => reject(tx.error || new Error('Identity transaction aborted'));
     });
   }
-
-  async put(record) {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('services', 'readwrite');
-      tx.objectStore('services').put(record);
-      tx.oncomplete = () => resolve(record);
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('Device key write aborted'));
-    });
-  }
-
-  async delete(connection) {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('services', 'readwrite');
-      tx.objectStore('services').delete(connection);
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('Device key delete aborted'));
-    });
-  }
+  get() { return this.transact('readonly', store => store.get(RECORD)); }
+  put(record) { return this.transact('readwrite', store => store.put({ ...record, id: RECORD })).then(() => record); }
+  clear() { return this.transact('readwrite', store => store.delete(RECORD)); }
 }
 
-export class DeviceKeys {
-  constructor(store = new IndexedStore()) {
-    this.store = store;
-    this.creating = new Map();
+/** One browser identity per install: a nonextractable P-256 key plus server-issued IDs and refresh token. */
+export class Identity {
+  constructor(store = new IndexedStore()) { this.store = store; }
+  async load() {
+    const record = await this.store.get();
+    if (!record) return null;
+    if (record.privateKey?.extractable !== false || record.privateKey?.type !== 'private' ||
+        record.privateKey.algorithm?.name !== 'ECDSA' || record.privateKey.algorithm?.namedCurve !== 'P-256' ||
+        record.key_id !== await keyId(record.public_key)) fail('NOT_AUTHORIZED');
+    return record;
   }
-
-  async get(origin, tenant) {
-    origin = serviceOrigin(origin);
-    tenant = tenantId(tenant);
-    const connection = connectionUrl(origin, tenant);
-    if (!this.creating.has(connection)) {
-      const promise = this.loadOrCreate(origin, tenant, connection).finally(() => this.creating.delete(connection));
-      this.creating.set(connection, promise);
-    }
-    return this.creating.get(connection);
-  }
-
-  async loadOrCreate(origin, tenant, connection) {
-    const existing = await this.store.get(connection);
-    if (existing) {
-      if (existing.origin !== origin || existing.tenant_id !== tenant || existing.connection_url !== connection ||
-          (existing.identity && existing.identity.tenant_id !== tenant) ||
-          existing.privateKey?.extractable !== false || existing.privateKey?.type !== 'private' ||
-          existing.privateKey.algorithm?.name !== 'ECDSA' ||
-          existing.privateKey.algorithm?.namedCurve !== 'P-256' ||
-          existing.key_id !== await keyId(existing.public_key)) fail('NOT_AUTHORIZED');
-      return existing;
-    }
-    const keys = await crypto.subtle.generateKey(
-      { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
-    const public_key = await crypto.subtle.exportKey('jwk', keys.publicKey);
-    return this.store.put({
-      origin, tenant_id: tenant, connection_url: connection,
-      privateKey: keys.privateKey, public_key, key_id: await keyId(public_key),
-      enrollment: null, identity: null, protected_origins: [],
-    });
-  }
-
-  async pending(origin) {
-    origin = serviceOrigin(origin);
-    const connection = `${origin}/pairing`;
-    const existing = await this.store.get(connection);
-    if (existing) {
-      if (existing.origin !== origin || existing.connection_url !== connection ||
-          existing.privateKey?.extractable !== false || existing.privateKey?.type !== 'private' ||
-          existing.privateKey?.algorithm?.name !== 'ECDSA' ||
-          existing.privateKey?.algorithm?.namedCurve !== 'P-256' ||
-          existing.key_id !== await keyId(existing.public_key)) fail('NOT_AUTHORIZED');
-      return existing;
-    }
+  async create(origin) {
     const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
     const public_key = await crypto.subtle.exportKey('jwk', keys.publicKey);
-    return this.store.put({ origin, connection_url: connection, privateKey: keys.privateKey,
-      public_key, key_id: await keyId(public_key), identity: null, protected_origins: [] });
+    return { origin: serviceOrigin(origin), privateKey: keys.privateKey, public_key,
+      key_id: await keyId(public_key), browser_id: null, refresh_token: null, name: null };
   }
-
-  async bind(record, identity) {
-    const connection = connectionUrl(record.origin, identity.tenant_id);
-    const existing = await this.store.get(connection);
-    if (existing && existing.key_id !== record.key_id) fail('NOT_AUTHORIZED');
-    const bound = await this.store.put({ ...record, connection_url: connection, tenant_id: identity.tenant_id, identity });
-    await this.store.delete(record.connection_url);
-    return bound;
-  }
-
-  save(record) {
-    return this.store.put(record);
-  }
+  save(record) { return this.store.put(record); }
+  clear() { return this.store.clear(); }
 }

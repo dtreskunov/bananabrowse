@@ -9,7 +9,7 @@ let app;
 let store;
 try {
   const config = loadConfig();
-  store = new Store(config.db, { pairingSecret: config.pairingSecret });
+  store = new Store(config.db);
   app = createApp(store, config);
   await app.listen();
   audit('service_started');

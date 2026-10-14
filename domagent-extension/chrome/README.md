@@ -1,28 +1,21 @@
-# Chrome grouped workspace extension5.0.0
+# DomAgent for Chrome (6.0.0)
 
-Build with `node scripts/build-extensions.mjs`; load compiled `dist/chrome`
-using Load unpacked. Minimum **Chrome145**, the qualified engine with native
-panel open/closed events. Tab-strip menu context needs Chrome150; earlier
-qualified engines use page-menu/sidebar Add fallback with an explicit warning.
+Build with `npm --prefix domagent-mcp run build` and load `dist/chrome` with
+**Load unpacked** (`chrome://extensions`, Developer mode). Minimum Chrome **145**.
 
-Enter the service domain, pass the short code to the authenticated MCP agent,
-and confirm **Connect and start workspace**. No browser-user OIDC account.
-Service-only permission comes first; HTTP(S) website permission on start.
-An active window-scoped native sidebar plus actual named group defines scope.
-Background grouped tabs run without routine action prompts. New Tab starts
-navigation-only. Closing/replacing the panel stops authority and leaves tabs open.
-Panel page liveness alone does not grant permission; native events and bounded
-heartbeat are both checked. Startup/restoration/reconnect never restores grants.
+The toolbar button opens the DomAgent window (a single popup-type window). Enter
+your server domain and a browser name, then pair agents and approve sessions
+there. Everything that controls tabs runs inside that window: closing it asks
+for confirmation, disconnects from the server, detaches the debugger and removes
+protection rules.
 
-No webpage positive controls or raw CDP surface. Origin DNR rules protect redirects
-and subresources. Pause cancels unstarted commands; uncertain mutations are not
-retried. Site-created popups are excluded until explicitly added. Agent tab
-creation is background-only and capped at eight tabs/two concurrent page tasks.
+- Every tab in an approved session's tab group is in scope; drag tabs in or out,
+  or use the page context menu (*Add tab to DomAgent session* / *Remove…*).
+- `evaluate_script` in the `MAIN` world uses the debugger API ("DomAgent started
+  debugging this browser" bar). `USER_SCRIPT` needs **Allow user scripts** in
+  the extension's details page.
+- After a browser restart Chrome assigns new group IDs, so the window asks you to
+  confirm which group belongs to each session before it reconnects.
 
-Global system notification announces human assistance; clicking takes the user
-to the task, not Done. OS suppression remains possible; delivery failure explicit.
-Normal logins/cookies/scripts are shared, not profile isolation. End cannot undo
-sent requests, account actions or workers.
-
-Update in place with matched wire5 service and preserve extension key storage.
-See [qualification](../test/README.md) and [migration](../../docs/V5-MIGRATION.md).
+Website access (`http://*/*`, `https://*/*`) is requested the first time you
+approve a session. See [tests](../test/README.md) and [architecture](../../docs/ARCHITECTURE.md).

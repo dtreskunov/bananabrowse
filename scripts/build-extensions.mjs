@@ -27,11 +27,8 @@ for (const browser of ['chrome', 'firefox']) {
   });
   await cp(path.join(source, browser, 'icons'), path.join(output, 'icons'), { recursive: true });
   await cp(path.join(source, 'ui/dist'), output, { recursive: true });
-  await cp(path.join(source, 'src/control-frame.css'), path.join(output, 'control-frame.css'));
   await cp(path.join(source, 'node_modules/acorn/LICENSE'), path.join(output, 'licenses/acorn.txt'));
-  for (const file of ['options.html', 'popup.html', 'request.html', 'panel.html']) {
-    await cp(path.join(source, 'ui', file), path.join(output, file));
-  }
+  await cp(path.join(source, 'ui/app.html'), path.join(output, 'app.html'));
   const manifest = JSON.parse(await readFile(path.join(source, browser, 'manifest.json'), 'utf8'));
   await writeFile(path.join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`Built dist/${browser}`);

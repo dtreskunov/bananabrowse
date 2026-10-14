@@ -8,9 +8,11 @@ services:
       DOMAGENT_ORIGIN: "${DOMAGENT_ORIGIN:?Set the canonical HTTPS origin}"
       DOMAGENT_BIND: 0.0.0.0
       DOMAGENT_DB: /var/lib/domagent/domagent.db
-      # Empty = remote administration disabled. Keep the env file private/gitignored.
-      DOMAGENT_OPERATOR_SECRET: "${DOMAGENT_OPERATOR_SECRET:-}"
       DOMAGENT_PROTECTED_ORIGINS: "${DOMAGENT_PROTECTED_ORIGINS:-}"
+    # Agent entries (DOMAGENT_AGENT_<ID>) live in a private, gitignored env file.
+    env_file:
+      - path: ./domagent.env
+        required: false
     volumes:
       - domagent-data:/var/lib/domagent
     security_opt:

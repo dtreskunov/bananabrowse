@@ -1,7 +1,7 @@
 import { OPERATIONS, PAGE_WAIT_MS, READINESS_ERRORS, navigationUrl, validOperationArgs } from '../../shared/protocol.js';
 import { boundedResult, fail, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
-import { pageHelper, sharingIndicator } from './page.js';
+import { pageHelper } from './page.js';
 import { actionSummary } from './approval-summary.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
 import { compileScriptSource } from './script-source.js';
@@ -28,11 +28,7 @@ export class BrowserAdapter {
     this.nextRule = 1;
     this.onTabEvent = () => {};
     this.onWarning = () => console.error('DomAgent browser protection unavailable');
-    this.requestWindows = new Map();
-    this.actionWindows = new Map();
     this.selectedWindowId = null;
-    this.onRequestClosed = () => {};
-    this.workspaces = new Map();
   }
 
   capabilities() {
@@ -46,7 +42,7 @@ export class BrowserAdapter {
     return { extension_version: version, browser_name: this.browserName, browser_version: browser?.version ?? null };
   }
 
-  async initialize(inventory) {
+  async initialize() {
     if (this.browserName === 'chrome') {
       const rules = await this.api.declarativeNetRequest.getSessionRules();
       if (rules.length) await this.api.declarativeNetRequest.updateSessionRules({
@@ -101,41 +97,12 @@ export class BrowserAdapter {
     });
     this.api.windows?.onRemoved.addListener(windowId => {
       if (this.selectedWindowId === windowId) this.selectedWindowId = null;
-      for (const [targetId, window] of this.actionWindows) {
-        if (window.id === windowId) this.actionWindows.delete(targetId);
-      }
-      for (const [requestId, id] of this.requestWindows) {
-        if (id !== windowId) continue;
-        this.requestWindows.delete(requestId);
-        this.onRequestClosed(requestId);
-      }
     });
     this.api.tabs.onUpdated.addListener((tabId, change) => {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
     this.api.tabs.onRemoved.addListener(tabId => this.onTabEvent(tabId, 'closed'));
-    this.api.tabs.onRemoved.addListener(tabId => this.workspaces.delete(tabId));
-    const changed = () => {
-      void this.verifyWorkspaces().catch(error => this.onWarning(error));
-    };
-    this.api.tabs.onAttached?.addListener((tabId, info) => {
-      for (const [ownedId, record] of this.workspaces) {
-        if (info.newWindowId === record.windowId && tabId !== ownedId) this.onTabEvent(ownedId, 'workspace_changed');
-      }
-      changed();
-    });
-    this.api.tabs.onDetached?.addListener(tabId => {
-      if (this.workspaces.has(tabId)) this.onTabEvent(tabId, 'workspace_changed');
-      changed();
-    });
-    this.api.tabs.onCreated?.addListener(tab => {
-      if (this.workspaces.has(tab.openerTabId)) this.onTabEvent(tab.openerTabId, 'workspace_changed');
-      for (const [ownedId, record] of this.workspaces) {
-        if (tab.windowId === record.windowId && tab.id !== ownedId) this.onTabEvent(ownedId, 'workspace_changed');
-      }
-      changed();
-    });
     this.api.webNavigation.onBeforeNavigate.addListener(details => {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
@@ -152,9 +119,6 @@ export class BrowserAdapter {
         void this.releaseAfterNavigation(details.tabId).catch(error => this.onWarning(error));
       }
     });
-    for (const tab of inventory) {
-      await this.removeIndicator(tab.tabId).catch(() => this.onWarning(new Error('INDICATOR_UNAVAILABLE')));
-    }
   }
 
   async permissions() {
@@ -169,107 +133,29 @@ export class BrowserAdapter {
     if (window.type === 'normal') this.selectedWindowId = windowId;
   }
 
-  async selectedTab(windowId) {
-    if (windowId !== undefined) {
-      if (!Number.isSafeInteger(windowId) || windowId < 0) fail('INVALID_ARGUMENT');
-      if ((await this.api.windows.get(windowId)).type !== 'normal') fail('TARGET_STALE');
-      const tabs = await this.api.tabs.query({ windowId, active: true });
-      const tab = tabs[0];
-      return tab && /^https?:\/\//.test(tab.pendingUrl || tab.url) ? tab : null;
+  /** The user's most recently focused normal window, used for new session groups. */
+  async lastNormalWindow() {
+    if (this.selectedWindowId !== null) {
+      try {
+        const window = await this.api.windows.get(this.selectedWindowId);
+        if (window.type === 'normal') return window.id;
+      } catch { this.selectedWindowId = null; }
     }
-    if (this.selectedWindowId === null) {
-      const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
-      const window = windows.find(window => window.focused) || windows.at(-1);
-      if (!window) return null;
-      this.selectedWindowId = window.id;
-    }
-    const tabs = await this.api.tabs.query({ windowId: this.selectedWindowId, active: true });
-    const tab = tabs[0];
-    return tab && /^https?:\/\//.test(tab.pendingUrl || tab.url) ? tab : null;
-  }
-
-  async selectedTabById(tabId) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0) fail('INVALID_ARGUMENT');
-    const tab = await this.selectedTab();
-    if (tab?.id !== tabId) fail('TARGET_STALE');
-    return tab;
-  }
-
-  async requestWindow(requestId) {
-    // A remote request cannot supply the gesture required to open native panels.
-    this.onPanelNeeded?.(requestId);
-  }
-
-  async closeRequestWindow(requestId) {
-    const windowId = this.requestWindows.get(requestId);
-    this.requestWindows.delete(requestId);
-    if (windowId !== undefined) await this.api.windows.remove(windowId).catch(() => {});
-  }
-
-  async actionWindow(targetId) {
-    this.onPanelNeeded?.(targetId);
-  }
-
-  async openPanel(tab) {
-    if (this.browserName === 'chrome') return this.api.sidePanel.open({ tabId: tab.id });
-    return this.api.sidebarAction.open();
-  }
-
-  async createWorkspace(tabId) {
-    const existing = this.workspaces.get(tabId);
-    if (existing && !existing.boundaryLost) {
-      await this.assertWorkspace({ tabId, windowId: existing.windowId });
-      return existing.windowId;
-    }
-    this.workspaces.delete(tabId);
-    const window = await this.api.windows.create({ tabId, type: 'normal', focused: true });
-    this.workspaces.set(tabId, { windowId: window.id, boundaryLost: false });
-    this.selectedWindowId = window.id;
-    if (this.browserName === 'chrome') {
-      await this.api.sidePanel.setOptions({ tabId, path: `panel.html?window_id=${window.id}`, enabled: true });
-    }
-    try { await this.openPanel({ id: tabId }); }
-    catch (error) { this.onWarning(Object.assign(error, { code: 'PANEL_OPEN_REQUIRED' })); }
-    await this.assertWorkspace({ tabId, windowId: window.id });
-    return window.id;
+    const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
+    const window = windows.find(window => window.focused) || windows.at(-1);
+    if (window) return window.id;
+    return (await this.api.windows.create({ focused: false, url: 'about:blank' })).id;
   }
 
   async assertWorkspace(grant) {
-    if (!Number.isSafeInteger(grant.windowId)) fail('WORKSPACE_CHANGED');
     const tab = await this.api.tabs.get(grant.tabId);
-    const tabs = await this.api.tabs.query({ windowId: grant.windowId });
-    if (tab.windowId !== grant.windowId || tabs.length !== 1 || tabs[0].id !== grant.tabId) fail('WORKSPACE_CHANGED');
+    if (tab.groupId !== grant.groupId) fail('TAB_NOT_IN_SESSION');
   }
 
-  async verifyWorkspaces() {
-    for (const [tabId, record] of this.workspaces) {
-      if (record.boundaryLost) continue;
-      try { await this.assertWorkspace({ tabId, windowId: record.windowId }); }
-      catch (error) {
-        this.onWarning(error);
-        record.boundaryLost = true;
-        this.onTabEvent(tabId, 'workspace_changed');
-      }
-    }
-  }
-
-  async closeWorkspace(tabId, windowId) {
-    const record = this.workspaces.get(tabId);
-    if (!record || record.windowId !== windowId) fail('WORKSPACE_CHANGED');
+  async focusTab(tabId) {
     const tab = await this.api.tabs.get(tabId);
-    if (tab.windowId !== windowId) fail('WORKSPACE_CHANGED');
-    await this.api.tabs.remove(tabId);
-    this.workspaces.delete(tabId);
-  }
-
-  workspaceList() {
-    return [...this.workspaces].map(([tabId, record]) => ({ tabId, windowId: record.windowId }));
-  }
-
-  async closeActionWindow(targetId) {
-    const record = this.actionWindows.get(targetId);
-    this.actionWindows.delete(targetId);
-    if (record?.id !== undefined && record?.id !== null) await this.api.windows.remove(record.id).catch(() => {});
+    await this.api.windows.update(tab.windowId, { focused: true });
+    await this.api.tabs.update(tabId, { active: true });
   }
 
   async protect(tabId, origins) {
@@ -303,11 +189,7 @@ export class BrowserAdapter {
     }
   }
 
-  async release(tabId, { retainProtection = false, indicatorToken } = {}) {
-    // Decoration must never delay teardown of actual browser authority.
-    if (indicatorToken) {
-      void this.removeIndicator(tabId, indicatorToken).catch(() => this.onWarning(new Error('INDICATOR_UNAVAILABLE')));
-    }
+  async release(tabId, { retainProtection = false } = {}) {
     if (this.attached.has(tabId)) {
       try {
         await this.api.debugger.detach({ tabId });
@@ -319,23 +201,6 @@ export class BrowserAdapter {
       }
     }
     if (!retainProtection) await this.dropProtection(tabId);
-  }
-
-  async indicator(tabId, details) {
-    const tab = await this.api.tabs.get(tabId);
-    if (tab.url === 'about:blank') return null;
-    const results = await this.api.scripting.executeScript({
-      target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: sharingIndicator, args: [details],
-    });
-    if (!results?.[0]?.result?.url || results[0].error) fail('INDICATOR_UNAVAILABLE');
-    return { url: results[0].result.url, documentId: results[0].documentId };
-  }
-
-  async removeIndicator(tabId, token) {
-    await this.api.scripting.executeScript({
-      target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: sharingIndicator,
-      args: [token ? { remove: true, token } : null],
-    });
   }
 
   async dropProtection(tabId) {
@@ -468,6 +333,10 @@ export class BrowserAdapter {
 
   async prepareAction(grant, operation, args, check = () => {}) {
     await this.assertWorkspace(grant);
+    if (operation === 'navigate') {
+      check();
+      return { summary: ['Operation: navigate', `Destination: ${navigationUrl(args.url, grant.protected_origins)}`] };
+    }
     if (['wait_for_page', 'request_handoff'].includes(operation)) {
       const tab = await this.api.tabs.get(grant.tabId);
       const url = grant.navigation?.url || tab.pendingUrl || tab.url;
@@ -495,6 +364,17 @@ export class BrowserAdapter {
     if (!validOperationArgs(operation, args)) fail('INVALID_ARGUMENT');
     await this.assertWorkspace(grant);
     const tabId = grant.tabId;
+    if (operation === 'navigate') {
+      // Navigation needs no document access, so blank and browser-owned pages can start a task.
+      checkCurrent();
+      const url = navigationUrl(args.url, grant.protected_origins);
+      const prior = await this.api.tabs.get(tabId);
+      grant.navigation = { from: prior.url, url };
+      await this.api.tabs.update(tabId, { url });
+      grant.url = url; grant.pageState = 'loading';
+      checkCurrent(true);
+      return { url, navigation_started: true };
+    }
     if (operation === 'wait_for_page') {
       const timeout = args.timeout_ms ?? PAGE_WAIT_MS;
       const deadline = Date.now() + timeout;

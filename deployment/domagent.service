@@ -10,9 +10,6 @@ Group=domagent
 WorkingDirectory=/opt/domagent/domagent-mcp
 EnvironmentFile=/etc/domagent/domagent.env
 Environment=DOMAGENT_DB=/var/lib/domagent/domagent.db
-# Optional remote operator dashboard; leave both commented to keep it disabled.
-# Environment=DOMAGENT_OPERATOR_SECRET_FILE=%d/operator-secret
-# LoadCredential=operator-secret:/etc/domagent/operator-secret
 ExecStart=/usr/bin/node /opt/domagent/domagent-mcp/index.js
 Restart=on-failure
 RestartSec=5

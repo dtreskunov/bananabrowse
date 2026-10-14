@@ -1,207 +1,124 @@
-# DomAgent grouped browser workspaces
+# DomAgent
 
-An independent, client-isolated MCP service and Chrome/Firefox extension.
-Work on real browser tabs in the background while the user browses elsewhere.
-Normal logins/cookies are reused: this is **not** an isolated browser profile.
+Let your AI agent work in your real browser, inside tab groups you approve.
 
-## Version and upgrade
+DomAgent is a self-hosted MCP server plus a Chrome/Firefox extension. The
+extension runs in a small app window: while that window is open, paired agents
+can ask to open a **session**, which is a native tab group in your browser.
+You approve each session, and every tab in that group is in scope, so you can
+drag tabs in or out to change what the agent can touch. Close the group, or the
+window, and the agent stops.
 
-Service **5.0.0-beta.10**, extensions **5.0.8**, browser wire **v5**, DB schema **3**.
-Download [the matched prerelease](https://github.com/dtreskunov/domagent/releases/tag/v5.0.0-beta.10).
-Chrome ZIPs are unpacked extensions; Firefox ZIPs are unsigned temporary add-ons.
-Never disable production browser signature/security checks.
+Sessions reuse your normal logins and cookies. This is **not** an isolated
+browser profile.
 
-This is a breaking upgrade from the single-tab v4 approval model. Migrate existing
-schema2 explicitly, preserve IDs/keys/credentials and update the extension in place.
-See [migration](docs/V5-MIGRATION.md). Old browser wire versions are rejected.
+## Version
 
-## Fresh install
+Service **6.0.0-beta.1**, extension **6.0.0**, browser wire **v6**, DB schema **6**.
+v6 is a clean break from v5: use a new database, re-register browsers and
+re-pair agents. See [the v6 upgrade notes](docs/V6-UPGRADE.md) and
+[architecture](docs/ARCHITECTURE.md).
 
-1. Install the compiled extension and enter the HTTPS DomAgent service domain.
-2. Tell your **already configured, authenticated** MCP agent the short pairing
-   code displayed by the extension. No browser-user DomAgent login is required.
-3. The agent calls `adopt_browser`. Confirm the proposed client locally using
-   **Connect and start workspace**. Browser website permission prompts still apply.
-4. Work starts in a fresh blank tab inside a named `DomAgent - <client>` group,
-   with the native sidebar as a dashboard. Blank/browser-owned pages are
-   navigation-only; no privileged injection is attempted.
+Chrome **145+** and Firefox **153+**. Release ZIPs are unpacked Chrome
+extensions and unsigned temporary Firefox add-ons.
 
-Pairing itself creates no authority until the task is explicitly activated.
-The local Connect and start workspace action grants permission and starts a
-fresh group without depending on dashboard opening; use Open dashboard to watch.
+## Using DomAgent
 
-The code is an expiring invitation, not an MCP credential. Application provisioning
-and credential-vault configuration remain separate; never paste durable tokens in
-chat or extension settings.
+1. Click the DomAgent toolbar button. A DomAgent window opens (one at a time).
+2. **First run:** enter your server's domain and a name for this browser, such as
+   “Bob's Firefox on Mac”, then click **Connect**.
+3. **Pair an agent:** click **Pair an agent** and tell your agent the 8-character
+   code. The agent calls `pair_browser`; you click **Approve** in the window.
+4. **Sessions:** when the agent needs the browser it calls `request_session` with
+   a purpose and starting URLs. You get a system notification and a card in the
+   window. **Approve** creates a colored tab group in your last-used window
+   without stealing focus.
+5. **Work together:** the agent works in the group's tabs in the background.
+   Progress and requests for help (logins, CAPTCHAs) appear in the window; help
+   requests also flash the tab group and show a notification. Click **Done** when
+   finished.
+6. **Stop:** close or ungroup the tab group to end that session (tabs stay open),
+   or close the DomAgent window to disconnect everything. The window asks first.
+   Reopening it reconnects live sessions automatically.
 
-## Grouped-tab consent
+| You do | Effect |
+| --- | --- |
+| Drag a tab into a session group, or right-click → *Add tab to DomAgent session* | The agent can use it |
+| Drag a tab out, or right-click → *Remove tab from DomAgent session* | The agent loses it |
+| Close or ungroup the group | Session ends; tabs stay open |
+| Close the DomAgent window | Agents see the browser as offline; sessions resume when you reopen it |
+| Settings → Unpair | That agent's sessions end and it can no longer ask |
 
-An **explicitly started task + actual native group membership** grants access.
-The sidebar is an optional dashboard: closing it does not stop a running task.
-Use the toolbar popup's **Pause all tasks** or the dashboard's Pause/End to stop
-new control. Ordinary page actions, including arbitrary JavaScript, execute without
-repeated per-action prompts.
+Settings also has the browser name, **Open DomAgent when the browser starts**
+(off by default), Firefox page-script permission, and **Forget this browser**.
 
-- User-added existing tabs become available; remove them to revoke.
-- The agent can create new background task tabs, up to eight per workspace.
-- Website-created/inherited popups are excluded until explicitly added.
-- Unrelated tabs are not exposed. Two executions across tabs, one per tab.
-- Pause cancels unstarted work. Resume never replays old mutations.
-- End, Pause, disconnect, restart, revoked access or loss of verified group scope
-  ends authority within its bounded lease; **tabs remain open**. Foreground focus,
-  minimization and dashboard closure do not revoke an explicit Run.
-- Browser/worker restart restores identity only. Explicit Resume is required.
-- Service/connection generation and bounded end reasons distinguish a stopped
-  session from broken pairing. Updated reconnecting extensions can republish
-  inactive empty summaries only; local Resume is still required.
-- Resolved authorization failures remain diagnostic history, not red current
-  errors. A retained same-named group is not automatically authorized; choose
-  the group using its tab count/title preview instead of re-pairing/creating
-  yet another group. Raw native IDs are available in Diagnostics, not the main view.
-- Recovery actions are always visible for an inactive workspace, including when
-  it has zero tab rows: select an existing native group or **New task group**, then
-  use the single **Continue** / **Start** action.
-  End retires local tracking and leaves the old group/tabs intact; Pause keeps it
-  available for Resume. A removed/moved group cannot trap End or other selection,
-  and real browser API failures still surface explicitly.
-- Starting fresh clears a previous current OUTCOME_UNKNOWN warning only after
-  successful authentication/active acknowledgement; historical uncertainty is
-  retained and does not mean the earlier operation is safe to repeat.
-- Toolbar/sidebar and supported native tab menus add/remove the clicked tab.
-- Moving a task to its own window is optional and pauses until revalidated.
+Each agent gets a stable group color. Sessions survive window closes and
+browser restarts for up to 7 days while their group exists. After a Chrome
+restart, the window asks you to confirm which group belongs to a session,
+because Chrome changes group IDs on restart. Firefox reattaches automatically.
 
-Human assistance uses a global system notification and pending toolbar count.
-The user's click takes them to the task; explicit Done/Cancel completes it.
-OS notifications may be suppressed; API delivery failure is explicit.
+## Agent setup
 
-When no task is active, the agent calls `wait_for_workspace` for the intended
-paired device instead of telling the user to find a sharing control. The server
-sends a bounded access request over its authenticated browser connection. A
-generic native notification and toolbar badge lead to a trusted popup/dashboard
-with the agent's intent, task-group selector, Continue and Decline. Notification
-click alone never starts a group, overrides Pause or grants browser permissions.
-Requests coalesce, clear on acceptance/decline/timeout/cancellation/revocation,
-and are delivered after reconnect if the bound browser was offline. Notification
-API failure returns NOTIFICATION_UNAVAILABLE; creation does not prove OS visibility.
-Prompting requires extension5.0.7; older active peers still work, but inactive
-older peers receive UPGRADE_REQUIRED rather than an unknown-message disconnect.
+Agents authenticate with an API key at `https://<server>/mcp/<agent-id>`. The
+operator generates the key and adds one line to the service environment:
 
-## MCP surface and limits
+```sh
+node domagent-mcp/admin.js agent-key atlas "Atlas" https://atlas.example
+# prints the key once, plus:
+# DOMAGENT_AGENT_ATLAS="Atlas|https://atlas.example/|sha256:<hex>"
+```
 
-21 tools: adoption, browser/workspace discovery/wait, workspace tab listing and
-creation, human handoff, and the existing 15 page operations.
-Every operation addresses an explicit opaque tab handle; never a current-tab
-default or raw CDP method.
+Restart the service after changing agents. Configure the agent's MCP client
+with an HTTP transport, the URL above and `Authorization: Bearer <key>`. Allow
+long tool calls (about 600 s) because pairing, session approval and help requests
+wait for a person.
 
-Useful explanations are required: at least 40 trimmed Unicode code points,
-at most 500 raw code points. Routine page calls have no human-approval timeout;
-element/page readiness and bounded execution/cancellation still apply.
+## MCP tools
 
-Snapshots/reads default to 4000 characters, 50 elements, 16KiB textual MCP content
-wrapper; hard limit64KiB and inspector4KiB. Truncation is explicit. Scripts and
-mutation receipts fail oversized rather than returning partial JSON.
-Ref/document bindings, actionability checks, DOM-only input and CSP refusals remain.
+24 tools: `pair_browser`, `list_browsers`, `request_session`, `list_sessions`,
+`end_session`, `list_tabs`, `create_tab`, `report_progress`,
+`request_handoff`, and 15 page operations (`get_page_snapshot`, `get_text`,
+`get_interactive_elements`, `inspect_element`, `click`, `type_text`,
+`select_option`, `set_checked`, `press_key`, `scroll`, `navigate`,
+`wait_for_page`, `evaluate_script`, `get_screenshot`, `clear_overlays`).
 
-Uninspectable viewers report `DOCUMENT_NOT_CONTROLLABLE` with safe diagnostics
-and reduced navigation capability; they do not justify a privileged bypass or
-repeating a POST. Protected management origins and invalid destinations remain
-prohibited. No new URL/site allowlists. The user's earlier httpbin permission
-refusal remains an open platform/profile-specific acceptance case, not claimed
-universally fixed.
+Page operations take a server-issued `tab_id` (such as `t12`) and a 40–500
+character `description` that the user sees in the activity feed. Output limits,
+DOM-only input, script worlds (`MAIN`/`USER_SCRIPT`), protected origins and
+"never replay an uncertain mutation" (`OUTCOME_UNKNOWN`) carry over from v5.
+`request_session` fails immediately with `BROWSER_OFFLINE` if the browser's window
+is closed; pick another browser from `list_browsers`.
 
-## Self-hosting and administration
+## Self-hosting
 
-Node22.13+. Operator CLI provisions separately revocable clients/devices.
-Remote administration is disabled unless a strong static operator secret is
-configured via protected environment or restricted file. No OIDC runtime and
-no browser-user account/membership ceremony.
+Node 22.13+. See [service configuration and CLI](domagent-mcp/README.md) and
+[deployment examples](deployment/).
 
 ```sh
 npm --prefix domagent-mcp ci --ignore-scripts
 npm --prefix domagent-extension ci --ignore-scripts
 npm --prefix domagent-extension/ui ci --ignore-scripts
-npm --prefix domagent-mcp test
-npm --prefix domagent-mcp run build
-npm --prefix domagent-mcp run check
-DOMAGENT_DB=/private/path/domagent.db node domagent-mcp/admin.js client create "Atlas"
+npm --prefix domagent-mcp test           # server, extension and UI unit tests
+npm --prefix domagent-mcp run build      # dist/chrome and dist/firefox
+npm --prefix domagent-mcp run check      # JavaScript syntax
 ```
 
-See [service CLI/API](domagent-mcp/README.md),
-[security and deployment](docs/SECURE-PAIRING.md),
-[workspace protocol](docs/COLLABORATIVE-BROWSING.md),
-[browser qualification](domagent-extension/test/README.md).
+Real-browser tests run in the Playwright container; see
+[the test README](domagent-extension/test/README.md).
 
-## Independent extension frontend
+## Security model in brief
 
-The extension uses its own [UI package](domagent-extension/ui/package.json):
-Preact, signals, strict TypeScript and a type-check-first esbuild build.
-Native system typography/colors, supported Firefox sidebar-theme values, a keyboard task
-selector and an overflow actions menu adapt BananaClaw's UI patterns without any
-cross-project imports, shared dependency tree, backend or runtime requirement.
-License notices are included in both extension packages; no custom fonts, CDN
-or remote UI assets are used. Firefox theme updates are read without changing
-the browser theme; Chrome uses native system color/font fallbacks.
+- A browser registers itself with a non-extractable P-256 key. A rotating,
+  key-bound refresh token yields 10-minute access tokens for the WebSocket.
+  Registration alone grants nothing.
+- Pairing requires a code shown in the browser plus a local **Approve** of the
+  operator-configured agent name. Every session needs another local approval.
+- Agents only ever see their own browsers, sessions and tabs. Unknown and
+  foreign IDs both return `NOT_FOUND`.
+- Tabs at protected origins (the DomAgent server plus `DOMAGENT_PROTECTED_ORIGINS`)
+  are never shared, and navigation to them is blocked.
+- Closing the window disconnects, then detaches the debugger and removes
+  protection rules.
 
-The sidebar has a spacious session-local activity feed with agent intent and
-queued/ready/running/complete/stopped/error/uncertain/human-help indicators.
-Scope approval is explicitly Allow all; no per-action approval policy/buttons
-are introduced. Intent stays in memory (bounded to 200 records), separate from
-metadata-only durable diagnostic history, and is cleared across client switches.
-Complete is a tool receipt, not a claim that every website effect persisted.
-
-Controlled ordinary pages get a noninteractive viewport frame using packaged
-user-origin CSS, removed on Pause/End/scope loss and refreshed after navigation.
-The frame changes no layout and captures no pointer events. Pages can remove or
-spoof this cosmetic indicator: it is never consent or authority. Native group/
-toolbar indicators remain available for refused/protected documents and frame
-failures; cosmetic work never delays control teardown or heartbeat. The frame is
-best effort: fullscreen/top-layer content or page DOM changes can hide it.
-
-The sidebar derives one current status and main action from transport, task and
-fresh-activation acknowledgement. **Continue** can reconnect and activate the
-selected actual native group in one deliberate local click. Reconnect alone,
-native restoration and selecting a group never grant control. Pause remains
-resumable; End retains the tabs. Secondary task actions, connection settings and
-historical diagnostics do not compete with the main action. Unconfirmed past
-actions remain in Diagnostics and must be checked before repeating them.
-
-Run `npm --prefix domagent-extension/ui run typecheck` or `npm --prefix
-domagent-extension/ui test` independently. The coordinated `domagent-mcp` build
-checks UI types and packages both browsers; its test command also runs the UI
-state tests. These commands require only this checkout and its three independent lockfiles.
-
-## Native scripting and richer diagnostics
-
-Firefox requires **153+** and uses Manifest V3. Updating in the same profile
-preserves the extension ID, IndexedDB device keys and pairing; the first Run/
-Continue can request the optional `userScripts` permission. Firefox requires it
-alone: existing installs normally grant it with one click; when both scripting
-and website access are missing, a second fresh click grants website access.
-No task starts after only the first grant. Chrome remains145+;
-`USER_SCRIPT` additionally needs **Allow user scripts** enabled in the extension's
-browser settings. These are setup permissions, not per-action approvals.
-
-`evaluate_script` accepts `world: "MAIN" | "USER_SCRIPT"` (defaultMAIN).
-MAIN accesses page globals; USER_SCRIPT shares the DOM but has isolated globals,
-an extension-configured user-script CSP and no privileged extension APIs/messaging.
-Firefox browser-compiles source instead of calling page eval. Chrome MAIN retains
-its constrained debugger evaluator. Modes never silently switch/retry. Browser-
-internal/protected pages and refused documents remain excluded. Source limits
-remain65536 UTF-16 units, output16KiB default/64KiB maximum.
-
-Errors carry sanitized exception/message/stack/cause diagnostics, validation
-fields/limits and execution phase; credentials/headers/URL secrets are redacted,
-truncation explicit and diagnostics are not copied into activity logs.
-`wait_for_page` optionally accepts `content_selector`: one shared timeout waits
-for document readiness plus a visible match (use a row OR an empty-state marker).
-Without it, loaded means document-ready only. `type_text` uses browser editing
-commands for contenteditable and checks bounded post-event DOM reconciliation;
-this is not proof of server persistence or native keystrokes. Human handoff can
-include `suggested_text` with explicit Copy; Copy does not send or mean Done.
-Old5.0.4 peers retain their stricter sidebar behavior and ordinary calls, but new
-world/content/handoff fields require5.0.5 or return UPGRADE_REQUIRED before dispatch.
-No collection/batch/iteration tools or background jobs were added.
-
-Shared-profile scripts can read page data and cause account actions. Pause/End
-cannot undo sent requests, scheduled effects in other contexts or site workers.
-Metadata history is a bounded commands/observed-events log, not a complete audit.
+Scripts run with your logins and can read page data or act on your accounts.
+Ending a session can't undo requests that already happened.

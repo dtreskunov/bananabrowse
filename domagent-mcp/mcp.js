@@ -1,109 +1,135 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TARGET_ID_SCHEMA, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA,
-  schemaArgumentErrors, waitErrorDetails, inspectionErrorDetails } from '../shared/protocol.js';
+import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TAB_ID_SCHEMA, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA,
+  BROWSER_ID_SCHEMA, SESSION_ID_SCHEMA, SESSION_TAB_LIMIT, schemaArgumentErrors, waitErrorDetails,
+  inspectionErrorDetails } from '../shared/protocol.js';
 import { sanitizeDiagnostics } from '../shared/diagnostics.js';
 import { Fault, requireValue, requireArguments, validationDetails, dispatchDetails, failureCode, audit } from './errors.js';
 import { compactResult, textResult } from '../shared/results.js';
-import { RateLimiter } from './rate.js';
 import { SERVICE_VERSION } from './version.js';
 
 const NOTES = {
   get_page_snapshot: 'Preferred first read. Compact DOM summary: 4000 text characters, 50 elements and 16 KiB by default. Narrow with selector; check explicit truncation. Field values are redacted.',
-  get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. Non-rendered content is not exposed. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
-  get_interactive_elements: 'Prefer snapshots for actionable refs. Geometry is viewport-relative; in_viewport and disabled/readonly/editable matter. Hidden inputs are excluded. Explicit truncation.',
+  get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
+  get_interactive_elements: 'Prefer snapshots for actionable refs. Geometry is viewport-relative. Hidden inputs are excluded. Explicit truncation.',
   click: 'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events.',
-  inspect_element: 'Immediate read-only readiness diagnosis; no timeout_ms. Does not focus/scroll/mutate. State/reason, geometry, redacted flags and visible reveal_controls are suggestions, never automatic clicks. Associated visible labels may activate styled checkboxes. Hard output cap 4 KiB.',
+  inspect_element: 'Immediate read-only readiness diagnosis; no timeout_ms. Does not focus/scroll/mutate. Hard output cap 4 KiB.',
   type_text: 'Replace an editable value; dispatch DOM input/change, not native keystrokes.',
-  set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label. Disabled inputs, hidden ancestors, obstructions and replacement labels fail.',
+  set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
-  navigate: 'Navigate the authorized tab to ordinary HTTP(S), including from blank/browser-owned navigation-only documents. Protected destinations are blocked. navigation_started is not proof of loaded content. Never navigate just to test an account.',
-  wait_for_page: 'Wait for this tab to settle; optionally require at least one visible content_selector match. Returns loaded URL/document. Never replays navigation or POST.',
-  evaluate_script: 'Only for focused data absent from snapshots. JavaScript expression/source, not a function body: document.title works; top-level return does not. Source is limited to 65536 UTF-16 code units, not lines. MAIN is the default world; USER_SCRIPT requires native support and local enablement, without fallback. Page CSP may refuse. Default 16 KiB/hard 64 KiB; oversized JSON fails, never partial success. Syntax/runtime/serialization/policy errors are distinct. Never return credentials or bypass CSP.',
+  navigate: 'Navigate the tab to ordinary HTTP(S), including from blank/browser-owned documents. Protected destinations are blocked. navigation_started is not proof of loaded content.',
+  wait_for_page: 'Wait for this tab to settle; optionally require a visible content_selector match. Never replays navigation or POST.',
+  evaluate_script: 'Only for focused data absent from snapshots. JavaScript expression/source, not a function body: document.title works; top-level return does not. MAIN is the default world; USER_SCRIPT requires native support. Page CSP may refuse. Default 16 KiB/hard 64 KiB.',
 };
 const description = { type: 'string', minLength: 40, maxLength: 500,
-  description: 'Useful explanation of the actual action. Minimum 40 Unicode code points after trimming; maximum 500 code points including surrounding whitespace. Length is not proof of consent.' };
-const id = { type: 'string', format: 'uuid' };
+  description: 'What this action does and why, shown to the user in the DomAgent activity feed. 40–500 Unicode code points.' };
 const humanWait = { type: 'integer', minimum: 1, maximum: HUMAN_WAIT_MS / 1000, default: 300 };
 const schema = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
-const target = { ...TARGET_ID_SCHEMA, description: 'Opaque authorized tab handle from list_workspace_tabs/create_workspace_tab. Shape alone never authorizes access.' };
+const urlField = { type: 'string', minLength: 1, maxLength: 2048 };
+const session = { ...SESSION_ID_SCHEMA, description: 'Session ID from request_session or list_sessions.' };
 export const tools = [
-  { name: 'adopt_browser', description: 'Propose binding for an extension-generated five-minute pairing code using this authenticated client. User confirms locally. No browser private receipt, key or application credential is returned. Retries are idempotent; unavailable codes are non-enumerating.',
-    inputSchema: schema({ pairing_code: { type: 'string', minLength: 8, maxLength: 16 } }) },
-  { name: 'list_browser_workspaces', description: 'List only this client’s bound devices and workspace lifecycle. service_epoch/service_started_at and connection_id distinguish restart/reconnect. Inactive summaries retain bounded end_reason/ended_at; last_session_end is extension-reported diagnostic context, not authority. browser_info is self-reported, not attestation. Offline/paused/inactive do not imply permission. No unrelated tab enumeration.',
+  { name: 'pair_browser', description: 'Pair this agent with a browser using the 8-character code the user reads from their DomAgent window (for example K7MP-4QTX). Waits until the user approves or declines in that window. Codes expire after five minutes and are single use. Returns the browser_id.',
+    inputSchema: schema({ code: { type: 'string', minLength: 8, maxLength: 16 }, timeout_seconds: humanWait }, ['code']) },
+  { name: 'list_browsers', description: 'Browsers paired with this agent: browser_id, user-chosen name and whether its DomAgent window is open (online). Only online browsers can start sessions.',
     inputSchema: schema({}) },
-  { name: 'wait_for_workspace', description: 'Request browser access on this bound device and wait for local approval. Immediate if already active; otherwise the paired extension shows a coalesced notification and trusted control prompt. The user chooses a task group and Continue or Decline. Default300/max600seconds. Notification click alone never grants control or overrides Pause. Offline browsers are notified after reconnect; old peers require an extension update.',
-    inputSchema: schema({ device_id: id, description, timeout_seconds: humanWait }, ['device_id','description']) },
-  { name: 'list_workspace_tabs', description: 'Current active workspace tabs only, with explicit handles/title/URL, effective capabilities, page_state and execution_state. Removed/paused tabs have no current authority.',
-    inputSchema: schema({ workspace_id: id }) },
-  { name: 'create_workspace_tab', description: 'Create one fresh background tab in the active native workspace group. No existing-tab adoption or focus stealing. Eight-tab capacity, protected destinations and signed publication enforced. An uncertain result must never be automatically retried.',
-    inputSchema: schema({ workspace_id: id, url: { type: 'string', minLength: 1, maxLength: 2048 }, description }, ['workspace_id','description']) },
-  { name: 'request_handoff', description: 'Ask for human assistance via a generic global browser system notification and toolbar pending indicator. Wait for explicit Done/Cancel; click/dismissal is not Done. Only this target tab blocks. NOTIFICATION_UNAVAILABLE means notification API delivery failed, not that the user saw an alert.',
-    inputSchema: schema({ target_id: target, description, wait_timeout_seconds: humanWait, ...HANDOFF_SCHEMA.properties }, ['target_id','description']) },
+  { name: 'request_session', description: `Ask the user to open a browser session (a native tab group) for a task. The user sees your purpose and starting URLs and approves or declines in their DomAgent window. Fails immediately with BROWSER_OFFLINE if the browser's window is closed; try another browser from list_browsers. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns the session and its tabs.`,
+    inputSchema: schema({ browser_id: BROWSER_ID_SCHEMA,
+      purpose: { type: 'string', minLength: 1, maxLength: 500, description: 'Why you need the browser, shown to the user. Plain text.' },
+      urls: { type: 'array', maxItems: SESSION_TAB_LIMIT, items: urlField },
+      title: { type: 'string', minLength: 1, maxLength: 80, description: 'Tab group title. Defaults to the agent name.' },
+      timeout_seconds: humanWait }, ['browser_id', 'purpose']) },
+  { name: 'list_sessions', description: 'Your sessions. state is attached (usable) or detached (browser window closed or reattach pending). Sessions survive up to 7 days while their tab group exists; one ends when the user closes or ungroups its tab group.',
+    inputSchema: schema({}) },
+  { name: 'end_session', description: 'End a session. Its tabs are ungrouped and stay open.',
+    inputSchema: schema({ session_id: session }) },
+  { name: 'list_tabs', description: 'Tabs in an attached session with tab_id, title, URL, page_state, capabilities and execution_state. Every tab in the session tab group is in scope, including tabs the user drags in and tabs a site opens from a grouped tab.',
+    inputSchema: schema({ session_id: session }) },
+  { name: 'create_tab', description: `Open a new background tab in the session tab group (maximum ${SESSION_TAB_LIMIT}). Never steals focus. Do not retry automatically after an uncertain result.`,
+    inputSchema: schema({ session_id: session, url: urlField, description }, ['session_id', 'description']) },
+  { name: 'report_progress', description: 'Post a short progress update to the user\'s DomAgent activity feed for this session.',
+    inputSchema: schema({ session_id: session, message: { type: 'string', minLength: 1, maxLength: 500 } }) },
+  { name: 'request_handoff', description: 'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the DomAgent window. Only this tab waits; others can keep working.',
+    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait }, ['tab_id', 'instructions']) },
   ...OPERATIONS.map(name => ({ name,
-    description: `${name} in an explicitly grouped tab of an active leased workspace. No routine approval prompt. ${NOTES[name] || ''}`,
-    inputSchema: { ...schema({ target_id: target, ...OPERATION_SCHEMAS[name].properties, description },
-      ['target_id','description', ...OPERATION_SCHEMAS[name].required]),
+    description: `${name} in a session tab. ${NOTES[name] || ''}`.trim(),
+    inputSchema: { ...schema({ tab_id: TAB_ID_SCHEMA, ...OPERATION_SCHEMAS[name].properties, description },
+      ['tab_id', 'description', ...OPERATION_SCHEMAS[name].required]),
       ...(OPERATION_SCHEMAS[name].anyOf ? { anyOf: OPERATION_SCHEMAS[name].anyOf } : {}) },
   })),
 ];
-export const INSTRUCTIONS = 'When no workspace is active, choose the intended bound device from list_browser_workspaces and call wait_for_workspace. The paired extension notifies the user and presents local Continue/Decline; do not merely tell the user to find a sharing control. A notification or its click is not browser authority. Cancellation/decline must not trigger repeated requests. ' +
-  'DomAgent v5 requires matched v5 extensions. The actual native tab group plus an explicit user-started Run with a fresh workspace lease defines authority, not foreground focus or an allowlist. The task-group-run-v1 consent policy keeps Run independent of sidebar visibility. Existing 5.0.4 pairing and credentials remain valid; older extensions may retain stricter sidebar-dependent behavior. Update the extension to 5.0.5 for the new Run policy and features. Page tools require target_id and a useful 40–500 Unicode-code-point description; no ordinary human approval waits. Pause/End/disconnect/lease loss stop unstarted work and leave tabs intact. Resume needs a fresh activation; cancelled work never replays. A running mutation may finish and cannot be undone; OUTCOME_UNKNOWN must not be retried automatically. ' +
-  'Start with list_browser_workspaces and list_workspace_tabs. Compare service_epoch/connection_id and workspace end_reason after interruption. SERVICE_RESTARTED or CONNECTION_LOST needs local Start/Resume, not re-pairing, credential replacement or automatic grant renewal. Old handles/tombstones do not persist across server restart; unknown handles can still return NOT_AUTHORIZED. A reconnecting updated extension can republish only inactive empty workspace summaries with no authority; last_session_end source extension_reported is diagnostic context. Pause/removal lifecycle remains caller-scoped; never replay cancelled work. Browser versions are self-reported diagnostics, not attestation. Uninspectable documents may retain navigation-only authority; DOCUMENT_NOT_CONTROLLABLE does not itself end the workspace or handle. Use capabilities and fresh signed metadata; never replay POST, bypass native viewers/CSP, or inject into protected management pages. ' +
-  'Snapshot/text output defaults to 16 KiB (64 KiB hard UTF-8 serialized MCP text-wrapper cap), 4000 characters/50 elements, with explicit truncation. inspect_element is 4 KiB. Arbitrary script/mutation receipts cannot be partially successful. Narrow reads; use snapshot refs bound to document. Human assistance uses a generic system notification; OS do-not-disturb can suppress a successfully created alert. Only explicit Done completes a handoff, and it blocks only its tab. No tool activates a sidebar, resumes Pause, regroups existing tabs or broadens access.';
+export const INSTRUCTIONS = 'DomAgent v6 lets you work in the user\'s real browser inside tab groups they approve. ' +
+  'First use: ask the user to open the DomAgent window (toolbar button), click Pair an agent and tell you the code; call pair_browser. ' +
+  'Then: list_browsers -> request_session(browser_id, purpose, urls) -> the user approves -> use tab_ids with page tools. ' +
+  'If the browser is offline the user has closed the DomAgent window; ask them to reopen it or choose another browser. ' +
+  'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
+  'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
+  'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user.';
 
-export async function callTool(name, args, client, bridge, signal) {
+function validateUrls(args) {
+  if (!Object.hasOwn(args, 'urls')) return [];
+  const urls = args.urls;
+  if (!Array.isArray(urls)) return [{ field: 'urls', reason: 'expected_array' }];
+  if (urls.length > SESSION_TAB_LIMIT) return [{ field: 'urls', reason: 'too_long', limits: { maximum: SESSION_TAB_LIMIT } }];
+  return urls.flatMap((url, index) => schemaArgumentErrors({ properties: { url: urlField } }, { url })
+    .map(error => ({ ...error, field: `urls[${index}]` })));
+}
+
+export async function callTool(name, args, agent, hub, signal) {
   try {
-    requireValue(bridge.store.client(client.id, client.tenant_id)?.credential_hash === client.credential_hash,
-      'NOT_AUTHORIZED', 403);
+    requireValue(hub.agents.get(agent.id) === agent, 'NOT_AUTHORIZED', 401);
     const tool = tools.find(t => t.name === name);
     requireValue(tool, 'UNKNOWN_TOOL');
     const properties = { ...tool.inputSchema.properties };
     if (Object.hasOwn(properties, 'description')) properties.description = DESCRIPTION_SCHEMA;
-    requireArguments(schemaArgumentErrors({ ...tool.inputSchema, properties }, args));
+    if (name === 'request_handoff') properties.instructions = HANDOFF_SCHEMA.properties.instructions;
+    const urls = Object.hasOwn(properties, 'urls');
+    delete properties.urls;
+    const scalar = urls ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'urls')) : args;
+    requireArguments([...schemaArgumentErrors({ ...tool.inputSchema, properties,
+      required: tool.inputSchema.required }, scalar), ...(urls ? validateUrls(args) : [])]);
     let result;
-    if (name === 'adopt_browser') {
-      bridge.adoptionRates ||= new RateLimiter(bridge.now);
-      bridge.adoptionRates.take(`adopt:${client.id}`, 20);
-      bridge.adoptionRates.take('adopt:global', 200);
-      result = bridge.store.adopt(client.id, client.tenant_id, args.pairing_code);
-    } else if (name === 'list_browser_workspaces') result = bridge.listWorkspaces(client.id, client.tenant_id);
-    else if (name === 'list_workspace_tabs') result = bridge.listTabs(client.id, args.workspace_id, client.tenant_id);
-    else if (name === 'wait_for_workspace') {
-      const seconds = args.timeout_seconds ?? 300;
-      result = await bridge.waitWorkspace(client.id, args.device_id, args.description, seconds * 1000, signal, client.tenant_id);
-    } else if (name === 'create_workspace_tab') {
-      result = await bridge.createTab(client.id, args.workspace_id, args.url === undefined ? {} : { url: args.url },
-        args.description, signal, client.tenant_id);
+    if (name === 'pair_browser') result = await hub.pairBrowser(agent.id, args.code, (args.timeout_seconds ?? 300) * 1000, signal);
+    else if (name === 'list_browsers') result = hub.listBrowsers(agent.id);
+    else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
+    else if (name === 'list_sessions') result = hub.listSessions(agent.id);
+    else if (name === 'end_session') result = hub.endSessionByAgent(agent.id, args.session_id);
+    else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id);
+    else if (name === 'create_tab') {
+      result = await hub.createTab(agent.id, args.session_id, args.url === undefined ? {} : { url: args.url },
+        args.description, signal);
+    } else if (name === 'report_progress') result = hub.reportProgress(agent.id, args.session_id, args.message);
+    else if (name === 'request_handoff') {
+      const { tab_id, timeout_seconds, ...handoff } = args;
+      result = await hub.operate(agent.id, tab_id, name, handoff, null, (timeout_seconds ?? 300) * 1000, signal);
     } else {
-      const { target_id, description: intent, wait_timeout_seconds, ...operationArgs } = args;
-      const seconds = wait_timeout_seconds ?? 300;
-      result = await bridge.operate(client.id, target_id, name, operationArgs, signal, client.tenant_id, intent, seconds * 1000);
+      const { tab_id, description: intent, ...operationArgs } = args;
+      result = await hub.operate(agent.id, tab_id, name, operationArgs, intent, 0, signal);
     }
     if (name === 'get_screenshot') {
       requireValue(result?.mimeType === 'image/png' && typeof result.data === 'string' &&
         result.data.length <= 8 * 1024 * 1024 && /^[A-Za-z0-9+/]*={0,2}$/.test(result.data) &&
-        Buffer.from(result.data, 'base64').subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), 'INVALID_RESULT');
+        Buffer.from(result.data, 'base64').subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'INVALID_RESULT');
       return { content: [{ type: 'image', data: result.data, mimeType: 'image/png' }] };
     }
     try { return textResult(compactResult(name, result, args)); }
     catch (error) {
-      if (['RESULT_TOO_LARGE','INVALID_RESULT','INVALID_ARGUMENT'].includes(error.code)) throw new Fault(error.code);
+      if (['RESULT_TOO_LARGE', 'INVALID_RESULT', 'INVALID_ARGUMENT'].includes(error.code)) {
+        throw new Fault(error.code);
+      }
       throw error;
     }
   } catch (error) {
     const code = failureCode(error);
-    audit('mcp_tool_failure', { client_id: client.id, code, ...inspectionErrorDetails(error) });
+    audit('mcp_tool_failure', { agent_id: agent.id, code, ...inspectionErrorDetails(error) });
     const diagnostics = sanitizeDiagnostics(error?.diagnostics);
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({
-      error: code, ...(code === 'INVALID_ARGUMENTS' ? { code } : {}),
-      ...validationDetails(error), ...waitErrorDetails(error), ...inspectionErrorDetails(error), ...dispatchDetails(error),
-      ...(diagnostics ? { diagnostics } : {}),
+      error: code, ...validationDetails(error), ...waitErrorDetails(error), ...inspectionErrorDetails(error),
+      ...dispatchDetails(error), ...(diagnostics ? { diagnostics } : {}),
     }) }] };
   }
 }
-export async function handleMcp(req, res, body, client, bridge) {
+export async function handleMcp(req, res, body, agent, hub) {
   const disconnected = new AbortController();
   const closed = () => { if (!res.writableFinished) disconnected.abort(); };
   res.on('close', closed);
@@ -112,14 +138,14 @@ export async function handleMcp(req, res, body, client, bridge) {
   });
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, (request, extra) => callTool(request.params.name,
-    request.params.arguments || {}, client, bridge, AbortSignal.any([disconnected.signal, extra.signal])));
+    request.params.arguments || {}, agent, hub, AbortSignal.any([disconnected.signal, extra.signal])));
   const streaming = body?.method === 'tools/call' &&
-    ['wait_for_workspace','request_handoff'].includes(body.params?.name);
+    ['pair_browser', 'request_session', 'request_handoff'].includes(body.params?.name);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: !streaming });
   const keepalive = streaming ? setInterval(() => {
     if (res.headersSent && !res.writableEnded && !res.destroyed &&
       String(res.getHeader('content-type')).startsWith('text/event-stream') && !res.writableNeedDrain) {
-      res.write(': waiting for human interaction\n\n');
+      res.write(': waiting for the user\n\n');
     }
   }, 15_000) : null;
   keepalive?.unref();

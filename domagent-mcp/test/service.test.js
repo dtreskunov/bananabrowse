@@ -1,482 +1,375 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { randomUUID } from 'node:crypto';
-import { WebSocket } from 'ws';
-import { tools, callTool } from '../mcp.js';
-import { Store, hash, token } from '../store.js';
-import { authPayload, sign, validDescription, workspacePayload, OPERATIONS } from '../../shared/protocol.js';
-import { BridgeServer } from '../server.js';
-import { fixture, appFixture, keys, bind, tab, flush, capture, responseMessage, post,
-  ORIGIN, EXTENSION, DESCRIPTION } from './helpers.js';
+import { start, paired, FakeExtension, DESCRIPTION, AGENT_KEY, OTHER_KEY, THIRD_KEY, delay, ORIGIN } from './helpers.js';
+import { parseAgents, loadConfig } from '../config.js';
+import { hash } from '../store.js';
+import { tools } from '../mcp.js';
 
-test('v5 catalogue has exactly 21 scoped tools, Unicode policy and no old approval schema', () => {
-  assert.equal(tools.length, 21);
-  assert.equal(new Set(tools.map(t => t.name)).size, 21);
-  for (const name of OPERATIONS) {
-    const t = tools.find(t => t.name === name);
-    assert(!Object.hasOwn(t.inputSchema.properties, 'wait_timeout_seconds'));
-    assert(t.inputSchema.required.includes('description'));
-    assert(t.inputSchema.required.includes('target_id'));
-    assert.equal(t.inputSchema.additionalProperties, false);
-  }
-  assert(!tools.some(t => ['list_browser_targets','request_browser_access'].includes(t.name)));
-  assert(tools.find(t => t.name === 'request_handoff').inputSchema.properties.wait_timeout_seconds);
-  for (const char of ['a','界','😀']) {
-    assert(!validDescription(char.repeat(39))); assert(validDescription(char.repeat(40)));
-    assert(validDescription(char.repeat(500))); assert(!validDescription(char.repeat(501)));
-    assert(validDescription(` ${char.repeat(498)} `)); assert(!validDescription(` ${char.repeat(499)} `));
-    assert(!validDescription(` ${char.repeat(39)} `));
-  }
+const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
+
+test('public metadata and the 24-tool catalogue', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const health = await (await fetch(`${fixture.base}/health`)).json();
+  assert.equal(health.protocol_version, 6);
+  const metadata = await (await fetch(`${fixture.base}/.well-known/domagent`)).json();
+  assert.deepEqual([metadata.service, metadata.origin], ['domagent', ORIGIN]);
+  const agent = await fixture.mcp();
+  const listed = await agent.client.listTools();
+  assert.equal(listed.tools.length, 24);
+  assert.deepEqual(listed.tools.slice(0, 9).map(tool => tool.name), ['pair_browser', 'list_browsers', 'request_session',
+    'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'report_progress', 'request_handoff']);
+  assert.equal(tools.length, 24);
 });
 
-test('HTTP MCP credentials, exact tenant endpoint, Origin and public metadata remain isolated', async () => {
-  const f = await appFixture();
-  try {
-    const a = f.store.createClient('A'), b = f.store.createClient('B');
-    const metadata = await (await fetch(`${f.base}/.well-known/domagent`)).json();
-    assert.equal(metadata.protocol_version, 5); assert.equal(metadata.version, '5.0.0-beta.10');
-    const health = await (await fetch(`${f.base}/health`)).json();
-    assert.deepEqual(health, { service: 'domagent', status: 'ok', version: '5.0.0-beta.10', protocol_version: 5 });
-    assert(!JSON.stringify(metadata).includes('oidc'));
-    const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
-    for (const [credential, tenant, extra] of [
-      [a.credential,b.tenant_id,{}], ['x'.repeat(43),a.tenant_id,{}],
-      [a.credential,a.tenant_id,{ Origin: 'https://attacker.test' }],
-    ]) {
-      const response = await post(f.base, `/mcp/${tenant}`, request,
-        { Authorization: `Bearer ${credential}`, Accept: 'application/json, text/event-stream', ...extra });
-      assert([401,403].includes(response.status)); assert.equal((await response.json()).error, 'NOT_AUTHORIZED');
-    }
-    const response = await post(f.base, `/mcp/${a.tenant_id}`, request,
-      { Authorization: `Bearer ${a.credential}`, Accept: 'application/json, text/event-stream' });
-    assert.equal(response.status, 200); assert.equal((await response.json()).result.tools.length, 21);
-    const initialized = await post(f.base, `/mcp/${a.tenant_id}`,
-      { jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2025-03-26',
-        capabilities: {}, clientInfo: { name: 'test', version: '1' } } },
-      { Authorization: `Bearer ${a.credential}`, Accept: 'application/json, text/event-stream' });
-    assert.equal((await initialized.json()).result.serverInfo.version, '5.0.0-beta.10');
-    assert.equal((await fetch(`${f.base}/mcp/${a.tenant_id}`)).status, 405);
-    assert.equal((await post(f.base, '/api/setup-requests', { agent_name: 'A' })).status, 404);
-  } finally { await f.close(); }
+test('agent authentication uses the path ID and a hashed bearer key', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const post = (path, key) => fetch(`${fixture.base}${path}`, { method: 'POST', headers: {
+    'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${key}` },
+  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
+  assert.equal((await post('/mcp/atlas', AGENT_KEY)).status, 200);
+  assert.equal((await post('/mcp/atlas', OTHER_KEY)).status, 401);
+  assert.equal((await post('/mcp/nobody', AGENT_KEY)).status, 401);
+  assert.equal((await post('/mcp/atlas', '')).status, 401);
 });
 
-test('real WSS rejects wire4, wrong Origin and replayed proof; v5 returns only client binding', async () => {
-  const f = await appFixture();
-  try {
-    const created = f.store.createClient('Atlas'), client = f.store.client(created.id);
-    const key = await keys(), device = bind(f.store, client, key);
-    const connect = async () => {
-      const ws = new WebSocket(`${f.base.replace('http:', 'ws:')}/extension/${client.tenant_id}`, { origin: EXTENSION });
-      const queue = [], waiting = [];
-      ws.on('message', data => { const m = JSON.parse(data); if (waiting.length) waiting.shift()(m); else queue.push(m); });
-      const next = () => queue.length ? Promise.resolve(queue.shift()) : new Promise(resolve => waiting.push(resolve));
-      await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
-      return { ws, next, send: value => ws.send(JSON.stringify({ tenant_id: client.tenant_id, ...value })) };
-    };
-    let c = await connect();
-    c.send({ type: 'hello', version: 4, key_id: key.key_id });
-    assert.equal((await c.next()).code, 'UPGRADE_REQUIRED'); c.ws.terminate();
-    c = await connect();
-    c.send({ type: 'hello', version: 5, key_id: key.key_id });
-    const challenge = await c.next(), signature = await sign(key.key, authPayload(challenge));
-    c.send({ type: 'proof', signature });
-    const authenticated = await c.next();
-    assert.equal(authenticated.device_id, device.device_id); assert.equal(authenticated.client_id, client.id);
-    assert(!Object.hasOwn(authenticated, 'owner_id')); assert(!Object.hasOwn(authenticated, 'eligible_clients'));
-    c.send({ type: 'proof', signature }); assert.equal((await c.next()).code, 'INVALID_MESSAGE'); c.ws.terminate();
-    const wrong = new WebSocket(`${f.base.replace('http:', 'ws:')}/extension/${client.tenant_id}`, { origin: 'https://attacker.test' });
-    assert.match(await new Promise(resolve => wrong.once('error', error => resolve(error.message))), /403/);
-  } finally { await f.close(); }
+test('agent configuration parses env entries and rejects malformed ones', () => {
+  const agents = parseAgents({ DOMAGENT_AGENT_BANANA_CLAW: `Banana Claw|https://banana.example|sha256:${hash('k'.repeat(20))}` });
+  assert.deepEqual([...agents.keys()], ['banana-claw']);
+  assert.equal(agents.get('banana-claw').url, 'https://banana.example/');
+  assert.throws(() => parseAgents({ DOMAGENT_AGENT_X: 'X|' }), /INVALID_AGENT_CONFIG/);
+  assert.throws(() => parseAgents({ DOMAGENT_AGENT_X: 'X||md5:abc' }), /INVALID_AGENT_CONFIG/);
+  assert.throws(() => parseAgents({ DOMAGENT_AGENT_X: `X|javascript:alert(1)|sha256:${'0'.repeat(64)}` }), /INVALID_AGENT_CONFIG/);
+  const config = loadConfig({ DOMAGENT_ORIGIN: 'https://da.example', DOMAGENT_PROTECTED_ORIGINS: 'https://idp.example/x, https://a.example' });
+  assert.deepEqual(config.protectedOrigins, ['https://da.example', 'https://idp.example', 'https://a.example']);
+  assert.equal(config.agents.size, 0);
 });
 
-test('signed active snapshots expose only this client tabs; foreign handles are generic', async () => {
-  const f = await fixture();
-  try {
-    const other = f.store.createClient('Other');
-    assert.equal(f.authenticated.client_id, f.client.id);
-    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].tab_count, 1);
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id)[0].title, 'Tab 1');
-    assert.throws(() => f.bridge.listTabs(other.id, f.workspace.workspace_id, other.tenant_id), /NOT_AUTHORIZED/);
-    const result = await callTool('get_text', { target_id: f.workspace.tabs[0].target_id, description: DESCRIPTION },
-      f.store.client(other.id), f.bridge);
-    assert.equal(JSON.parse(result.content[0].text).error, 'NOT_AUTHORIZED');
-    assert.equal(f.ws.sent.at(-1).type, 'workspace.active');
-    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].browser_info.browser_version, '150.0');
-  } finally { f.close(); }
+test('browser registration, key-bound token refresh and rotated-token reuse revocation', async t => {
+  let now = 1_800_000_000_000;
+  const fixture = await start({ now: () => now }); t.after(() => fixture.close());
+  const extension = new FakeExtension(fixture.base);
+  const registered = await extension.register();
+  assert.match(registered.browser_id, /^b[0-9a-z]+$/);
+  assert(registered.access_token && registered.refresh_token);
+  const first = extension.refresh_token;
+  await extension.refresh();
+  assert.notEqual(extension.refresh_token, first);
+  // A lost response is tolerated briefly: the superseded token still works within the grace window.
+  extension.refresh_token = first;
+  await extension.refresh();
+  // Two generations back is neither current nor previous.
+  extension.refresh_token = first;
+  await assert.rejects(extension.refresh(), /NOT_AUTHORIZED/);
+  assert(fixture.store.browser(extension.browser_id));
+  // Reuse of a superseded token after the grace window revokes the browser outright.
+  const fresh = new FakeExtension(fixture.base);
+  await fresh.register();
+  const old = fresh.refresh_token;
+  await fresh.refresh();
+  now += 600_000;
+  fresh.refresh_token = old;
+  await assert.rejects(fresh.refresh(), /NOT_AUTHORIZED/);
+  assert.equal(fixture.store.browser(fresh.browser_id), undefined);
+  // Wrong key: a stolen refresh token alone is useless.
+  const thief = new FakeExtension(fixture.base);
+  await thief.register();
+  thief.browser_id = extension.browser_id;
+  await assert.rejects(thief.refresh(), /NOT_AUTHORIZED/);
 });
 
-test('workspace revisions, signatures, generation, tab uniqueness and target rebinding fail closed', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.sync(), /TARGET_STALE/);
-    const snapshot = { ...f.workspace, revision: 2, tabs: f.workspace.tabs };
-    snapshot.signature = await sign(f.key.key, workspacePayload({ ...snapshot, origin: ORIGIN,
-      epoch: f.bridge.epoch, connection_id: randomUUID() }));
-    await assert.rejects(f.bridge.message(f.session, snapshot), /NOT_AUTHORIZED/);
-    const original = f.workspace.tabs[0];
-    await assert.rejects(f.sync({ revision: 2, tabs: [original,{ ...tab(2), target_id: original.target_id }] }), /INVALID_WORKSPACE/);
-    await assert.rejects(f.sync({ revision: 2, tabs: [original,tab(1)] }), /INVALID_WORKSPACE/);
-    await assert.rejects(f.sync({ revision: 2, tabs: [{ ...original, tab_id: 99 }] }), /TARGET_STALE/);
-    await assert.rejects(f.sync({ revision: 2, tabs: [{ ...original, capabilities: ['not_a_tool'] }] }), /INVALID_WORKSPACE/);
-    await assert.rejects(f.sync({ revision: 2, tabs: [{ ...original, url: ORIGIN }] }), /NOT_AUTHORIZED/);
-    await assert.rejects(f.sync({ revision: 2, group_id: 2, tabs: [original] }), /INVALID_WORKSPACE/);
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
-  } finally { f.close(); }
+test('WebSocket authentication requires a live access token, the registered origin and a key proof', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const extension = new FakeExtension(fixture.base);
+  await extension.register();
+  const welcome = await extension.connect();
+  assert.equal(welcome.browser_id, extension.browser_id);
+  assert.deepEqual(welcome.agents, []);
+  const forged = new FakeExtension(fixture.base);
+  Object.assign(forged, { browser_id: extension.browser_id, key: (await crypto.subtle.generateKey({ name: 'ECDSA',
+    namedCurve: 'P-256' }, false, ['sign'])).privateKey, access_token: extension.access_token });
+  await assert.rejects(forged.connect(), /Timed out|closed/);
+  const wrongOrigin = new FakeExtension(fixture.base, { origin: 'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' });
+  Object.assign(wrongOrigin, { key: extension.key, browser_id: extension.browser_id, access_token: extension.access_token });
+  await assert.rejects(wrongOrigin.connect(), /Timed out|closed/);
+  extension.close();
 });
 
-test('lease expires at exactly five seconds; stale renewal cannot revive, fresh activation/handles can', async () => {
-  const f = await fixture();
-  try {
-    f.clock.value += 4999; f.bridge.sweep();
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
-    f.clock.value += 1; f.bridge.sweep();
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 0);
-    await assert.rejects(f.sync({ revision: 2 }), /WORKSPACE_INACTIVE/);
-    await assert.rejects(f.sync({ revision: 3, activation_id: randomUUID() }), /TARGET_STALE/);
-    await f.sync({ revision: 4, activation_id: randomUUID(), tabs: [tab(1)] });
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
-    await assert.rejects(f.sync({ revision: 5, lease_ms: 5001 }), /INVALID_WORKSPACE/);
-  } finally { f.close(); }
+test('pairing: extension code, agent proposal, local approval, decline and non-enumeration', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  assert.deepEqual((await extension.next('agents')).agents.map(a => a.id), ['atlas']);
+  assert.deepEqual(await agent.call('list_browsers'), [{ browser_id: extension.browser_id, name: "Bob's Chrome",
+    online: true, browser_info: { extension_version: '6.0.0', browser_name: 'chrome', browser_version: '150.0' } }]);
+  await assert.rejects(agent.call('pair_browser', { code: 'ZZZZ-ZZZZ' }), /PAIRING_UNAVAILABLE/);
+  const other = await fixture.mcp('orion', OTHER_KEY);
+  const code = await extension.pairingCode('AB12-CD34');
+  const declined = other.call('pair_browser', { code });
+  const proposal = await extension.next('pairing.proposal');
+  assert.equal(proposal.agent.name, 'Orion');
+  // A competing agent cannot hijack a proposal already shown to the user.
+  const third = await fixture.mcp('vega', THIRD_KEY);
+  await assert.rejects(third.call('pair_browser', { code }), /PAIRING_UNAVAILABLE/);
+  extension.send({ type: 'pairing.decision', request_id: proposal.request_id, approved: false });
+  await assert.rejects(declined, /ACTION_DECLINED/);
+  await assert.rejects(other.call('pair_browser', { code }), /PAIRING_UNAVAILABLE/);
+  assert.deepEqual(await other.call('list_browsers'), []);
+  extension.close();
 });
 
-test('inactive end reasons are signed, caller scoped and retained without resurrecting removed targets', async () => {
-  const f = await fixture();
-  try {
-    const old = f.workspace.tabs[0], foreign = f.store.createClient('Foreign');
-    assert.equal(f.authenticated.service_started_at, f.bridge.startedAt);
-    await f.sync({ revision: 2, state: 'paused', tabs: [], end_reason: 'USER_PAUSED' });
-    let listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
-    assert.equal(listed.service_epoch, f.bridge.epoch);
-    assert.equal(listed.connection_id, f.session.connection_id);
-    assert.equal(listed.workspaces[0].end_reason, 'USER_PAUSED');
-    assert.equal(listed.workspaces[0].ended_at, f.now());
-    assert.equal(listed.workspaces[0].tab_count, 0);
-    assert.deepEqual(f.bridge.listWorkspaces(foreign.id, foreign.tenant_id), []);
-    await assert.rejects(f.sync({ revision: 3, state: 'active', tabs: [tab(1)], end_reason: 'USER_ENDED' }), /INVALID_WORKSPACE/);
-    await assert.rejects(f.sync({ revision: 4, state: 'inactive', tabs: [], end_reason: 'private raw error' }), /INVALID_WORKSPACE/);
-    await f.sync({ revision: 5, state: 'inactive', tabs: [], end_reason: 'PANEL_CLOSED' });
-    listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
-    assert.equal(listed.workspaces[0].end_reason, 'PANEL_CLOSED');
-    await assert.rejects(f.bridge.operate(f.client.id, old.target_id, 'get_text', {}, null, f.client.tenant_id, DESCRIPTION), /WORKSPACE_PAUSED/);
-    await assert.rejects(f.bridge.operate(foreign.id, old.target_id, 'get_text', {}, null, foreign.tenant_id, DESCRIPTION), /NOT_AUTHORIZED/);
-    const forged = { ...f.workspace, revision: 6, end_reason: 'USER_ENDED' };
-    forged.signature = await sign(f.key.key, workspacePayload({ ...forged, end_reason: 'PANEL_CLOSED',
-      origin: ORIGIN, epoch: f.bridge.epoch, connection_id: f.session.connection_id }));
-    await assert.rejects(f.bridge.message(f.session, forged), /NOT_AUTHORIZED/);
-    f.clock.value += 600000; f.bridge.sweep();
-    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces.length, 0);
-  } finally { f.close(); }
+test('sessions: offline fails fast, approval creates a session with server-issued tab IDs', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  await assert.rejects(agent.call('request_session', { browser_id: 'b999', purpose: 'Test' }), /NOT_FOUND/);
+  await assert.rejects(agent.call('request_session', { browser_id: extension.browser_id, purpose: 'x',
+    urls: ['https://control.test/admin'] }), /HANDOFF_REQUIRED/);
+  await assert.rejects(agent.call('request_session', { browser_id: extension.browser_id, purpose: 'x',
+    urls: Array(9).fill('https://example.test/') }), /INVALID_ARGUMENTS/);
+  const declined = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Compare flights' });
+  const rejected = await extension.next('session.request');
+  extension.send({ type: 'session.decision', request_id: rejected.request_id, approved: false });
+  await assert.rejects(declined, /ACTION_DECLINED/);
+
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Compare flights',
+    urls: ['https://example.test/1'], title: 'Flights' });
+  const { request, created } = await extension.approveNext([page(11), page(12)]);
+  assert.deepEqual([request.purpose, request.title, request.urls, request.agent.id], ['Compare flights', 'Flights',
+    ['https://example.test/1'], 'atlas']);
+  assert(request.agent.color && request.agent.url === 'https://atlas.example/');
+  const session = await pending;
+  assert.equal(session.session_id, created.session_id);
+  assert.match(session.session_id, /^s[0-9a-z]+$/);
+  assert.equal(session.state, 'attached');
+  assert.deepEqual(session.tabs.map(tab => tab.tab_id).every(id => /^t[0-9a-z]+$/.test(id)), true);
+  assert.equal(session.tabs.length, 2);
+
+  extension.close();
+  await delay(50);
+  await assert.rejects(agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Again' }), /BROWSER_OFFLINE/);
+  assert.equal((await agent.call('list_sessions'))[0].state, 'detached');
+  await assert.rejects(agent.call('list_tabs', { session_id: session.session_id }), /BROWSER_OFFLINE/);
+  await assert.rejects(agent.call('get_text', { tab_id: session.tabs[0].tab_id, description: DESCRIPTION }), /BROWSER_OFFLINE/);
 });
 
-test('service restart generation plus inactive reconnect summary explains lost authority; fresh Resume alone can reactivate', async () => {
-  const f = await fixture();
-  const originalEpoch = f.bridge.epoch;
-  const priorWorkspace = { ...f.workspace }, oldTarget = f.workspace.tabs[0].target_id;
-  f.bridge.close();
-  const restarted = new BridgeServer(f.store, f.config);
-  const session = { ...f.session, connection_id: randomUUID(), authenticated: false, challenge: null,
-    workspaces: new Set(), usedTargets: new Set() };
-  try {
-    await restarted.message(session, { type: 'hello', tenant_id: f.client.tenant_id, version: 5, key_id: f.key.key_id });
-    const challenge = f.ws.sent.at(-1);
-    await restarted.message(session, { type: 'proof', tenant_id: f.client.tenant_id,
-      signature: await sign(f.key.key, authPayload(challenge)) });
-    assert.notEqual(restarted.epoch, originalEpoch);
-    assert.equal(restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces.length, 0);
-    await restarted.message(session, { type: 'session.status', tenant_id: f.client.tenant_id,
-      previous_service_epoch: originalEpoch, end_reason: 'SERVICE_RESTARTED' });
-    const summary = { ...priorWorkspace, revision: priorWorkspace.revision + 1,
-      state: 'inactive', tabs: [], activation_id: randomUUID(), end_reason: 'SERVICE_RESTARTED' };
-    const send = async value => restarted.message(session, { ...value,
-      signature: await sign(f.key.key, workspacePayload({ ...value, origin: ORIGIN,
-        epoch: restarted.epoch, connection_id: session.connection_id })) });
-    await send(summary);
-    const listed = restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0];
-    assert.equal(listed.last_session_end.reason, 'SERVICE_RESTARTED');
-    assert.equal(listed.last_session_end.source, 'extension_reported');
-    assert.equal(listed.workspaces[0].state, 'inactive');
-    assert.equal(listed.workspaces[0].tab_count, 0);
-    assert.deepEqual(restarted.listTabs(f.client.id, summary.workspace_id, f.client.tenant_id), []);
-    await assert.rejects(restarted.operate(f.client.id, oldTarget, 'get_text', {}, null, f.client.tenant_id, DESCRIPTION), /NOT_AUTHORIZED/);
-    await assert.rejects(send({ ...summary, revision: summary.revision + 1,
-      state: 'active', end_reason: undefined, tabs: [tab(1)] }), /WORKSPACE_INACTIVE|INVALID_WORKSPACE/);
-    const resumed = { ...summary, revision: summary.revision + 2, state: 'active',
-      activation_id: randomUUID(), tabs: [tab(1)] };
-    delete resumed.end_reason;
-    await send(resumed);
-    assert.equal(restarted.listTabs(f.client.id, summary.workspace_id, f.client.tenant_id).length, 1);
-    assert.equal(restarted.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].end_reason, null);
-    assert.equal(f.store.listDevices().length, 1);
-  } finally { restarted.close(); f.store.close(); }
+test('page operations use the ready/execute handshake and stay caller-scoped', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  extension.serve(command => command.operation === 'get_text' ? { text: 'Hello', truncated: false } : { ok: true });
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Read a page' });
+  await extension.approveNext([page(21)]);
+  const session = await pending;
+  const tab = session.tabs[0].tab_id;
+  const text = await agent.call('get_text', { tab_id: tab, description: DESCRIPTION });
+  assert.equal(text.text, 'Hello');
+  const command = [...extension.pending.values()].find(c => c.operation === 'get_text');
+  assert.deepEqual([command.session_id, command.tab_id, command.description, command.agent_id],
+    [session.session_id, tab, DESCRIPTION, 'atlas']);
+  await assert.rejects(agent.call('get_text', { tab_id: tab, description: 'short' }), /INVALID_ARGUMENTS/);
+  await assert.rejects(agent.call('navigate', { tab_id: tab, url: 'https://control.test/', description: DESCRIPTION }),
+    /HANDOFF_REQUIRED/);
+  const other = await fixture.mcp('orion', OTHER_KEY);
+  await assert.rejects(other.call('get_text', { tab_id: tab, description: DESCRIPTION }), /NOT_FOUND/);
+  await assert.rejects(other.call('list_tabs', { session_id: session.session_id }), /NOT_FOUND/);
+  await assert.rejects(other.call('end_session', { session_id: session.session_id }), /NOT_FOUND/);
+
+  await agent.call('report_progress', { session_id: session.session_id, message: 'Halfway there' });
+  const progress = await extension.next('progress');
+  assert.deepEqual([progress.message, progress.agent_id], ['Halfway there', 'atlas']);
+
+  // Website-opened tabs in the group are in scope; protected-origin tabs are not.
+  const group = [...extension.groups.values()][0];
+  group.tabs.push(page(22), page(23, { url: 'https://control.test/secret' }));
+  await extension.sync();
+  const tabs = await agent.call('list_tabs', { session_id: session.session_id });
+  assert.deepEqual(tabs.map(t => t.url), ['https://example.test/21', 'https://example.test/22']);
+
+  // Navigation-only documents only expose navigate.
+  group.tabs[1].page_state = 'navigation_only';
+  group.tabs[1].url = 'about:blank';
+  await extension.sync();
+  await assert.rejects(agent.call('get_text', { tab_id: group.tabs[1].id, description: DESCRIPTION }), /DOCUMENT_NOT_CONTROLLABLE/);
+
+  // A tab dragged out of the group loses scope with an explanatory tombstone.
+  group.tabs = group.tabs.filter(t => t.id !== tab);
+  await extension.sync();
+  await assert.rejects(agent.call('get_text', { tab_id: tab, description: DESCRIPTION }), /TAB_NOT_IN_SESSION/);
+  extension.close();
 });
 
-test('same-service reconnect retains terminal state and only transfers a signed inactive summary to its original device', async () => {
-  const f = await fixture();
-  try {
-    const oldTarget = f.workspace.tabs[0].target_id;
-    f.bridge.disconnected(f.session);
-    const listed = f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0];
-    assert.equal(listed.connection_state, 'offline');
-    assert.equal(listed.workspaces[0].end_reason, 'CONNECTION_LOST');
-    assert.equal(listed.workspaces[0].tab_count, 0);
-    const session = { ...f.session, authenticated: false, challenge: null, connection_id: randomUUID(),
-      workspaces: new Set(), usedTargets: new Set() };
-    await f.bridge.message(session, { type: 'hello', tenant_id: f.client.tenant_id, version: 5, key_id: f.key.key_id });
-    const challenge = f.ws.sent.at(-1);
-    await f.bridge.message(session, { type: 'proof', tenant_id: f.client.tenant_id,
-      signature: await sign(f.key.key, authPayload(challenge)) });
-    const summary = { ...f.workspace, revision: 2, state: 'inactive', tabs: [],
-      activation_id: randomUUID(), end_reason: 'CONNECTION_LOST' };
-    summary.signature = await sign(f.key.key, workspacePayload({ ...summary, origin: ORIGIN,
-      epoch: f.bridge.epoch, connection_id: session.connection_id }));
-    await f.bridge.message(session, summary);
-    assert(session.workspaces.has(summary.workspace_id));
-    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].connection_id, session.connection_id);
-    await assert.rejects(f.bridge.operate(f.client.id, oldTarget, 'get_text', {}, null,
-      f.client.tenant_id, DESCRIPTION), /BROWSER_OFFLINE/);
-  } finally { f.close(); }
+test('create_tab publishes the new tab through inventory before returning its ID', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Open tabs' });
+  const { group } = await extension.approveNext([page(31)]);
+  const session = await pending;
+  extension.serve(async command => {
+    assert.equal(command.operation, 'create_tab');
+    group.tabs.push(page(32, { url: command.args.url }));
+    await extension.sync();
+    return { tab_id: group.tabs.at(-1).id };
+  });
+  const created = await agent.call('create_tab', { session_id: session.session_id, url: 'https://example.test/new',
+    description: DESCRIPTION });
+  assert.equal(created.url, 'https://example.test/new');
+  assert.match(created.tab_id, /^t/);
+  extension.close();
 });
 
-test('Pause/End/removal tombstones are caller scoped, immediate and cannot rebind retired handles', async () => {
-  const f = await fixture();
-  try {
-    const old = f.workspace.tabs[0], foreign = f.store.createClient('Foreign');
-    await f.sync({ revision: 2, state: 'paused', tabs: [] });
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 0);
-    await assert.rejects(f.bridge.operate(f.client.id, old.target_id, 'get_text', {}, undefined,
-      f.client.tenant_id, DESCRIPTION), /WORKSPACE_PAUSED/);
-    await assert.rejects(f.bridge.operate(foreign.id, old.target_id, 'get_text', {}, undefined,
-      foreign.tenant_id, DESCRIPTION), /NOT_AUTHORIZED/);
-    await assert.rejects(f.sync({ revision: 3, state: 'active', tabs: [tab(1)] }), /WORKSPACE_INACTIVE/);
-    await f.sync({ revision: 4, activation_id: randomUUID(), state: 'active', tabs: [tab(1)] });
-    const current = f.workspace.tabs[0];
-    await f.sync({ revision: 5, tabs: [] });
-    await assert.rejects(f.bridge.operate(f.client.id, current.target_id, 'get_text', {}, undefined,
-      f.client.tenant_id, DESCRIPTION), /TAB_NOT_IN_WORKSPACE/);
-    f.bridge.tombstones.clear();
-    await assert.rejects(f.sync({ revision: 6, tabs: [current] }), /TARGET_STALE/);
-    await f.sync({ revision: 7, state: 'inactive', tabs: [] });
-    assert.equal(f.bridge.listWorkspaces(f.client.id, f.client.tenant_id)[0].workspaces[0].state, 'inactive');
-  } finally { f.close(); }
+test('handoff waits for the user, only blocks its tab and resolves on Done', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Need a login' });
+  await extension.approveNext([page(41), page(42)]);
+  const session = await pending;
+  extension.autoReady = false;
+  extension.serve(command => command.operation === 'request_handoff' ? { state: 'completed', user_confirmed: true } : { text: 'x' });
+  const handoff = agent.call('request_handoff', { tab_id: session.tabs[0].tab_id, instructions: 'Please log in',
+    suggested_text: 'user@example.test' });
+  const command = await extension.next('command', m => m.operation === 'request_handoff');
+  assert.deepEqual(command.args, { instructions: 'Please log in', suggested_text: 'user@example.test' });
+  extension.autoReady = true;
+  // The other tab keeps working while the human step is pending.
+  const read = agent.call('get_text', { tab_id: session.tabs[1].tab_id, description: DESCRIPTION });
+  const readCommand = await extension.next('command', m => m.operation === 'get_text');
+  extension.send({ type: 'command.ready', request_id: readCommand.request_id });
+  await read;
+  extension.send({ type: 'command.ready', request_id: command.request_id });
+  assert.deepEqual(await handoff, { state: 'completed', user_confirmed: true });
+  extension.close();
 });
 
-test('ordinary command ready/execute is fresh and checks pause/cancellation before any execution', async () => {
-  const f = await fixture();
-  try {
-    const id = f.workspace.tabs[0].target_id;
-    const action = capture(f.bridge.operate(f.client.id, id, 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    await flush();
-    const command = f.ws.sent.find(m => m.type === 'command');
-    assert.equal(command.workspace_id, f.workspace.workspace_id); assert.equal(command.activation_id, f.workspace.activation_id);
-    assert(command.wait_timeout_ms <= 25_000); assert.equal(command.description, DESCRIPTION);
-    f.clock.value += 1000;
-    await responseMessage(f, command, 'command.ready');
-    const execute = f.ws.sent.at(-1);
-    assert.equal(execute.type, 'command.execute'); assert.equal(execute.expires_at, f.now() + 25_000);
-    await responseMessage(f, command, 'command.ready');
-    assert.equal(f.ws.sent.filter(m => m.type === 'command.execute').length, 1);
-    await responseMessage(f, command, 'result', { result: { text: 'safe' } });
-    assert.equal((await action).value.text, 'safe');
-    const next = capture(f.bridge.operate(f.client.id, id, 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    await flush(); const second = f.ws.sent.filter(m => m.type === 'command').at(-1);
-    await f.sync({ revision: 2, state: 'paused', tabs: [] });
-    assert.equal((await next).error.code, 'WORKSPACE_PAUSED');
-    await responseMessage(f, second, 'command.ready');
-    assert.equal(f.ws.sent.filter(m => m.type === 'command.execute').length, 1);
-  } finally { f.close(); }
+test('group lifecycle: reattach after reconnect, unconfirmed detach, closed group deletes the session', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Long task' });
+  await extension.approveNext([page(51)]);
+  const session = await pending;
+  const tabId = session.tabs[0].tab_id;
+  extension.send({ type: 'bye' });
+  extension.close();
+  await delay(50);
+  assert.equal((await agent.call('list_sessions'))[0].state, 'detached');
+
+  // Reopening the window reattaches with the same tab IDs.
+  await extension.refresh();
+  const welcome = await extension.connect();
+  assert.equal(welcome.sessions[0].session_id, session.session_id);
+  await extension.sync();
+  assert.deepEqual((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id), [tabId]);
+
+  // Chrome restart awaiting confirmation keeps the session but detaches it.
+  [...extension.groups.values()][0].state = 'unconfirmed';
+  await extension.sync();
+  await assert.rejects(agent.call('list_tabs', { session_id: session.session_id }), /SESSION_DETACHED/);
+  assert.equal((await agent.call('list_sessions')).length, 1);
+
+  // The group vanished while disconnected: the next inventory deletes the session.
+  extension.close();
+  await delay(50);
+  extension.groups.clear();
+  await extension.refresh();
+  await extension.connect();
+  await extension.sync();
+  assert.deepEqual(await agent.call('list_sessions'), []);
+  await assert.rejects(agent.call('list_tabs', { session_id: session.session_id }), /NOT_FOUND/);
+  extension.close();
 });
 
-test('per-tab tails do not overtake after queued cancellation; workspace concurrency is two', async () => {
-  const f = await fixture();
-  try {
-    await f.sync({ revision: 2, tabs: [f.workspace.tabs[0],tab(2),tab(3)] });
-    const ids = f.workspace.tabs.map(t => t.target_id), cancel = new AbortController();
-    const first = capture(f.bridge.operate(f.client.id, ids[0], 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    const skipped = capture(f.bridge.operate(f.client.id, ids[0], 'get_text', {}, cancel.signal, f.client.tenant_id, DESCRIPTION));
-    const third = capture(f.bridge.operate(f.client.id, ids[0], 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    cancel.abort(); assert.equal((await skipped).error.code, 'COMMAND_CANCELLED'); await flush();
-    assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 1);
-    const parallel = capture(f.bridge.operate(f.client.id, ids[1], 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    const extra = capture(f.bridge.operate(f.client.id, ids[2], 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    await flush(); assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 2);
-    const commands = f.ws.sent.filter(m => m.type === 'command');
-    for (const c of commands) await responseMessage(f, c, 'command.ready');
-    await responseMessage(f, commands[1], 'result', { result: { text: 'parallel' } });
-    assert.equal((await parallel).value.text, 'parallel'); await flush();
-    assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 3);
-    await responseMessage(f, commands[0], 'result', { result: { text: 'first' } });
-    assert.equal((await first).value.text, 'first'); await flush();
-    assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 4);
-    await f.sync({ revision: 3, state: 'inactive', tabs: [] });
-    assert.equal((await third).error.code, 'WORKSPACE_INACTIVE');
-    assert.equal((await extra).error.code, 'WORKSPACE_INACTIVE');
-  } finally { f.close(); }
+test('end_session, pairing revocation and forgetting the browser end sessions and notify the window', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  let pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'One' });
+  const first = await extension.approveNext([page(61)]);
+  const one = await pending;
+  assert.deepEqual(await agent.call('end_session', { session_id: one.session_id }), { session_id: one.session_id, ended: true });
+  const ended = await extension.next('session.end');
+  assert.deepEqual([ended.session_id, ended.client_id], [one.session_id, first.group.client_id]);
+  extension.groups.delete(first.group.client_id);
+
+  pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Two' });
+  await extension.approveNext([page(62)]);
+  const two = await pending;
+  extension.send({ type: 'pairing.revoke', agent_id: 'atlas' });
+  await extension.next('session.end', m => m.session_id === two.session_id);
+  assert.deepEqual(await agent.call('list_browsers'), []);
+  assert.deepEqual(await agent.call('list_sessions'), []);
+
+  extension.send({ type: 'browser.forget' });
+  const closed = await extension.closed;
+  assert.equal(closed.reason, 'REVOKED');
+  assert.equal(fixture.store.browser(extension.browser_id), undefined);
 });
 
-test('removed target immediately cancels queued slot work; executing cancellation stays uncertain', async () => {
-  const f = await fixture();
-  try {
-    await f.sync({ revision: 2, tabs: [f.workspace.tabs[0],tab(2),tab(3)] });
-    const pending = f.workspace.tabs.map(t => capture(f.bridge.operate(f.client.id, t.target_id,
-      'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION)));
-    await flush(); const commands = f.ws.sent.filter(m => m.type === 'command');
-    await responseMessage(f, commands[0], 'command.ready');
-    await f.sync({ revision: 3, tabs: [f.workspace.tabs[1]] });
-    assert.equal((await pending[0]).error.code, 'OUTCOME_UNKNOWN');
-    assert.equal((await pending[2]).error.code, 'TAB_NOT_IN_WORKSPACE');
-    assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 2);
-    await f.sync({ revision: 4, state: 'inactive', tabs: [] }); await pending[1];
-  } finally { f.close(); }
+test('sessions expire after 7 days without the extension reporting the group alive', async t => {
+  let now = 1_800_000_000_000;
+  const fixture = await start({ now: () => now }); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Retention' });
+  await extension.approveNext([page(71)]);
+  const session = await pending;
+  extension.close();
+  await delay(50);
+  now += 6 * 86_400_000;
+  fixture.store.sweep();
+  assert.equal((await agent.call('list_sessions')).length, 1);
+  now += 2 * 86_400_000;
+  fixture.store.sweep();
+  assert.deepEqual(await agent.call('list_sessions'), []);
+  assert.equal(fixture.store.session(session.session_id), undefined);
 });
 
-test('handoff does not consume workspace execution capacity and notification failure is explicit', async () => {
-  const f = await fixture();
-  try {
-    await f.sync({ revision: 2, tabs: [f.workspace.tabs[0],tab(2),tab(3)] });
-    const ids = f.workspace.tabs.map(t => t.target_id);
-    const handoff = capture(f.bridge.operate(f.client.id, ids[0], 'request_handoff', {}, undefined,
-      f.client.tenant_id, DESCRIPTION, 60_000));
-    const others = ids.slice(1).map(id => capture(f.bridge.operate(f.client.id, id, 'get_text', {}, undefined,
-      f.client.tenant_id, DESCRIPTION)));
-    await flush(); const commands = f.ws.sent.filter(m => m.type === 'command');
-    assert.equal(commands.length, 3);
-    for (const c of commands) await responseMessage(f, c, 'command.ready');
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id)[0].execution_state, 'waiting_for_human');
-    const c = commands.find(c => c.operation === 'request_handoff');
-    assert.equal(f.ws.sent.find(m => m.type === 'command.execute' && m.request_id === c.request_id).execution_timeout_ms, 60_000);
-    await responseMessage(f, c, 'result', { error: { code: 'NOTIFICATION_UNAVAILABLE', message: 'secret raw exception' } });
-    assert.equal((await handoff).error.code, 'NOTIFICATION_UNAVAILABLE');
-    for (const p of commands.filter(c => c.operation === 'get_text')) await responseMessage(f, p, 'result', { result: { text: 'ok' } });
-    assert((await Promise.all(others)).every(r => r.value.text === 'ok'));
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 3);
-  } finally { f.close(); }
+test('approved groups announced before commit survive; unknown groups are reported for cleanup', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Race' });
+  const request = await extension.next('session.request');
+  const client_id = crypto.randomUUID();
+  extension.groups.set(client_id, { client_id, title: 'Atlas', request_id: request.request_id, tabs: [page(81)] });
+  const ack = await extension.sync();
+  assert.deepEqual(ack.unknown, []);
+  extension.send({ type: 'session.decision', request_id: request.request_id, approved: true, client_id });
+  await extension.next('session.created');
+  delete extension.groups.get(client_id).request_id;
+  await extension.sync();
+  assert.equal((await pending).tabs.length, 1);
+  const stray = crypto.randomUUID();
+  extension.groups.set(stray, { client_id: stray, title: 'Stale', tabs: [] });
+  assert.deepEqual((await extension.sync()).unknown, [stray]);
+  extension.close();
 });
 
-test('navigation-only privileged/refused documents never receive DOM authority or new URL allowlists', async () => {
-  const f = await fixture();
-  try {
-    const original = f.workspace.tabs[0];
-    await f.sync({ revision: 2, tabs: [{ ...original, url: 'about:blank', page_state: 'navigation_only', capabilities: ['navigate'] }] });
-    await assert.rejects(f.bridge.operate(f.client.id, original.target_id, 'get_text', {}, undefined,
-      f.client.tenant_id, DESCRIPTION), /DOCUMENT_NOT_CONTROLLABLE/);
-    await assert.rejects(f.bridge.operate(f.client.id, original.target_id, 'navigate', { url: ORIGIN }, undefined,
-      f.client.tenant_id, DESCRIPTION), /HANDOFF_REQUIRED/);
-    await assert.rejects(f.bridge.operate(f.client.id, original.target_id, 'navigate', { url: 'chrome://settings/' }, undefined,
-      f.client.tenant_id, DESCRIPTION), /HANDOFF_REQUIRED/);
-    const action = capture(f.bridge.operate(f.client.id, original.target_id, 'navigate', { url: 'https://any-ordinary-site.test/' },
-      undefined, f.client.tenant_id, DESCRIPTION));
-    await flush(); const command = f.ws.sent.filter(m => m.type === 'command').at(-1);
-    await responseMessage(f, command, 'command.ready');
-    await responseMessage(f, command, 'result', { result: { navigation_started: true } });
-    assert.equal((await action).value.navigation_started, true);
-    await f.sync({ revision: 3, tabs: [{ ...original, url: 'https://page.test/', page_state: 'unavailable', capabilities: ['navigate'] }] });
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id)[0].target_id, original.target_id);
-    await f.sync({ revision: 4, tabs: [original] });
-    const fail = capture(f.bridge.operate(f.client.id, original.target_id, 'get_text', {}, undefined, f.client.tenant_id, DESCRIPTION));
-    await flush(); const c = f.ws.sent.filter(m => m.type === 'command').at(-1);
-    await responseMessage(f, c, 'command.ready');
-    await responseMessage(f, c, 'result', { error: { code: 'DOCUMENT_NOT_CONTROLLABLE' } });
-    assert.equal((await fail).error.code, 'DOCUMENT_NOT_CONTROLLABLE');
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
-  } finally { f.close(); }
+test('a sync that races ahead of its acknowledgement keeps the same tab IDs', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Race IDs' });
+  const { group } = await extension.approveNext([page(91)]);
+  const session = await pending;
+  const first = session.tabs[0].tab_id;
+  // Resend the inventory as if the assignment had not arrived yet.
+  group.tabs[0].id = null;
+  const ack = await extension.sync();
+  assert.deepEqual(ack.assignments.map(a => a.id), [first]);
+  assert.deepEqual((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id), [first]);
+  extension.close();
 });
 
-test('create reserves eight-tab capacity, shares handshake and returns only signed fresh targets', async () => {
-  const f = await fixture();
-  try {
-    await f.sync({ revision: 2, tabs: [f.workspace.tabs[0], ...Array.from({ length: 6 }, (_, i) => tab(i + 2))] });
-    const pending = capture(f.bridge.createTab(f.client.id, f.workspace.workspace_id, {}, DESCRIPTION, undefined, f.client.tenant_id));
-    await assert.rejects(f.bridge.createTab(f.client.id, f.workspace.workspace_id, {}, DESCRIPTION, undefined, f.client.tenant_id), /TAB_LIMIT_REACHED/);
-    await flush(); const command = f.ws.sent.find(m => m.type === 'command');
-    assert.equal(command.target_id, f.workspace.workspace_id); assert.equal(command.operation, 'create_workspace_tab');
-    await responseMessage(f, command, 'command.ready');
-    const fresh = tab(99, { url: 'about:blank', page_state: 'navigation_only', capabilities: ['navigate'] });
-    await f.sync({ revision: 3, tabs: [...f.workspace.tabs, fresh] });
-    await responseMessage(f, command, 'result', { result: { target_id: fresh.target_id, tab_handle: 'forged', private_field: 'secret' } });
-    const receipt = (await pending).value;
-    assert.equal(receipt.target_id, fresh.target_id); assert.equal(receipt.tab_handle, fresh.target_id);
-    assert(!Object.hasOwn(receipt, 'private_field'));
-    await assert.rejects(f.bridge.createTab(f.client.id, f.workspace.workspace_id, {}, DESCRIPTION, undefined, f.client.tenant_id), /TAB_LIMIT_REACHED/);
-  } finally { f.close(); }
-});
-
-test('create result cannot invent authority, protected destination denied, interrupted create never retried', async () => {
-  const f = await fixture();
-  try {
-    await assert.rejects(f.bridge.createTab(f.client.id, f.workspace.workspace_id, { url: ORIGIN },
-      DESCRIPTION, undefined, f.client.tenant_id), /HANDOFF_REQUIRED/);
-    const control = new AbortController();
-    const p = capture(f.bridge.createTab(f.client.id, f.workspace.workspace_id, {}, DESCRIPTION, control.signal, f.client.tenant_id));
-    await flush(); const c = f.ws.sent.find(m => m.type === 'command');
-    await responseMessage(f, c, 'command.ready');
-    await assert.rejects(responseMessage(f, c, 'result', { result: { target_id: randomUUID() } }), /INVALID_RESULT/);
-    control.abort(); assert.equal((await p).error.code, 'OUTCOME_UNKNOWN');
-    assert.equal(f.ws.sent.filter(m => m.type === 'command').length, 1);
-    assert.equal(f.bridge.listTabs(f.client.id, f.workspace.workspace_id, f.client.tenant_id).length, 1);
-  } finally { f.close(); }
-});
-
-test('workspace wait prompts an inactive updated peer but never grants authority itself', async () => {
-  const f = await fixture();
-  try {
-    const immediate = await f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 300_000, undefined, f.client.tenant_id);
-    assert.equal(immediate.workspace_id, f.workspace.workspace_id);
-    await f.sync({ revision: 2, state: 'inactive', tabs: [] });
-    const length = f.ws.sent.length, signal = new AbortController();
-    const waiting = capture(f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 300_000, signal.signal, f.client.tenant_id));
-    await flush(); assert.equal(f.ws.sent.length, length + 1);
-    assert.equal(f.ws.sent.at(-1).type, 'workspace.request');
-    assert.equal(f.bridge.targets.size, 0);
-    signal.abort(); assert.equal((await waiting).error.code, 'COMMAND_CANCELLED');
-    assert.equal(f.bridge.targets.size, 0);
-    assert.throws(() => f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 601_000, undefined, f.client.tenant_id), /INVALID_ARGUMENTS/);
-    const next = f.bridge.waitWorkspace(f.client.id, f.device.device_id, DESCRIPTION, 300_000, undefined, f.client.tenant_id);
-    await f.sync({ revision: 3, activation_id: randomUUID(), state: 'active', tabs: [tab(1)] });
-    assert.equal((await next).state, 'active'); assert.equal(f.bridge.waiters.size, 0);
-  } finally { f.close(); }
-});
-
-test('MCP runtime preserves output/schema/Unicode/error redaction protections', async () => {
-  const f = await fixture();
-  try {
-    const id = f.workspace.tabs[0].target_id;
-    for (const args of [{ description: '😀'.repeat(501) }, { description: 'a'.repeat(39) },
-      { description: DESCRIPTION, wait_timeout_seconds: 300 }, { description: DESCRIPTION, ref: 'e1' },
-      { description: DESCRIPTION, max_output_bytes: 65_537 }]) {
-      const r = await callTool('get_text', { target_id: id, ...args }, f.client, f.bridge);
-      assert.equal(JSON.parse(r.content[0].text).error, 'INVALID_ARGUMENTS');
-    }
-    const promise = callTool('evaluate_script', { target_id: id, description: '😀'.repeat(40), script: 'document.title' }, f.client, f.bridge);
-    await flush(); const command = f.ws.sent.filter(m => m.type === 'command').at(-1);
-    await responseMessage(f, command, 'command.ready');
-    await responseMessage(f, command, 'result', { result: { value: 'x'.repeat(100_000) } });
-    assert.equal(JSON.parse((await promise).content[0].text).error, 'RESULT_TOO_LARGE');
-    const errorPromise = callTool('get_text', { target_id: id, description: DESCRIPTION }, f.client, f.bridge);
-    await flush(); const second = f.ws.sent.filter(m => m.type === 'command').at(-1);
-    await responseMessage(f, second, 'command.ready');
-    await responseMessage(f, second, 'result', { error: { code: 'PAGE_UNAVAILABLE', message: 'private',
-      injection_reason: 'permission_denied', inspection_stage: 'document_injection', url: 'secret' } });
-    const error = JSON.parse((await errorPromise).content[0].text);
-    assert.deepEqual(error, { error: 'PAGE_UNAVAILABLE', inspection_stage: 'document_injection', injection_reason: 'permission_denied' });
-    assert.equal(f.bridge.targets.size, 1);
-  } finally { f.close(); }
-});
-
-test('rotation/revocation immediately cancels authority and never rescues revoked credentials', async () => {
-  const f = await fixture();
-  try {
-    const control = new AbortController();
-    const p = capture(f.bridge.operate(f.client.id, f.workspace.tabs[0].target_id, 'get_text', {},
-      control.signal, f.client.tenant_id, DESCRIPTION));
-    await flush(); f.store.rotateClient(f.client.id); f.bridge.reconcile();
-    assert.equal((await p).error.code, 'REVOKED');
-    assert.equal(f.bridge.targets.size, 0);
-    assert(!f.store.authenticateClient(f.created.credential, f.client.tenant_id));
-    f.store.revoke('client', f.client.id);
-    assert.throws(() => f.store.rotateClient(f.client.id), /NOT_AUTHORIZED/);
-    assert.equal(f.store.client(f.client.id), undefined);
-    f.store.revoke('device', f.device.device_id);
-    assert.equal(f.store.device(f.device.device_id), undefined);
-    assert.equal(f.store.db.prepare('SELECT revoked FROM devices WHERE id=?').get(f.device.device_id).revoked, 1);
-  } finally { f.close(); }
+test('a pending group reported after commit does not resolve request_session with an empty tab list', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Pending race', urls: ['https://example.test/'] });
+  const request = await extension.next('session.request');
+  const client_id = crypto.randomUUID();
+  extension.groups.set(client_id, { client_id, title: 'Atlas', request_id: request.request_id, tabs: [] });
+  extension.send({ type: 'session.decision', request_id: request.request_id, approved: true, client_id });
+  await extension.next('session.created');
+  // The browser has not processed session.created yet and still reports the group as pending.
+  await extension.sync();
+  let settled = false;
+  void pending.then(() => { settled = true; }, () => { settled = true; });
+  await delay(100);
+  assert.equal(settled, false);
+  const group = extension.groups.get(client_id);
+  delete group.request_id; group.tabs = [page(95)];
+  await extension.sync();
+  assert.equal((await pending).tabs.length, 1);
+  extension.close();
 });

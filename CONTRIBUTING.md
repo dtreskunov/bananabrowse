@@ -65,11 +65,9 @@ Then load the extension for the browser you want to work on:
 - **Chrome:** `chrome://extensions` → Developer mode → Load unpacked → select `dist/chrome/`
 - **Firefox:** `about:debugging` → Load Temporary Add-on → select `dist/firefox/manifest.json`
 
-Do not load unbuilt source directories. Follow [the deployment guide](docs/SECURE-PAIRING.md)
-to configure the required HTTPS origin and independent OIDC registration
-before starting the production service. Users of that provider register on
-validated sign-in. There is no insecure development
-login or unauthenticated localhost bridge.
+Do not load unbuilt source directories. Follow [the service guide](domagent-mcp/README.md)
+to configure the HTTPS origin and agent entries before starting the service.
+There is no insecure development login or unauthenticated localhost bridge.
 
 See the browser-specific READMEs for full setup instructions:
 - [Chrome README](domagent-extension/chrome/README.md)
@@ -216,29 +214,28 @@ There is no automated linter configured yet. Follow the patterns already present
 - **Semicolons:** Use semicolons, consistent with the secure-pairing runtime
 - **Comments:** Use plain English; comment the *why*, not the *what*
 - **Error handling:** Return explicit typed failures and metadata-only diagnostics;
-  never log page contents, credentials, signatures, or OIDC tokens
+  never log page contents, credentials, signatures, pairing codes or tokens
 
 ### Extension-specific
 
-- Chrome uses an MV3 worker; Firefox uses a persistent MV2 background script. Worker/browser
-  restart ends control and requires fresh approval, not grant restoration.
-- Dedicated-tab provenance is session-only. Device keys live in extension-private
-  IndexedDB. Do not adopt an arbitrary existing tab.
-- Supplied scripts execute only with ordinary page authority. Page messages cannot
-  approve grants or access extension credentials. Keep browser API calls in the
-  adapter and enforce trusted UI senders.
+- All browser control runs in the app window (`app.html`); the background script only
+  opens/focuses it and cleans up after it closes. Closing the window ends control.
+- Session scope is native tab-group membership. The device key lives in
+  extension-private IndexedDB and is non-extractable.
+- Supplied scripts execute only with ordinary page authority. Web pages cannot reach
+  the app window or its controller. Keep browser API calls in the adapter.
 
 ### MCP server (`domagent-mcp/`)
 
-- `index.js` configures and starts the service; `app.js` owns HTTP/OIDC/dashboard
-  routing; `server.js` owns authenticated WSS, grants, and command lifecycle.
+- `index.js` configures and starts the service; `app.js` owns HTTP routing (registration,
+  token refresh, MCP); `hub.js` owns authenticated WSS, inventory, sessions and commands.
 - MCP tool registration and schemas live in `mcp.js`; shared signing payloads and
   operation names live in `shared/protocol.js`.
 - Do not reintroduce stdio authorization bypasses, raw CDP forwarding, direct
   credential fallback, or remote control approval.
-- All protocol-v3 state and signatures bind the service origin and tenant;
-  sharing also binds the user-selected tab ID. Approval waiting must not block
-  heartbeat processing or execute an unapproved command.
+- Proof transcripts bind the service origin and a fresh nonce. Every agent lookup is
+  scoped to its own pairings; unknown and foreign IDs look the same. Human waits must
+  not block heartbeat processing.
   Applications maintain their own integration skills and credential workflows;
   do not add application-specific configuration dependencies to DomAgent.
 
@@ -247,15 +244,12 @@ There is no automated linter configured yet. Follow the patterns already present
 ## Testing Your Changes
 
 From the repository root, run `npm test`, `npm run build`, and `npm run check`.
-For real-browser tests and known qualification limitations, follow
-[the browser test guide](domagent-extension/test/README.md). Its default suite
-exercises Chrome and a native Firefox core-flow smoke; the extended Firefox
-Juggler case is explicitly gated because of a confirmed harness crash.
+For real-browser tests, follow [the browser test guide](domagent-extension/test/README.md):
+Chrome and native Firefox run the full window, pairing and session flows.
 
-Before deployment, also verify real OIDC/TLS, optional-host permission prompts,
-protected navigation/subresources, restart behavior, and each provider's actual
-vault injection. MCP clients use authenticated Streamable HTTP at the HTTPS
-`/mcp` endpoint. Every page operation requires an explicit approved target.
+Before deployment, also verify TLS, optional-host permission prompts,
+protected navigation/subresources and restart behavior. MCP clients use
+Streamable HTTP at `https://<server>/mcp/<agent-id>` with a bearer API key.
 
 ---
 

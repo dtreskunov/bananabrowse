@@ -1,4 +1,4 @@
-import { EXECUTION_MS, HUMAN_WAIT_MS, OPERATIONS, navigationUrl, serviceOrigin, validOperationArgs, validDescription } from '../../shared/protocol.js';
+import { EXECUTION_MS, serviceOrigin } from '../../shared/protocol.js';
 
 export const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
@@ -34,55 +34,6 @@ export function protectedUnion(origin, ...lists) {
   return [...new Set([serviceOrigin(origin), ...lists.flatMap(originList)])];
 }
 
-export function isUiSender(sender, runtime) {
-  if (sender?.id !== runtime.id || (sender.frameId !== undefined && sender.frameId !== 0)) return false;
-  try {
-    const url = new URL(sender.url);
-    url.search = '';
-    url.hash = '';
-    return ['options.html', 'popup.html', 'request.html', 'panel.html'].some(page => url.href === runtime.getURL(page));
-  } catch { return false; }
-}
-
-export function needsSetup(reason, identity) {
-  return reason === 'install' && !identity;
-}
-
-export function localDeadline(message, field, limit, now) {
-  if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= 0) fail('INVALID_MESSAGE');
-  const duration = message[field];
-  if (duration === undefined) return message.expires_at;
-  if (!Number.isSafeInteger(duration) || duration <= 0 || duration > limit) fail('INVALID_MESSAGE');
-  return now + duration;
-}
-
-export function checkBinding(message, connection) {
-  if (!connection || message.epoch !== connection.epoch ||
-      !connection.tenant_id || message.tenant_id !== connection.tenant_id ||
-      message.connection_id !== connection.connection_id) fail('NOT_AUTHORIZED');
-}
-
-export function validateCommand(message, grant, connection, protectedOrigins, now = Date.now()) {
-  id(message.request_id);
-  id(message.target_id);
-  id(message.client_id);
-  checkBinding(message, connection);
-  if (!grant || grant.state !== 'active' || grant.target_id !== message.target_id ||
-      grant.client_id !== message.client_id || grant.epoch !== message.epoch ||
-      grant.tenant_id !== message.tenant_id ||
-      grant.connection_id !== message.connection_id) fail('APPROVAL_REQUIRED');
-  if (!Number.isSafeInteger(message.expires_at) || message.expires_at <= 0) fail('INVALID_ARGUMENT');
-  if (message.expires_at <= now) fail('COMMAND_EXPIRED');
-  if (message.expires_at > now + HUMAN_WAIT_MS) fail('INVALID_ARGUMENT');
-  if (!validDescription(message.description)) fail('INVALID_ARGUMENT');
-  if (message.operation !== 'request_handoff' && (!OPERATIONS.includes(message.operation) ||
-      !grant.capabilities.includes(message.operation))) fail('CAPABILITY_UNAVAILABLE');
-  const args = message.args;
-  if (!validOperationArgs(message.operation, args)) fail('INVALID_ARGUMENT');
-  if (message.operation === 'navigate') navigationUrl(text(args.url, 8192), protectedOrigins);
-  return args;
-}
-
 export function errorCode(error) {
   const known = [
     'INVALID_MESSAGE', 'INVALID_ARGUMENT', 'INVALID_ORIGIN', 'INVALID_SERVICE_ORIGIN',
@@ -103,7 +54,8 @@ export function errorCode(error) {
     'DOCUMENT_NOT_CONTROLLABLE', 'TAB_LIMIT_REACHED', 'NOTIFICATION_UNAVAILABLE',
     'PAIRING_UNAVAILABLE', 'PAIRING_CODE_COLLISION', 'RATE_LIMITED',
     'UPGRADE_REQUIRED', 'WORKSPACE_LIMIT',
-    'GROUP_UNAVAILABLE',
+    'GROUP_UNAVAILABLE', 'SESSION_DETACHED', 'SESSION_ENDED', 'TAB_NOT_IN_SESSION', 'BROWSER_REVOKED',
+    'INVALID_SERVICE', 'SERVICE_UNREACHABLE', 'ALREADY_OPEN', 'CLIPBOARD_UNAVAILABLE', 'ACTION_EXPIRED',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

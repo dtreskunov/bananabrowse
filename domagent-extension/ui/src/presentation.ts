@@ -1,103 +1,125 @@
-import type { Snapshot, TaskGroup, Workspace } from './types';
+export interface Agent { id: string; name: string; url: string | null; color?: string }
+export interface TabView { tabId: number; id: string | null; title: string; url: string; page_state: string; working: boolean; help: boolean }
+export interface Candidate { groupId: number; title: string; tab_count: number; matching: number }
+export interface SessionView {
+  client_id: string; session_id: string | null; agent: Agent; title: string; purpose: string;
+  state: 'attached' | 'unconfirmed' | 'pending'; candidates: Candidate[]; tabs: TabView[]; excluded: number;
+}
+export interface RequestView { request_id: string; agent: Agent; purpose: string; urls: string[]; title: string; expires_at: number }
+export interface HandoffView {
+  request_id: string; agent: Agent; session_title: string; tab_title: string; tabId: number;
+  instructions: string; suggested_text: string | null;
+}
+export interface FeedEntry {
+  id: string; time: number; kind?: string; agent_id?: string; session_id?: string; title?: string | null;
+  operation?: string; description: string; status: string; code?: string;
+}
+export interface Snapshot {
+  phase: 'loading' | 'setup' | 'connecting' | 'online' | 'offline';
+  error: string | null; browser: 'chrome' | 'firefox';
+  identity: { origin: string; name: string; browser_id: string } | null;
+  last_setup: { origin: string; name: string } | null;
+  agents: Agent[]; sessions: SessionView[]; requests: RequestView[];
+  pairing: { code: string; state: string; expires_at: number | null; proposal: { request_id: string; agent: Agent } | null } | null;
+  handoffs: HandoffView[]; feed: FeedEntry[]; settings: { openAtStartup: boolean }; pending_count: number;
+}
 
-export interface PanelView {
-  mode: 'setup' | 'connecting' | 'offline' | 'starting' | 'active' | 'help' | 'paused' | 'continue' | 'choose';
-  label: string;
-  message: string;
-  action: string | null;
-  workspace?: Workspace;
+export function statusLabel(phase: Snapshot['phase']): { text: string; tone: 'ok' | 'busy' | 'off' } {
+  if (phase === 'online') return { text: 'Connected', tone: 'ok' };
+  if (phase === 'connecting' || phase === 'loading') return { text: 'Connecting…', tone: 'busy' };
+  return { text: 'Offline', tone: 'off' };
 }
-export function deriveView(snapshot: Snapshot, selection: string): PanelView {
-  const workspace = snapshot.workspaces[0];
-  if (!snapshot.identity) return { mode: 'setup', label: 'Not connected', message: 'Connect your assistant to get started.', action: 'Connect assistant' };
-  if (['connecting', 'authenticating', 'proving'].includes(snapshot.phase)) {
-    return { mode: 'connecting', label: 'Reconnecting', message: 'Control is stopped while the connection is restored.', action: null, workspace };
+
+export interface AgentGroup { agent: Agent; sessions: SessionView[]; active: boolean }
+/** Paired agents with their sessions; agents without attached sessions are inactive. */
+export function groupByAgent(agents: Agent[], sessions: SessionView[]): { active: AgentGroup[]; inactive: AgentGroup[] } {
+  const groups = new Map<string, AgentGroup>();
+  for (const agent of agents) groups.set(agent.id, { agent, sessions: [], active: false });
+  for (const session of sessions) {
+    const group = groups.get(session.agent.id) || { agent: session.agent, sessions: [], active: false };
+    group.sessions.push(session);
+    if (session.state === 'attached') group.active = true;
+    groups.set(session.agent.id, group);
   }
-  if (snapshot.phase !== 'authenticated') {
-    return { mode: 'offline', label: 'Connection offline', message: selection
-      ? 'Continue will reconnect and start this task. Your tabs are unchanged.'
-      : 'Reconnect, then choose a task to continue.', action: selection ? 'Continue' : 'Reconnect', workspace };
-  }
-  if (workspace?.state === 'active') {
-    if (workspace.acknowledged !== true) return {
-      mode: 'starting', label: 'Starting task', message: 'Waiting for the browser session to be confirmed.', action: null, workspace,
-    };
-    const help = workspace.tabs.some(tab => tab.commands.some(command => command.human));
-    const working = workspace.tabs.some(tab => tab.commands.some(command => command.executing));
-    let label = 'Ready';
-    if (help) label = 'Needs your help';
-    else if (working) label = 'Working';
-    return { mode: help ? 'help' : 'active', label,
-      message: `${workspace.tabs.length} task tab${workspace.tabs.length === 1 ? '' : 's'} available to your assistant.`,
-      action: help ? 'Go to task' : 'Pause', workspace };
-  }
-  if (!selection) return { mode: 'choose', label: 'Choose a task', message: 'Choose the tabs your assistant can use.', action: 'Continue', workspace };
-  if (workspace?.state === 'paused' && selection === String(workspace.groupId)) {
-    return { mode: 'paused', label: 'Paused by you', message: 'No new actions will start until you continue.', action: 'Continue', workspace };
-  }
-  let message = 'Your task tabs are ready. Continue when you want the assistant to work.';
-  const reason = workspace?.end_reason || snapshot.last_session_end?.reason;
-  if (workspace?.end_reason === 'WORKSPACE_CHANGED' || snapshot.current_error === 'GROUP_UNAVAILABLE') {
-    message = 'The previous task group is unavailable. Choose another group or a new tab.';
-  } else if (reason === 'CONNECTION_LOST' || reason === 'SERVICE_RESTARTED') {
-    message = 'Your connection was restored. Your tabs are unchanged.';
-  }
-  return { mode: 'continue', label: selection === 'new' ? 'Ready to start' : 'Ready to continue',
-    message, action: selection === 'new' ? 'Start' : 'Continue', workspace };
+  const all = [...groups.values()];
+  return { active: all.filter(group => group.active), inactive: all.filter(group => !group.active) };
 }
-export function taskGroups(snapshot: Snapshot): TaskGroup[] {
-  const workspace = snapshot.workspaces[0];
-  return (snapshot.available_groups || []).filter(group =>
-    group.title.startsWith('DomAgent - ') || group.groupId === workspace?.groupId);
+
+export function splitUrl(value: string): { origin: string; rest: string } {
+  try {
+    const url = new URL(value);
+    return { origin: url.host, rest: `${url.pathname === '/' ? '' : url.pathname}${url.search}` };
+  } catch { return { origin: value, rest: '' }; }
 }
-export function suggestedSelection(snapshot: Snapshot, previous: string | null): string {
-  const groups = taskGroups(snapshot);
-  if (previous === '') return '';
-  if (previous === 'new' || groups.some(group => String(group.groupId) === previous)) return previous || '';
-  if (previous !== null) return groups.length ? '' : 'new';
-  const workspace = snapshot.workspaces[0];
-  if (groups.some(group => group.groupId === workspace?.groupId)) return String(workspace!.groupId);
-  if (groups.length === 1) return String(groups[0]!.groupId);
-  return groups.length ? '' : 'new';
+
+export function hostOf(value: string | null | undefined): string {
+  if (!value) return '';
+  try { return new URL(value).host; } catch { return value; }
 }
-export function groupDetail(group: TaskGroup, index: number): string {
-  if (group.tab_count !== undefined) return `${group.tab_count} tab${group.tab_count === 1 ? '' : 's'}` +
-    (group.tab_titles?.length ? ` · ${group.tab_titles.slice(0, 2).join(', ')}` : '');
-  return `Saved task ${index + 1}`;
+
+export function countdown(expiresAt: number | null, now: number): string {
+  if (!expiresAt) return '';
+  const seconds = Math.max(0, Math.round((expiresAt - now) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
+
+export function timeOf(value: number): string {
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function tabStatus(tab: TabView): string {
+  if (tab.help) return 'Needs you';
+  if (tab.working) return 'Working';
+  if (tab.page_state === 'loading') return 'Loading';
+  if (tab.page_state === 'unavailable') return 'Unavailable';
+  return '';
+}
+
+export function sessionSummary(session: SessionView): string {
+  if (session.state === 'unconfirmed') return 'Waiting for you to reconnect it';
+  const tabs = `${session.tabs.length} tab${session.tabs.length === 1 ? '' : 's'}`;
+  return session.excluded ? `${tabs} · ${session.excluded} not shared` : tabs;
+}
+
+const STATUS_TEXT: Record<string, string> = {
+  queued: 'Queued', ready: 'Starting', running: 'Running', complete: 'Done', failed: 'Failed',
+  cancelled: 'Stopped', uncertain: 'Unconfirmed', needs_help: 'Needs you', approved: 'Started', info: '',
+};
+export function feedStatus(status: string): string { return STATUS_TEXT[status] ?? status; }
+
 export function failureMessage(code: string): string {
   const messages: Record<string, string> = {
-    NOT_AUTHORIZED: 'This connection could not be authorized. Check connection details before pairing again.',
-    BROWSER_OFFLINE: 'The connection is offline. Your tabs are unchanged.',
-    PANEL_OPEN_REQUIRED: 'Open this window’s DomAgent sidebar, then continue.',
-    WORKSPACE_INACTIVE: 'The session has stopped. Continue locally when ready.',
-    WORKSPACE_PAUSED: 'The task is paused. Continue when ready.',
-    GROUP_UNAVAILABLE: 'That task group is no longer available. Choose another group or a new tab.',
-    WORKSPACE_CHANGED: 'The group or window changed. Choose a valid task group to continue.',
-    PERMISSION_REQUIRED: 'The requested permission was declined. No browser control was enabled.',
-    PERMISSION_STEP_REQUIRED: 'Firefox requires these permissions separately. Click the primary button again to grant the remaining access; nothing has started yet.',
-    OUTCOME_UNKNOWN: 'A previous action could not be confirmed. Check its outcome before repeating it.',
-    HISTORY_UNAVAILABLE: 'Activity history could not be saved. Current controls are still available.',
-    NOTIFICATION_UNAVAILABLE: 'The help notification could not be delivered. Check notification settings.',
-    CONTROL_POPUP_UNAVAILABLE: 'The browser could not open the controls automatically. Click the DomAgent toolbar button to review the pending request.',
-    PAIRING_UNAVAILABLE: 'This pairing request expired. Start again for a fresh code.',
-    PAIRING_CODE_COLLISION: 'The code could not be reserved. Start again for another code.',
-    PLATFORM_UNSUPPORTED: 'Update the browser to use native tab groups and sidebar controls.',
-    SCRIPT_EXECUTION_UNAVAILABLE: 'Advanced scripting is unavailable. Grant scripting permission in Firefox, or enable Allow user scripts in Chrome for USER_SCRIPT mode.',
-    INPUT_REJECTED: 'The editor rejected this input. No automatic fallback or repeated edit was attempted.',
-    INPUT_NOT_APPLIED: 'The requested text did not survive the editor’s update. Check the page before trying another approach.',
-    TAB_LIMIT_REACHED: 'This task has reached its eight-tab limit.',
-    INVALID_MESSAGE: 'Browser state could not be read safely. Reopen the sidebar or check diagnostics.',
-    CLIPBOARD_UNAVAILABLE: 'The code could not be copied. Select and copy it manually.',
+    BROWSER_OFFLINE: 'Not connected to the DomAgent server. Your tabs are unchanged.',
+    BROWSER_REVOKED: 'This browser is no longer registered with the server. Set it up again to continue.',
+    NOT_AUTHORIZED: 'The server did not accept this browser. Check the server address.',
+    INVALID_SERVICE: 'That address is not a DomAgent server.',
+    INVALID_SERVICE_ORIGIN: 'Enter a server domain such as domagent.example.com (HTTPS only).',
+    SERVICE_UNREACHABLE: 'The DomAgent server could not be reached. DomAgent will keep trying.',
+    UPGRADE_REQUIRED: 'This server runs a different DomAgent version. Update the extension or the server.',
+    PERMISSION_REQUIRED: 'The browser permission was declined, so nothing was started.',
+    ACTION_EXPIRED: 'That request is no longer waiting.',
+    PAIRING_UNAVAILABLE: 'The pairing code expired. Start pairing again.',
+    PAIRING_CODE_COLLISION: 'That code was taken. Try again for a new one.',
+    NOTIFICATION_UNAVAILABLE: 'A system notification could not be shown. Check notification settings.',
+    CLIPBOARD_UNAVAILABLE: 'Copy failed. Select the text and copy it manually.',
+    PROTECTION_UNAVAILABLE: 'A tab could not be protected, so it was not shared.',
+    TAB_LIMIT_REACHED: 'A session can share at most 8 tabs.',
+    INVALID_ARGUMENT: 'Check the value you entered.',
+    RATE_LIMITED: 'Too many attempts. Wait a minute and try again.',
+    KEY_ALREADY_REGISTERED: 'This browser is already registered. Reload the window.',
+    SCRIPT_EXECUTION_UNAVAILABLE: 'Page scripts are unavailable. Enable them in Settings (Firefox) or allow user scripts (Chrome).',
   };
-  return messages[code] || 'That action failed. Check diagnostics for the failure code.';
+  return messages[code] || `Something went wrong (${code}).`;
 }
-export function operationLabel(operation: string): string {
+
+export function operationLabel(operation: string | undefined): string {
   const names: Record<string, string> = {
-    get_text: 'Reading page text', get_page_snapshot: 'Inspecting the page', inspect_element: 'Checking a control',
-    navigate: 'Opening a page', wait_for_page: 'Waiting for the page', type_text: 'Entering text',
-    click: 'Using a page control', select_option: 'Selecting an option', set_checked: 'Changing a checkbox',
-    evaluate_script: 'Running page JavaScript', create_workspace_tab: 'Opening a task tab', request_handoff: 'Your next step',
+    get_text: 'Reading text', get_page_snapshot: 'Reading the page', inspect_element: 'Checking an element',
+    navigate: 'Opening a page', wait_for_page: 'Waiting for the page', type_text: 'Typing',
+    click: 'Clicking', select_option: 'Choosing an option', set_checked: 'Toggling a checkbox',
+    evaluate_script: 'Running a script', create_tab: 'Opening a tab', request_handoff: 'Asked for your help',
+    get_screenshot: 'Taking a screenshot', get_interactive_elements: 'Listing controls', press_key: 'Pressing a key',
+    scroll: 'Scrolling', clear_overlays: 'Clearing overlays',
   };
-  return names[operation] || operation.replaceAll('_', ' ');
+  return operation ? names[operation] || operation.replaceAll('_', ' ') : '';
 }

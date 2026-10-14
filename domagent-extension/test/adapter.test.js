@@ -102,20 +102,6 @@ test('browser diagnostics identify the installed extension and available Firefox
   await assert.rejects(f.adapter.browserInfo(), /Browser info API failure/);
 });
 
-test('cosmetic indicator cleanup cannot delay debugger and network protection teardown', async () => {
-  const f = fixture();
-  await f.adapter.initialize([]);
-  await f.adapter.protect(100, ['https://control.example']);
-  await f.adapter.attach(100);
-  let finish;
-  f.api.scripting.executeScript = () => new Promise(resolve => { finish = resolve; });
-  await f.adapter.release(100, { indicatorToken: 'old-marker' });
-  assert.equal(f.adapter.attached.has(100), false);
-  assert.equal(f.adapter.guards.has(100), false);
-  assert.equal(f.calls.some(call => call[0] === 'detach'), true);
-  finish([]);
-});
-
 test('Chrome installs tab-scoped blocking for all resources and removes only its own rules', async () => {
   const f = fixture();
   await f.adapter.initialize([]);
@@ -193,15 +179,6 @@ test('failed privileged detach retains protection and reports failure rather tha
   assert.equal(f.adapter.guards.has(100), true);
   assert.equal(f.adapter.attached.has(100), true);
   assert.equal(f.calls.some(call => call[0] === 'rules' && call[1].removeRuleIds), false);
-});
-
-test('only the user-selected normal-window tab can be shared; no dedicated tab adoption', async () => {
-  const f = fixture();
-  assert.equal((await f.adapter.selectedTabById(1)).id, 1);
-  await assert.rejects(f.adapter.selectedTabById(2), /TARGET_STALE/);
-  f.api.tabs.query = async () => [{ id: 3, url: 'chrome://settings' }];
-  assert.equal(await f.adapter.selectedTab(), null);
-  assert.equal(f.calls.some(call => call[0] === 'create'), false);
 });
 
 test('neutral or protected pages are not eligible for sharing', async () => {
@@ -333,9 +310,8 @@ test('failed document inspection is not an optional-operation capability failure
   f.adapter.onWarning = () => {};
   f.api.scripting.executeScript = async () => { throw new Error('Missing host permission for the tab'); };
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
-  for (const operation of ['navigate', 'get_text', 'get_interactive_elements']) {
-    const work = f.adapter.execute(grant, operation,
-      operation === 'navigate' ? { url: 'https://other.example/' } : {}, () => {});
+  for (const operation of ['get_text', 'get_interactive_elements']) {
+    const work = f.adapter.execute(grant, operation, {}, () => {});
     const rejected = assert.rejects(work, error => error.code === 'PAGE_UNAVAILABLE' &&
       error.inspection_stage === 'document_injection' && error.timeout_ms === 10000 &&
       error.injection_reason === 'permission_denied');
@@ -344,6 +320,9 @@ test('failed document inspection is not an optional-operation capability failure
     await rejected;
   }
   assert.equal(f.calls.some(call => call[0] === 'update'), false);
+  // Navigation needs no document access, so a refused page can still be navigated away from.
+  assert.deepEqual(await f.adapter.execute(grant, 'navigate', { url: 'https://other.example/' }, () => {}),
+    { url: 'https://other.example/', navigation_started: true });
   f.api.scripting.executeScript = async () => [{ error: new Error('Document execution failed') }];
   await assert.rejects(f.adapter.inspect(100, grant.protected_origins), /PAGE_UNAVAILABLE/);
 });
@@ -421,20 +400,6 @@ test('wait_for_page distinguishes loaded state from navigation started and block
   await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}), /WAIT_TIMEOUT/);
   f.api.tabs.get = async () => ({ windowId: 10, pendingUrl: 'https://control.example/login', status: 'loading' });
   await assert.rejects(f.adapter.execute(grant, 'wait_for_page', {}, () => {}), /HANDOFF_REQUIRED/);
-});
-
-test('workspaces move the actual tab, use native panels and close only the owned tab', async () => {
-  for (const browser of ['chrome', 'firefox']) {
-    const f = fixture(browser);
-    await f.adapter.initialize([]);
-    const windowId = await f.adapter.createWorkspace(100);
-    assert.equal(windowId, 10);
-    assert.deepEqual(f.calls.find(call => call[0] === 'move')[1], { tabId: 100, type: 'normal', focused: true });
-    assert(f.calls.some(call => call[0] === (browser === 'chrome' ? 'panel' : 'sidebar')));
-    await assert.rejects(f.adapter.closeWorkspace(999, windowId), /WORKSPACE_CHANGED/);
-    await f.adapter.closeWorkspace(100, windowId);
-    assert.deepEqual(f.calls.filter(call => call[0] === 'remove'), [['remove', 100]]);
-  }
 });
 
 test('post-navigation inspection waits for tab/document readiness and retries only benign inspection', async t => {
@@ -534,23 +499,3 @@ test('navigation between tabs.get and inspection is detected; permanent refusal 
   assert.equal(attempts, before);
 });
 
-test('extra tabs, moving a tab, or an owned opener popup synchronously report boundary loss', async () => {
-  const f = fixture();
-  await f.adapter.initialize([]);
-  await f.adapter.createWorkspace(100);
-  const observed = [];
-  f.adapter.onTabEvent = (...args) => observed.push(args);
-  f.api.tabs.onCreated.listeners[0].fn({ id: 101, windowId: 20, openerTabId: 100 });
-  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
-  observed.length = 0;
-  f.api.tabs.onAttached.listeners[0].fn(101, { newWindowId: 10 });
-  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
-  observed.length = 0;
-  f.api.tabs.onDetached.listeners[0].fn(100);
-  assert(observed.some(([tab, event]) => tab === 100 && event === 'workspace_changed'));
-  f.api.tabs.query = async () => [{ id: 100 }, { id: 101 }];
-  await assert.rejects(f.adapter.assertWorkspace({ tabId: 100, windowId: 10 }), /WORKSPACE_CHANGED/);
-  f.api.tabs.get = async id => ({ id, windowId: 30 });
-  await assert.rejects(f.adapter.closeWorkspace(100, 10), /WORKSPACE_CHANGED/);
-  assert(!f.calls.some(call => call[0] === 'remove'));
-});

@@ -2,32 +2,24 @@
 
 This document describes how to cut a versioned release of DOMAgent and what happens automatically as a result.
 
-## Secure-pairing fork releases
+## Fork releases (dtreskunov/domagent)
 
-The `dtreskunov/domagent` secure-pairing branch currently publishes tested private
-betas manually. These releases contain compiled Chrome and Firefox ZIPs, a
-tracked-source service ZIP, and `SHA256SUMS`. Asset filenames use the service
-release version; the manifests carry the browser extension version (for example,
-service `5.0.0-beta.5`, extension `5.0.3`).
+The fork publishes tested betas manually: compiled Chrome and Firefox ZIPs, a
+tracked-source service ZIP and `SHA256SUMS`. Asset filenames use the service
+version; manifests carry the extension version (service `6.0.0-beta.1`,
+extension `6.0.0`).
 
-The v5 grouped-workspace upgrade intentionally rejects older wire-v4 extensions.
-Update server/browser packages together. Existing keys, tenants and credentials
-need no reset; live authority ends. Explicit schema2->3 migration is required,
-with a matched private DB/code/extension backup. End now leaves tabs open.
-Follow [migration/rollback](docs/V5-MIGRATION.md) and verify identity fingerprints
-before/after deployment. Do not silently restore stale revocations on rollback.
+v6 is a clean break (wire v6, schema 6). Follow [the upgrade notes](docs/V6-UPGRADE.md).
 
-Run the unit/MCP tests, build both extensions, run the real-browser suite, and
-check JavaScript before committing and tagging the exact tested revision.
-Package only the built extension directories and `git archive` source; never
-include runtime state, credentials, browser test profiles, or `node_modules`.
-Publish all assets together, download them again, and verify their hashes.
-Firefox ZIPs are unsigned temporary add-ons, not signed production XPIs.
+Before tagging, run the unit/MCP tests, build both extensions, run the
+real-browser suite (Chrome and native Firefox) and the syntax check, then commit
+and tag the exact tested revision. Package only the built extension directories
+and `git archive` source; never include runtime state, credentials, browser test
+profiles or `node_modules`. Publish all assets together, download them again and
+verify their hashes. Firefox ZIPs are unsigned temporary add-ons.
 
-Manual beta checksums verify asset integrity, not SLSA build provenance. The
-upstream automated pipeline described below does not attest these manual builds.
-Do not claim a provenance level unless its actual attestation was produced and
-verified. Never force-update an existing release tag.
+Manual checksums verify asset integrity, not SLSA provenance. Never force-update
+an existing release tag.
 
 ---
 

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { OPERATION_SCHEMAS, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA, schemaArgumentErrors,
   operationArgumentErrors, validOperationArgs, inspectionErrorDetails, waitErrorDetails,
-  VERSION, POLICY_ID, authPayload, workspacePayload, pairingStartPayload, pairingStatusPayload,
-  pairingConfirmPayload, pairingCancelPayload } from '../../shared/protocol.js';
+  VERSION, registerPayload, tokenPayload, connectPayload, agentColor, GROUP_COLORS, pairingCode,
+  normalizePairingCode, validTabId, TAB_ID_SCHEMA } from '../../shared/protocol.js';
 
 test('beta7 protocol validates source UTF-16 boundary, not line count', () => {
   assert(validOperationArgs('evaluate_script', { script: 'a'.repeat(65536) }));
@@ -22,9 +22,10 @@ test('beta7 optional world, content readiness and manual handoff schemas remain 
   assert(validOperationArgs('wait_for_page', { content_selector: 'a'.repeat(4096) }));
   assert(!validOperationArgs('wait_for_page', { content_selector: 'a'.repeat(4097) }));
   assert(!validOperationArgs('wait_for_page', { content_selector: '' }));
-  assert(validOperationArgs('request_handoff', { suggested_text: 'x'.repeat(8000) }));
-  assert(!validOperationArgs('request_handoff', { suggested_text: 'x'.repeat(8001) }));
-  assert(!validOperationArgs('request_handoff', { suggested_text: false }));
+  assert(validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: 'x'.repeat(8000) }));
+  assert(!validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: 'x'.repeat(8001) }));
+  assert(!validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: false }));
+  assert(!validOperationArgs('request_handoff', {}));
   assert.equal(HANDOFF_SCHEMA.properties.suggested_text.maxLength, 8000);
 });
 
@@ -91,32 +92,25 @@ test('beta7 content readiness_stage preserves bounded waits and immediate zero-t
     last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 1000 }), { last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 1000 });
 });
 
-test('beta7 Run consent policy metadata does not change v5 identity or workspace signature bytes', () => {
-  assert.equal(VERSION, 5);
-  assert.equal(POLICY_ID, 'task-group-run-v1');
-  const c = { origin: 'https://service.test', tenant_id: `t_${'A'.repeat(22)}`, epoch: 'epoch',
-    connection_id: 'connection', nonce: 'nonce', key_id: 'key', client_id: 'client',
-    workspace_id: 'workspace', activation_id: 'activation', group_id: 1, window_id: 2,
-    state: 'active', revision: 3, lease_ms: 5000, request_id: 'request', public_key: {},
-    extension_origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', pairing_code: 'ABCD1234',
-    receipt: 'receipt', label: 'label', proposal_id: 'proposal',
-    tabs: [{ target_id: 'target', tab_id: 7, title: 'Tab', url: 'https://page.test/',
-      page_state: 'ready', capabilities: ['navigate', 'get_text'] }] };
+test('v6 proof transcripts are domain separated and bind origin plus nonce', () => {
+  assert.equal(VERSION, 6);
+  const c = { origin: 'https://service.test', nonce: 'nonce', key_id: 'key', browser_id: 'b1',
+    connection_id: 'connection', extension_origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'Bob' };
   const expected = [
-    [authPayload, ['domagent.v5', 'auth', c.origin, c.tenant_id, c.epoch, c.connection_id, c.nonce, c.key_id]],
-    [workspacePayload, ['domagent.v5', 'workspace', c.origin, c.tenant_id, c.epoch, c.connection_id,
-      c.client_id, c.workspace_id, c.activation_id, c.group_id, c.window_id, c.state, c.revision, c.lease_ms,
-      [['target', 7, 'Tab', 'https://page.test/', 'ready', ['get_text', 'navigate']]]]],
-    [pairingStartPayload, ['domagent.v5', 'pairing-start', c.origin, c.request_id, c.key_id,
-      c.extension_origin, c.pairing_code, c.receipt, c.nonce, c.label]],
-    [pairingStatusPayload, ['domagent.v5', 'pairing-status', c.origin, c.request_id, c.key_id, c.receipt]],
-    [pairingConfirmPayload, ['domagent.v5', 'pairing-confirm', c.origin, c.request_id, c.proposal_id, c.key_id,
-      c.receipt, c.tenant_id, c.client_id, c.nonce]],
-    [pairingCancelPayload, ['domagent.v5', 'pairing-cancel', c.origin, c.request_id, c.key_id, c.receipt]],
+    [registerPayload, ['domagent.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]],
+    [tokenPayload, ['domagent.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]],
+    [connectPayload, ['domagent.v6', 'connect', c.origin, c.nonce, c.browser_id, c.connection_id]],
   ];
-  for (const [payload, bytes] of expected) {
-    assert.equal(new TextDecoder().decode(payload(c)), JSON.stringify(bytes));
-    assert.deepEqual(payload({ ...c, policy_id: 'grouped-workspace-v1' }),
-      payload({ ...c, policy_id: POLICY_ID }));
-  }
+  for (const [payload, bytes] of expected) assert.equal(new TextDecoder().decode(payload(c)), JSON.stringify(bytes));
+});
+
+test('v6 short IDs, pairing codes and agent colors are stable and bounded', () => {
+  assert(validTabId('t1') && validTabId('tzz9') && !validTabId('t') && !validTabId('s1') && !validTabId('t1\n'));
+  assert(new RegExp(TAB_ID_SCHEMA.pattern).test('t2a') && !new RegExp(TAB_ID_SCHEMA.pattern).test('t2A'));
+  const code = pairingCode();
+  assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+  assert.equal(normalizePairingCode(code.toLowerCase()), code.replace('-', ''));
+  assert.throws(() => normalizePairingCode('ILOU-0000'), /PAIRING_UNAVAILABLE/);
+  assert.equal(agentColor('atlas'), agentColor('atlas'));
+  assert(GROUP_COLORS.includes(agentColor('x')) && !GROUP_COLORS.includes('grey'));
 });

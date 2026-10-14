@@ -94,44 +94,6 @@ for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
     } finally { await browser.close(); }
   });
 
-  test(`${name}: own sharing banner must not obstruct approved DOM text-input actions`, async () => {
-    const { pageHelper, sharingIndicator } = await import(pageModule);
-    const browser = await launchBrowser(engine);
-    try {
-      const page = await browser.newPage({ viewport: { width: 500, height: 700 } });
-      await page.setContent('<div style="position:fixed;right:20px;top:25px;width:200px">' +
-        '<input id="text" style="width:200px"><input id="time" type="time"><textarea id="area"></textarea></div>');
-      await page.evaluate(() => {
-        globalThis.chrome = { runtime: { sendMessage: async () => ({ ok: true }) } };
-        globalThis.__domagentDocumentNonce = 'fixture-document';
-      });
-      await page.evaluate(sharingIndicator, {
-        target_id: 'fixture-target', token: 'fixture-token', label: 'Fixture agent',
-        command: { request_id: 'fixture-request', operation: 'type_text',
-          description: 'Fill the explicitly shared field', state: 'executing' },
-      });
-      for (const type of ['text', 'tel', 'email', 'search']) {
-        await page.locator('#text').evaluate((element, type) => { element.type = type; element.blur(); }, type);
-        expect(await runHelper(page, pageHelper, 'click', { selector: '#text' })).toMatchObject({ clicked: true });
-        await expect(page.locator('#text')).toBeFocused();
-        expect(await runHelper(page, pageHelper, 'type_text', {
-          selector: '#text', text: 'fixture@example.org',
-        })).toMatchObject({ typed: true });
-        await expect(page.locator('#text')).toHaveValue('fixture@example.org');
-        await expect(page.locator('[data-domagent-sharing]')).toBeVisible();
-      }
-      await page.evaluate(() => {
-        const cover = document.createElement('div');
-        cover.style.cssText = 'position:fixed;inset:0;background:#eee;z-index:100';
-        document.body.append(cover);
-      });
-      expect(await runHelper(page, pageHelper, 'type_text', {
-        selector: '#text', text: 'must not bypass',
-      })).toEqual({ error: 'ELEMENT_OBSCURED' });
-      await expect(page.locator('#text')).toHaveValue('fixture@example.org');
-    } finally { await browser.close(); }
-  });
-
   test(`${name}: read-only diagnostics and approval binding reject responsive replacements`, async () => {
     const { pageHelper } = await import(pageModule);
     const browser = await launchBrowser(engine);

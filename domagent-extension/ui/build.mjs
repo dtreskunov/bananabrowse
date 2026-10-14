@@ -10,6 +10,8 @@ await build({
   entryPoints: [path.join(root, 'src/index.tsx')],
   bundle: true, outfile: path.join(output, 'ui.js'), format: 'iife', platform: 'browser',
   target: 'es2022', jsx: 'automatic', jsxImportSource: 'preact',
+  // The window bundles the controller; acorn (Firefox user-script source checks) resolves from the runtime package.
+  nodePaths: [path.join(root, '../node_modules')],
   legalComments: 'eof', logLevel: 'warning',
 });
 await cp(path.join(root, 'THIRD-PARTY-NOTICES.txt'), path.join(output, 'THIRD-PARTY-NOTICES.txt'));

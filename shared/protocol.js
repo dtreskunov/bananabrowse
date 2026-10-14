@@ -1,18 +1,14 @@
-export const VERSION = 5;
-export const POLICY_ID = 'task-group-run-v1';
-export const WORKSPACE_LEASE_MS = 5000;
-export const WORKSPACE_TAB_LIMIT = 8;
-export const WORKSPACE_CONCURRENCY = 2;
-export const WORKSPACE_END_REASONS = Object.freeze([
-  'USER_PAUSED', 'USER_ENDED', 'PANEL_CLOSED', 'VISIBILITY_LOST', 'CONNECTION_LOST',
-  'SERVICE_RESTARTED', 'CONNECTION_REPLACED', 'CLIENT_REVOKED', 'LEASE_EXPIRED', 'WORKSPACE_CHANGED',
-]);
-export function validWorkspaceEndReason(value) {
-  return WORKSPACE_END_REASONS.includes(value);
-}
-export const HEARTBEAT_MS = 5_000;
-export const LIVENESS_MS = 15_000;
+export const VERSION = 6;
+export const SESSION_TAB_LIMIT = 8;
+export const SESSION_CONCURRENCY = 2;
+export const HEARTBEAT_MS = 30_000;
+export const LIVENESS_MS = 90_000;
+export const ACCESS_TOKEN_MS = 600_000;
+export const PAIRING_CODE_MS = 300_000;
+export const UNPAIRED_BROWSER_MS = 86_400_000;
+export const SESSION_RETENTION_MS = 7 * 86_400_000;
 export const HUMAN_WAIT_MS = 600_000;
+export const DEFAULT_HUMAN_WAIT_MS = 300_000;
 export const EXECUTION_MS = 25_000;
 export const PAGE_WAIT_MS = 10_000;
 export const DEFAULT_OUTPUT_BYTES = 16 * 1024;
@@ -21,13 +17,24 @@ export const DEFAULT_TEXT_CHARS = 4000;
 export const MAX_TEXT_CHARS = 16_000;
 export const DEFAULT_ELEMENTS = 50;
 export const MAX_ELEMENTS = 100;
-export const TARGET_ID_SCHEMA = Object.freeze({
-  type: 'string',
-  pattern: '^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9_-]{43})(?![\\s\\S])',
-  description: 'Opaque shared-tab handle returned by request_browser_access; pass it unchanged. UUID handles and legacy 43-character tokens are accepted. Shape alone does not authorize access.',
-});
-export function validTargetId(value) {
-  return typeof value === 'string' && new RegExp(TARGET_ID_SCHEMA.pattern).test(value);
+export const GROUP_COLORS = Object.freeze(['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
+
+const shortId = prefix => Object.freeze({ type: 'string', pattern: `^${prefix}[0-9a-z]{1,12}(?![\\s\\S])` });
+export const BROWSER_ID_SCHEMA = shortId('b');
+export const SESSION_ID_SCHEMA = shortId('s');
+export const GROUP_ID_SCHEMA = shortId('g');
+export const TAB_ID_SCHEMA = Object.freeze({ ...shortId('t'),
+  description: 'Tab ID from list_tabs, request_session or create_tab. IDs are scoped to your sessions; shape alone grants nothing.' });
+export const AGENT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+export const validShortId = (prefix, value) =>
+  typeof value === 'string' && new RegExp(`^${prefix}[0-9a-z]{1,12}$`).test(value);
+export const validTabId = value => validShortId('t', value);
+
+/** Stable per-agent native group color; grey is reserved for the attention flash. */
+export function agentColor(agentId) {
+  let hash = 0;
+  for (const char of String(agentId)) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return GROUP_COLORS[hash % GROUP_COLORS.length];
 }
 
 export const READINESS_ERRORS = Object.freeze([
@@ -84,7 +91,7 @@ const target = {
   document: { type: 'string', minLength: 8, maxLength: 128 },
 };
 const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS,
-  description: 'Page/element readiness wait after approval, not the human wait. Element actions default to 3000 ms; wait_for_page defaults to 10000 ms. Use 0 for immediate selector probes. An exhausted positive wait returns WAIT_TIMEOUT; last_error identifies the last element-readiness cause.' } };
+  description: 'Page/element readiness wait, not a human wait. Element actions default to 3000 ms; wait_for_page defaults to 10000 ms. Use 0 for immediate selector probes. An exhausted positive wait returns WAIT_TIMEOUT; last_error identifies the last element-readiness cause.' } };
 const targeted = { ...target, ...timeout };
 const text = { type: 'string', maxLength: 65_536 };
 const operation = (properties, required = [], needsTarget = false) => ({
@@ -125,9 +132,11 @@ export const OPERATION_SCHEMAS = Object.freeze({
 });
 export const OPERATIONS = Object.freeze(Object.keys(OPERATION_SCHEMAS));
 export const HANDOFF_SCHEMA = operation({
+  instructions: { type: 'string', minLength: 1, maxLength: 2000, unit: 'unicode_code_points',
+    description: 'What the person should do in this tab. Plain text, maximum 2000 Unicode code points.' },
   suggested_text: { type: 'string', maxLength: 8000,
     description: 'Optional text for the user to copy manually. Maximum 8000 UTF-16 code units; never inserted or submitted automatically.' },
-});
+}, ['instructions']);
 export const DESCRIPTION_SCHEMA = Object.freeze({ type: 'string', minLength: MIN_DESCRIPTION_LENGTH,
   maxLength: 500, unit: 'unicode_code_points', trimMinimum: true });
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![\\s\\S])';
@@ -193,25 +202,8 @@ export function validOperationArgs(name, args) {
   return operationArgumentErrors(name, args).length === 0;
 }
 
-export function tenantId(value) {
-  if (typeof value !== 'string' || !/^t_[A-Za-z0-9_-]{22}$/.test(value)) {
-    throw new Error('INVALID_TENANT');
-  }
-  return value;
-}
-
-export function connectionUrl(origin, tenant) {
-  return `${serviceOrigin(origin)}/join/${tenantId(tenant)}`;
-}
-
-export function parseConnectionUrl(value) {
-  const url = new URL(value.trim());
-  const match = /^\/join\/(t_[A-Za-z0-9_-]{22})\/?$/.exec(url.pathname);
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !match) {
-    throw new Error('INVALID_CONNECTION_LINK');
-  }
-  const tenant_id = tenantId(match[1]);
-  return { origin: url.origin, tenant_id, connection_url: connectionUrl(url.origin, tenant_id) };
+export function validName(value, max = 80) {
+  return typeof value === 'string' && value.trim().length > 0 && [...value].length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 export function serviceOrigin(value) {
@@ -254,33 +246,17 @@ export async function keyId(jwk) {
   return base64url(await crypto.subtle.digest('SHA-256', encode([jwk.kty, jwk.crv, jwk.x, jwk.y])));
 }
 
-export function authPayload(c) {
-  return encode(['domagent.v5', 'auth', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.nonce, c.key_id]);
+// Domain-separated proof transcripts. Each binds the service origin and a fresh server nonce.
+export function registerPayload(c) {
+  return encode(['domagent.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]);
 }
 
-export function workspacePayload(c) {
-  return encode(['domagent.v5', 'workspace', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id,
-    c.client_id, c.workspace_id, c.activation_id, c.group_id, c.window_id, c.state, c.revision, c.lease_ms,
-    c.tabs.map(tab => [tab.target_id, tab.tab_id, tab.title, tab.url, tab.page_state, [...tab.capabilities].sort()]),
-    ...(Object.hasOwn(c, 'end_reason') ? [c.end_reason] : [])]);
+export function tokenPayload(c) {
+  return encode(['domagent.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]);
 }
 
-export function pairingStartPayload(c) {
-  return encode(['domagent.v5', 'pairing-start', c.origin, c.request_id, c.key_id,
-    c.extension_origin, c.pairing_code, c.receipt, c.nonce, c.label]);
-}
-
-export function pairingStatusPayload(c) {
-  return encode(['domagent.v5', 'pairing-status', c.origin, c.request_id, c.key_id, c.receipt]);
-}
-
-export function pairingConfirmPayload(c) {
-  return encode(['domagent.v5', 'pairing-confirm', c.origin, c.request_id, c.proposal_id, c.key_id,
-    c.receipt, c.tenant_id, c.client_id, c.nonce]);
-}
-
-export function pairingCancelPayload(c) {
-  return encode(['domagent.v5', 'pairing-cancel', c.origin, c.request_id, c.key_id, c.receipt]);
+export function connectPayload(c) {
+  return encode(['domagent.v6', 'connect', c.origin, c.nonce, c.browser_id, c.connection_id]);
 }
 
 export function normalizePairingCode(value) {
@@ -290,24 +266,10 @@ export function normalizePairingCode(value) {
   return code;
 }
 
-export function startPayload(c) {
-  return encode(['domagent.v4', 'enroll-start', c.origin, tenantId(c.tenant_id), c.nonce, c.key_id, c.extension_origin, c.label]);
-}
-
-export function statusPayload(c) {
-  return encode(['domagent.v4', 'enroll-status', c.origin, tenantId(c.tenant_id), c.enrollment_id]);
-}
-
-export function enrollmentPayload(c) {
-  return encode(['domagent.v4', 'enroll-confirm', c.origin, tenantId(c.tenant_id), c.enrollment_id, c.owner_id,
-    c.key_id, c.nonce, c.extension_origin]);
-}
-
-export function grantPayload(c) {
-  if (!Number.isSafeInteger(c.tab_id) || c.tab_id < 0) throw new Error('INVALID_TAB');
-  if (!Number.isSafeInteger(c.window_id) || c.window_id < 0) throw new Error('INVALID_WINDOW');
-  return encode(['domagent.v4', 'grant', c.origin, tenantId(c.tenant_id), c.epoch, c.connection_id, c.request_id,
-    c.client_id, c.target_id, c.tab_id, c.window_id, c.policy_id, c.nonce, [...c.capabilities].sort()]);
+export function pairingCode(random = n => crypto.getRandomValues(new Uint8Array(n))) {
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  const code = [...random(8)].map(value => alphabet[value % 32]).join('');
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
 }
 
 export async function sign(key, payload) {

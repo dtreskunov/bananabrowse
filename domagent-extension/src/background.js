@@ -1,228 +1,64 @@
-import { GroupAdapter } from './group-adapter.js';
-import { Controller } from './controller.js';
-import { DeviceKeys } from './keys.js';
-import { errorCode, fail, isUiSender } from './security.js';
-import { serviceOrigin } from '../../shared/protocol.js';
-
+// The extension UI and all browser control live in the app window (app.html).
+// This background script only opens/focuses that window and cleans up after it closes.
 const api = typeof browser === 'undefined' ? chrome : browser;
-const action = api.action || api.browserAction;
-const adapter = new GroupAdapter(api, BUILD_BROWSER);
-let controller;
-let fatal;
-const menu = api.menus || api.contextMenus;
+const APP = 'app.html';
 
-async function badge() {
-  const state = controller.snapshot();
-  const count = state.pending_human.length + state.access_requests.length;
-  const active = state.workspaces.some(workspace => workspace.state === 'active');
-  await action.setBadgeText({ text: count ? `${count}` : active ? 'ON' : '' });
-  await action.setBadgeBackgroundColor({ color: count ? '#be6824' : '#365375' });
-  await action.setTitle({ title: count ? `DomAgent: ${count} task(s) need your help` : active ? 'DomAgent: workspace active' : 'DomAgent: inactive' });
+async function appWindowId() {
+  const { appWindowId: id } = await api.storage.session.get('appWindowId');
+  if (!Number.isInteger(id)) return null;
+  try { await api.windows.get(id); return id; }
+  catch { await api.storage.session.remove('appWindowId'); return null; }
 }
 
-controller = new Controller({
-  adapter, keys: new DeviceKeys(), storage: api.storage.local, extensionUrl: api.runtime.getURL(''),
-  changed: () => { void badge().catch(error => console.error('DomAgent badge:', errorCode(error))); },
-  notify: async requestId => {
-    const options = { type: 'basic', iconUrl: api.runtime.getURL('icons/icon128.png'),
-      title: 'DomAgent needs your help', message: 'Your assistant is waiting for a browser task. Click to go to the task.' };
-    if (controller.notificationTasks.size > 1) {
-      const updated = await api.notifications.update('domagent-human', {
-        message: `${controller.notificationTasks.size} browser tasks need your help. Click to go to a task.`,
-      });
-      if (updated) return;
+async function openApp() {
+  const existing = await appWindowId();
+  if (existing !== null) { await api.windows.update(existing, { focused: true }); return; }
+  const { bounds } = await api.storage.local.get('bounds');
+  const size = { width: 440, height: 760 };
+  if (bounds && Number.isInteger(bounds.width) && Number.isInteger(bounds.height)) {
+    Object.assign(size, { width: Math.max(360, bounds.width), height: Math.max(480, bounds.height) });
+    if (Number.isInteger(bounds.left) && Number.isInteger(bounds.top)) Object.assign(size, { left: bounds.left, top: bounds.top });
+  }
+  const window = await api.windows.create({ url: api.runtime.getURL(APP), type: 'popup', focused: true, ...size });
+  await api.storage.session.set({ appWindowId: window.id });
+}
+
+async function cleanup() {
+  // Browser authority ends with the window; remove anything it could not tear down while unloading.
+  await api.action.setBadgeText({ text: '' }).catch(() => {});
+  await api.action.setTitle({ title: 'DomAgent (closed)' }).catch(() => {});
+  await (api.menus || api.contextMenus).removeAll().catch(() => {});
+  const notifications = await api.notifications.getAll().catch(() => ({}));
+  for (const id of Object.keys(notifications)) if (id.startsWith('domagent-')) await api.notifications.clear(id).catch(() => {});
+  if (BUILD_BROWSER === 'chrome') {
+    const rules = await api.declarativeNetRequest.getSessionRules().catch(() => []);
+    if (rules.length) await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map(rule => rule.id) }).catch(() => {});
+    const targets = await api.debugger.getTargets().catch(() => []);
+    for (const target of targets) {
+      if (target.attached && Number.isInteger(target.tabId)) await api.debugger.detach({ tabId: target.tabId }).catch(() => {});
     }
-    await api.notifications.create('domagent-human', options);
-  },
-  clearNotification: async () => {
-    const remaining = controller.notificationTasks.size;
-    if (!remaining) await api.notifications.clear('domagent-human');
-    else await api.notifications.update('domagent-human', {
-      message: `${remaining} browser task(s) need your help. Click to go to a task.`,
-    });
-  },
-  notifyAccess: async requestId => {
-    await api.notifications.create(`domagent-access-${requestId}`, {
-      type: 'basic', iconUrl: api.runtime.getURL('icons/icon128.png'),
-      title: 'DomAgent browser access requested',
-      message: 'Your assistant is waiting for browser access. Click to review the task and Continue.',
-    });
-  },
-  clearAccessNotification: requestId => api.notifications.clear(`domagent-access-${requestId}`),
-});
-const ready = controller.initialize().catch(error => { fatal = error; controller.report(error); });
-let localMutation = Promise.resolve();
-
-async function uiAction(message) {
-  await ready;
-  if (fatal) throw fatal;
-  if (message.type === 'ui.state') return uiSnapshot(message.windowId);
-  if (message.type === 'ui.configure') {
-    let value = message.service_origin.trim();
-    if (!value.includes('://')) value = `https://${value}`;
-    const origin = serviceOrigin(value);
-    if (!await api.permissions.contains({ origins: [`${origin}/*`] })) fail('PERMISSION_REQUIRED');
-    const response = await fetch(`${origin}/.well-known/domagent`, { credentials: 'omit', redirect: 'error',
-      signal: AbortSignal.timeout(10000) });
-    const raw = await response.text();
-    if (!response.ok || raw.length > 4096) fail('INVALID_MESSAGE');
-    const metadata = JSON.parse(raw);
-    if (metadata.service !== 'domagent' || metadata.protocol_version !== 5) fail('PLATFORM_UNSUPPORTED');
-    await controller.configure({ service_origin: origin });
-    return controller.beginPairing();
   }
-  if (message.type === 'ui.pairAgain') return controller.beginPairing();
-  if (message.type === 'ui.confirmPairing') return controller.confirmPairing();
-  if (message.type === 'ui.cancelPairing') return controller.cancelPairing();
-  if (message.type === 'ui.connect') return controller.enable();
-  if (message.type === 'ui.disconnect') return controller.disconnect();
-  if (message.type === 'ui.switch') return controller.switchConnection(message.origin, message.tenant_id);
-  if (message.type === 'ui.start') return controller.startWorkspace(message.windowId, message.groupId);
-  if (message.type === 'ui.startNew') return controller.startNewWorkspace(message.windowId);
-  if (message.type === 'ui.decision') return controller.decide(message.request_id, message.action);
-  if (message.type === 'ui.declineAccess') return controller.declineAccess(message.request_id);
-  if (message.type === 'ui.pauseAll') {
-    const tasks = [...controller.workspaces.values()].map(workspace => controller.stopWorkspace(workspace, 'paused'));
-    return Promise.all(tasks);
-  }
-  const workspace = controller.workspaces.get(message.workspace_id);
-  if (!workspace) fail('WORKSPACE_INACTIVE');
-  if (message.type === 'ui.pause') return controller.stopWorkspace(workspace, 'paused');
-  if (message.type === 'ui.end') return controller.endWorkspace(workspace);
-  if (message.type === 'ui.focus') {
-    if (!workspace.tabs.has(message.tabId)) fail('TAB_NOT_IN_WORKSPACE');
-    return adapter.focusTab(message.tabId);
-  }
-  if (message.type === 'ui.add') {
-    const tab = await adapter.selectedTab(workspace.windowId);
-    if (!tab) fail('TARGET_STALE');
-    adapter.createdTabs.delete(tab.id); workspace.excluded.delete(tab.id);
-    await api.tabs.group({ groupId: workspace.groupId, tabIds: [tab.id] });
-    return controller.refresh();
-  }
-  if (message.type === 'ui.move') {
-    await controller.stopWorkspace(workspace, 'paused');
-    const tabs = await api.tabs.query({ groupId: workspace.groupId });
-    if (!tabs.length) fail('TAB_NOT_IN_WORKSPACE');
-    const window = await api.windows.create({ tabId: tabs[0].id, type: 'normal', focused: true });
-    if (tabs.length > 1) await api.tabs.move(tabs.slice(1).map(tab => tab.id), { windowId: window.id, index: -1 });
-    workspace.groupId = await api.tabs.group({ tabIds: tabs.map(tab => tab.id) });
-    workspace.windowId = window.id;
-    await api.tabGroups.update(workspace.groupId, { title: `DomAgent - ${controller.connection.client_label}`, color: 'grey' });
-    await adapter.openPanel({ windowId: window.id });
-    return;
-  }
-  fail('INVALID_MESSAGE');
 }
 
-async function uiSnapshot(windowId) {
-  const snapshot = controller.snapshot();
-  const [websites, scripting] = await Promise.all([
-    api.permissions.contains({ origins: ['http://*/*', 'https://*/*'] }),
-    BUILD_BROWSER === 'firefox' ? api.permissions.contains({ permissions: ['userScripts'] }) : Promise.resolve(true),
-  ]);
-  const permissions = { websites, scripting };
-  const counts = { active_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active').length,
-    starting_workspace_count: snapshot.workspaces.filter(workspace => workspace.state === 'active' && !workspace.acknowledged).length,
-    pending_human_count: snapshot.pending_human.length };
-  if (windowId === undefined) return { ...snapshot, ...counts, permissions, available_groups: [] };
-  // Native previews stay on the trusted local UI boundary, never in signed MCP state.
-  const [groups, tabs] = await Promise.all([api.tabGroups.query({ windowId }), api.tabs.query({ windowId })]);
-  return { ...snapshot, ...counts, permissions,
-    available_groups: groups.slice(0, 20).map(group => {
-      const members = tabs.filter(tab => tab.groupId === group.id);
-      return { groupId: group.id, title: group.title || 'Untitled group', tab_count: members.length,
-        tab_titles: members.slice(0, 3).map(tab => (tab.title || 'New tab').slice(0, 160)) };
-    }),
-    workspaces: snapshot.workspaces.filter(workspace => workspace.windowId === windowId),
-    activity_feed: snapshot.activity_feed.filter(entry => entry.windowId === windowId),
-  };
-}
-
-api.runtime.onMessage.addListener((message, sender, respond) => {
-  if (!isUiSender(sender, api.runtime)) { respond({ ok: false, error: { code: 'NOT_AUTHORIZED' } }); return false; }
-  const run = () => uiAction(message);
-  const immediate = ['ui.state', 'ui.pause', 'ui.pauseAll', 'ui.end', 'ui.disconnect', 'ui.decision', 'ui.declineAccess'].includes(message.type);
-  const work = immediate ? run() : localMutation.then(run, run);
-  if (!immediate) localMutation = work;
-  work.then(value => respond({ ok: true, value }), error => {
-    controller.report(error); respond({ ok: false, error: { code: errorCode(error) } });
-  });
-  return true;
-});
-
-api.runtime.onConnect.addListener(port => {
-  const sender = port.sender;
-  if (port.name !== 'domagent-panel' || !isUiSender(sender, api.runtime) ||
-      new URL(sender.url).pathname !== '/panel.html' || sender.tab) {
-    port.disconnect(); return;
-  }
-  let windowId;
-  port.onMessage.addListener(message => {
-    void ready.then(async () => {
-      if (message.type !== 'heartbeat' || !Number.isSafeInteger(message.windowId)) fail('INVALID_MESSAGE');
-      if (windowId === undefined) {
-        windowId = message.windowId;
-        adapter.registerPanel(windowId, port);
-      } else if (message.windowId !== windowId) fail('NOT_AUTHORIZED');
-      adapter.touchPanel(windowId, port);
-      port.postMessage({ type: 'state', value: await uiSnapshot(windowId) });
-    }).catch(error => { controller.report(error); port.disconnect(); });
-  });
-  port.onDisconnect.addListener(() => { if (windowId !== undefined) adapter.unregisterPanel(windowId, port); });
-});
-
-async function goToHuman(requestId) {
-  const task = controller.notificationTasks.get(requestId);
-  if (!task) return;
-  controller.check(task.workspace, task.tab, task.task);
-  await adapter.focusTab(task.tab.tabId);
-  await adapter.openPanel({ windowId: task.workspace.windowId });
-}
-api.notifications.onClicked.addListener(requestId => {
-  if (requestId.startsWith('domagent-access-')) {
-    void controller.reviewAccess(requestId.slice('domagent-access-'.length), () => action.openPopup())
-      .catch(error => controller.report(Object.assign(new Error('CONTROL_POPUP_UNAVAILABLE'), {
-      code: 'CONTROL_POPUP_UNAVAILABLE', cause: error,
-    })));
-    return;
-  }
-  const pending = requestId === 'domagent-human' ? [...controller.notificationTasks.keys()][0] : requestId;
-  if (pending) void goToHuman(pending).catch(error => controller.report(error));
-});
+api.action.onClicked.addListener(() => { void openApp().catch(error => console.error('DomAgent:', error?.message)); });
 api.runtime.onInstalled.addListener(details => {
-  if (details.reason === 'install') void api.runtime.openOptionsPage().catch(error => controller.report(error));
+  if (details.reason === 'install') void openApp().catch(error => console.error('DomAgent:', error?.message));
 });
-void ready.then(async () => {
-  await menu.removeAll();
-  const create = properties => new Promise((resolve, reject) => {
-    menu.create(properties, () => {
-      const error = api.runtime.lastError;
-      if (error) reject(new Error('TAB_MENU_UNAVAILABLE')); else resolve();
-    });
-  });
-  try {
-    await create({ id: 'domagent-add', title: 'Add to DomAgent workspace', contexts: ['tab'] });
-    await create({ id: 'domagent-remove', title: 'Remove from DomAgent workspace', contexts: ['tab'] });
-  } catch (error) {
-    console.warn('DomAgent native tab menus unavailable; toolbar/sidebar remains available.');
-    await menu.removeAll();
-    await create({ id: 'domagent-add', title: 'Add to DomAgent workspace', contexts: ['page'] });
-  }
-}).catch(error => controller.report(error));
-menu.onClicked.addListener((info, tab) => {
-  void ready.then(async () => {
-    const workspace = [...controller.workspaces.values()].find(workspace => workspace.windowId === tab.windowId);
-    if (!workspace) fail('WORKSPACE_INACTIVE');
-    if (info.menuItemId === 'domagent-remove') {
-      const controlled = workspace.tabs.get(tab.id);
-      if (controlled) controller.dropTab(workspace, controlled, 'TAB_NOT_IN_WORKSPACE');
-      await api.tabs.ungroup([tab.id]);
-      await controller.sync(workspace);
-    } else if (info.menuItemId === 'domagent-add') {
-      adapter.createdTabs.delete(tab.id); workspace.excluded.delete(tab.id);
-      await api.tabs.group({ groupId: workspace.groupId, tabIds: [tab.id] });
-      await controller.refresh();
-    }
-  }).catch(error => controller.report(error));
+api.runtime.onStartup.addListener(() => {
+  void api.storage.local.get('settings').then(({ settings }) => {
+    if (settings?.openAtStartup === true) return openApp();
+    return cleanup();
+  }).catch(error => console.error('DomAgent:', error?.message));
+});
+api.windows.onRemoved.addListener(windowId => {
+  void api.storage.session.get('appWindowId').then(async ({ appWindowId: id }) => {
+    if (id !== windowId) return;
+    await api.storage.session.remove('appWindowId');
+    await cleanup();
+  }).catch(() => {});
+});
+api.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== api.runtime.id || message?.type !== 'open-app') return false;
+  void openApp().then(() => respond({ ok: true }), () => respond({ ok: false }));
+  return true;
 });

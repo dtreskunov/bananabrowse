@@ -33,7 +33,7 @@ export function failureCode(error) {
 }
 
 const FIELDS = new Set([
-  'tenant_id', 'device_id', 'client_id', 'target_id', 'request_id',
+  'browser_id', 'agent_id', 'session_id', 'tab_id', 'request_id',
   'operation', 'code', 'duration_ms', 'close_code',
 ]);
 

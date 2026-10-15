@@ -56,6 +56,10 @@ a { color: var(--primary); }
 .status.ok .status-dot { background: var(--success); }
 .status.busy .status-dot { background: var(--warning); }
 main { padding: 14px; display: grid; gap: 18px; }
+/* Single-column grids must not grow to fit nowrap text (purposes, tab titles); let it ellipsize or wrap. */
+main, .requests, .card, .sessions, .tabs, .settings, .field, .urls, .activity ol { grid-template-columns: minmax(0, 1fr); }
+.card > *, .session, .agent, .feed > div { min-width: 0; }
+.card p, .card h2, .card blockquote, .tab-link { overflow-wrap: anywhere; }
 .app > main { align-content: start; }
 
 .notice { padding: 8px 10px; border-radius: 6px; background: var(--warning-bg); color: var(--warning); }
@@ -67,9 +71,6 @@ blockquote { padding: 6px 10px; border-left: 3px solid var(--border-strong); ove
 .urls { list-style: none; padding: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
 .actions { display: flex; gap: 8px; margin-top: 4px; }
 .instructions { white-space: pre-wrap; overflow-wrap: anywhere; }
-.suggested { display: grid; gap: 6px; }
-.suggested textarea { min-height: 64px; max-height: 200px; resize: vertical; }
-.suggested button { justify-self: start; }
 .choice { display: flex; align-items: center; gap: 8px; }
 
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }

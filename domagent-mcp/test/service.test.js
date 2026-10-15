@@ -222,10 +222,9 @@ test('handoff waits for the user, only blocks its tab and resolves on Done', asy
   const session = await pending;
   extension.autoReady = false;
   extension.serve(command => command.operation === 'request_handoff' ? { state: 'completed', user_confirmed: true } : { text: 'x' });
-  const handoff = agent.call('request_handoff', { tab_id: session.tabs[0].tab_id, instructions: 'Please log in',
-    suggested_text: 'user@example.test' });
+  const handoff = agent.call('request_handoff', { tab_id: session.tabs[0].tab_id, instructions: 'Please log in' });
   const command = await extension.next('command', m => m.operation === 'request_handoff');
-  assert.deepEqual(command.args, { instructions: 'Please log in', suggested_text: 'user@example.test' });
+  assert.deepEqual(command.args, { instructions: 'Please log in' });
   extension.autoReady = true;
   // The other tab keeps working while the human step is pending.
   const read = agent.call('get_text', { tab_id: session.tabs[1].tab_id, description: DESCRIPTION });

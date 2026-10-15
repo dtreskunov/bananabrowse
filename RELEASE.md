@@ -6,8 +6,8 @@ This document describes how to cut a versioned release of DOMAgent and what happ
 
 The fork publishes tested betas manually: compiled Chrome and Firefox ZIPs, a
 tracked-source service ZIP and `SHA256SUMS`. Asset filenames use the service
-version; manifests carry the extension version (service `6.0.0-beta.1`,
-extension `6.0.0`).
+version; manifests carry the extension version (service `6.0.0-beta.2`,
+extension `6.0.1`).
 
 v6 is a clean break (wire v6, schema 6). Follow [the upgrade notes](docs/V6-UPGRADE.md).
 

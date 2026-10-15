@@ -114,7 +114,7 @@ export class Controller {
       handoffs: [...this.handoffs.values()].map(({ session, tab, task }) => ({
         request_id: task.message.request_id, agent: agentsById.get(session.agent_id) || { name: session.agent_id },
         session_title: session.title, tab_title: tab.title, tabId: tab.tabId,
-        instructions: task.message.args.instructions, suggested_text: task.message.args.suggested_text || null })),
+        instructions: task.message.args.instructions })),
       feed: this.feed.slice(-100),
       settings: { ...this.settings },
       pending_count: this.pendingCount(),

@@ -134,8 +134,6 @@ export const OPERATIONS = Object.freeze(Object.keys(OPERATION_SCHEMAS));
 export const HANDOFF_SCHEMA = operation({
   instructions: { type: 'string', minLength: 1, maxLength: 2000, unit: 'unicode_code_points',
     description: 'What the person should do in this tab. Plain text, maximum 2000 Unicode code points.' },
-  suggested_text: { type: 'string', maxLength: 8000,
-    description: 'Optional text for the user to copy manually. Maximum 8000 UTF-16 code units; never inserted or submitted automatically.' },
 }, ['instructions']);
 export const DESCRIPTION_SCHEMA = Object.freeze({ type: 'string', minLength: MIN_DESCRIPTION_LENGTH,
   maxLength: 500, unit: 'unicode_code_points', trimMinimum: true });

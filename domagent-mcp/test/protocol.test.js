@@ -22,11 +22,10 @@ test('beta7 optional world, content readiness and manual handoff schemas remain 
   assert(validOperationArgs('wait_for_page', { content_selector: 'a'.repeat(4096) }));
   assert(!validOperationArgs('wait_for_page', { content_selector: 'a'.repeat(4097) }));
   assert(!validOperationArgs('wait_for_page', { content_selector: '' }));
-  assert(validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: 'x'.repeat(8000) }));
-  assert(!validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: 'x'.repeat(8001) }));
-  assert(!validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: false }));
+  assert(validOperationArgs('request_handoff', { instructions: 'Log in' }));
+  assert(!validOperationArgs('request_handoff', { instructions: 'Log in', suggested_text: 'removed in 6.0.1' }));
   assert(!validOperationArgs('request_handoff', {}));
-  assert.equal(HANDOFF_SCHEMA.properties.suggested_text.maxLength, 8000);
+  assert.deepEqual(Object.keys(HANDOFF_SCHEMA.properties), ['instructions']);
 });
 
 test('beta7 field errors distinguish type, required, bounds and target conflicts without values', () => {

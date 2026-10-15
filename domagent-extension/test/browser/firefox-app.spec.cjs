@@ -151,7 +151,7 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
 
     await agent.call('end_session', { session_id: session.session_id });
     await poll('c.sessions.size').toBe(0);
-    expect(await app('browser.tabGroups.query({}).then(groups => groups.length)')).toBe(0);
+    await poll('browser.tabGroups.query({}).then(groups => groups.length)').toBe(0);
   } finally {
     await stop().catch(() => {});
     await service.close();

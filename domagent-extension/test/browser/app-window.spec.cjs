@@ -54,10 +54,11 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     expect(paired).toMatchObject({ name: "Bob's Chrome", paired: true });
     expect(await agent.call('list_browsers')).toEqual([expect.objectContaining({ browser_id: paired.browser_id, online: true })]);
 
-    const requested = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'Check the disposable fixture page',
+    const requested = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'Check the disposable fixture page' +
+      ' and then keep going with a deliberately long purpose that would not fit on a single line of the window'.repeat(3),
       urls: [service.pageUrl], title: 'Fixture task' });
     await expect(app.getByRole('heading', { name: 'Atlas wants to open a session' })).toBeVisible();
-    await expect(app.getByText('Check the disposable fixture page')).toBeVisible();
+    await expect(app.getByText(/^Check the disposable fixture page/)).toBeVisible();
     await app.getByRole('button', { name: 'Approve' }).click();
     const session = await requested;
     expect(session).toMatchObject({ state: 'attached', title: 'Fixture task' });
@@ -86,13 +87,23 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     await agent.call('report_progress', { session_id: session.session_id, message: 'Fixture checks are halfway done' });
     await expect(app.getByText('Fixture checks are halfway done')).toBeVisible();
 
-    const handoff = agent.call('request_handoff', { tab_id: tabId, instructions: 'Confirm the fixture page looks right',
-      suggested_text: 'looks right' });
+    const handoff = agent.call('request_handoff', { tab_id: tabId, instructions: 'Confirm the fixture page looks right. ' +
+      'Order #WN65795153 https://example.test/a/very/long/unbroken/path/'.repeat(4) + 'x'.repeat(200) })
+      .then(value => ({ value }), error => ({ error }));
     await expect(app.getByRole('heading', { name: 'Atlas needs your help' })).toBeVisible();
+    // Long instructions, purposes and tab titles wrap or ellipsize; nothing scrolls sideways, even in a narrow window.
+    expect(await app.locator('textarea').count()).toBe(0);
+    for (const width of [900, 360]) {
+      await app.setViewportSize({ width, height: 760 });
+      expect(await app.evaluate(() => [...document.querySelectorAll('main *')]
+        .filter(element => element.getBoundingClientRect().right > document.documentElement.clientWidth + 1)
+        .map(element => element.className || element.tagName))).toEqual([]);
+      expect(await app.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    }
     await expect.poll(() => worker.evaluate(id => chrome.tabGroups.get(id).then(g => g.color), group.id), { timeout: 5000 }).toBe('grey');
-    expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('1');
+    await expect.poll(() => worker.evaluate(() => chrome.action.getBadgeText({}))).toBe('1');
     await app.getByRole('button', { name: 'Done' }).click();
-    expect(await handoff).toEqual({ state: 'completed', user_confirmed: true });
+    expect(await handoff).toEqual({ value: { state: 'completed', user_confirmed: true } });
     await expect.poll(() => worker.evaluate(id => chrome.tabGroups.get(id).then(g => g.color), group.id)).toBe('green');
 
     // Closing the window asks first, then ends the connection gracefully.

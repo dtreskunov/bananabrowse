@@ -8,7 +8,7 @@ export interface SessionView {
 export interface RequestView { request_id: string; agent: Agent; purpose: string; urls: string[]; title: string; expires_at: number }
 export interface HandoffView {
   request_id: string; agent: Agent; session_title: string; tab_title: string; tabId: number;
-  instructions: string; suggested_text: string | null;
+  instructions: string;
 }
 export interface FeedEntry {
   id: string; time: number; kind?: string; agent_id?: string; session_id?: string; title?: string | null;

@@ -132,18 +132,12 @@ function SessionRequest({ request }: { request: RequestView }) {
 }
 
 function Handoff({ handoff }: { handoff: HandoffView }) {
-  const [copied, setCopied] = useState(false);
   return <article class="card attention">
     <h2><Dot color={handoff.agent.color}/>{handoff.agent.name} needs your help</h2>
     <button class="link tab-link" onClick={() => void act('Opening tab', () => controller.focusTab(handoff.tabId))}>
       {handoff.tab_title || 'Open the tab'}
     </button>
     <p class="instructions">{handoff.instructions}</p>
-    {handoff.suggested_text && <div class="suggested">
-      <textarea readOnly value={handoff.suggested_text} aria-label="Suggested text"/>
-      <button onClick={() => void act('Copying', async () => { await copy(handoff.suggested_text!); setCopied(true); })}>
-        {copied ? 'Copied' : 'Copy'}</button>
-    </div>}
     <Actions>
       <button class="primary" disabled={busy.value !== null} onClick={() => void act('Finishing', () => controller.decideHandoff(handoff.request_id, 'done'))}>Done</button>
       <button disabled={busy.value !== null} onClick={() => void act('Cancelling', () => controller.decideHandoff(handoff.request_id, 'cancel'))}>Cancel</button>

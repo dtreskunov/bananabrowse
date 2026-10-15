@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.0.0-beta.1 / extension 6.0.0 (wire v6, DB
+Status: implemented in service 6.0.0-beta.2 / extension 6.0.1 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -141,7 +141,7 @@ and dark themes, and is sparse.
 - **Header:** browser name (editable inline), server, connection dot.
 - **Requests:** pairing proposals, session requests (agent, purpose, starting
   URLs with origins emphasized, Approve/Decline) and handoffs
-  (instructions, Copy suggested text, Done/Cancel). Always on top of the list.
+  (instructions, Done/Cancel). Always on top of the list.
 - **Agents:** paired agents. For each agent, its sessions; for each session, its tabs with
   per-tab status. Agents without attached sessions are collapsed under
   "Inactive". Clicking a tab focuses it in its window.
@@ -169,7 +169,7 @@ notifications have no buttons, so all decisions happen in the window.
 | `end_session({session_id})` | Ungroup; tabs remain |
 | `list_tabs({session_id})` / `create_tab({session_id, url?, description})` | Grouped tabs only; 8-tab cap |
 | `report_progress({session_id, message})` | Activity feed line; ≤500 characters |
-| `request_handoff({tab_id, instructions, suggested_text?, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
+| `request_handoff({tab_id, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
 | 15 page operations | `tab_id` plus a 40–500 character `description` shown in the feed; v5 semantics, limits and errors |
 
 Errors: `NOT_FOUND` (unknown or foreign IDs), `BROWSER_OFFLINE`,

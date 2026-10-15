@@ -39,3 +39,28 @@ new code. Old tab groups are left alone and are not adopted.
 
 Stop v6, restore the v5 code and the untouched v5 database, and reinstall the
 5.x extension. v6 never writes to the v5 database.
+
+## 6.0 → 6.1
+
+No schema or wire-version change; upgrade the service and extensions in any
+order.
+
+- **Artifacts.** `evaluate_script` accepts `return_as: "artifact"` (plus
+  `artifact_name`, `artifact_mime`, `artifact_encoding`) and returns a handle
+  instead of the data. New tools `list_artifacts` and `read_artifact`; new route
+  `GET|HEAD|DELETE /mcp/<agent-id>/artifacts/<id>` with the MCP bearer key.
+  Credential injectors that match `/mcp/<agent-id>` exactly must also cover
+  `/mcp/<agent-id>/artifacts/*`. Artifacts need extension 6.1.0; older
+  extensions answer `CAPABILITY_UNAVAILABLE` with `required_extension_version`.
+- **Storage.** Artifacts live in `DOMAGENT_ARTIFACTS_DIR` (default
+  `<dir of DOMAGENT_DB>/artifacts`). Under systemd hardening the directory must
+  be inside `ReadWritePaths`.
+- **Limits.** Browser messages may be up to 8 MiB (was 4 MiB). Reverse proxies
+  that cap WebSocket frames must allow this.
+- **Errors.** Error results drop stacks and causes in favor of a `hint`,
+  compact `diagnostics` and code-specific details (`stale_reason`, sizes, script
+  `line`/`column`/`snippet`, per-key `unexpected_field`).
+- **Scripts.** Top-level `await` and `return` work in `evaluate_script`.
+- **Snapshots.** Links include `href`; decorative SVG is skipped; interactive
+  elements are kept first when truncating. Refs never repeat across documents
+  in a tab.

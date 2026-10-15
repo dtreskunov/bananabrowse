@@ -5,10 +5,15 @@ export async function pageHelper(operation, args = {}) {
   const documentKey = '__domagentDocumentNonce';
   if (!globalThis[documentKey]) globalThis[documentKey] = nonce();
   if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
-  if (args.document && args.document !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
+  if (args.document && args.document !== globalThis[documentKey]) {
+    return { error: 'TARGET_STALE', stale_reason: 'document_changed', snapshot_document: args.document,
+      current_document: globalThis[documentKey] };
+  }
   if (operation === 'inspect') return { url: location.href, title: document.title,
     content_type: document.contentType, document_nonce: globalThis[documentKey], ready_state: document.readyState };
-  const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1 };
+  // Ref numbers keep rising across documents in a tab (ref_base), so a ref from an earlier
+  // document can never name an element here; first classifies stale refs.
+  const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1, first: null };
   const bindings = globalThis.__domagentActionBindings ||= new Map();
   if (operation === 'release_action') {
     bindings.delete(args.approval_token);
@@ -182,9 +187,36 @@ export async function pageHelper(operation, args = {}) {
       for (let node = element; node; node = parent(node)) if (node === scope) return true;
       return false;
     };
+    if (state.first === null && Number.isSafeInteger(args.ref_base) && args.ref_base > state.next &&
+        args.ref_base < 900_000_000) state.next = args.ref_base;
+    // Recycle numbers before they outgrow the ref pattern (e + at most nine digits).
+    if (state.next > 999_000_000) { state.next = 1; state.first = null; }
+    state.first ??= state.next;
     state.entries.clear();
-    const candidates = all.filter(element => inScope(element) && roleOf(element) && visible(element));
-    const elements = candidates.slice(0, args.max_elements ?? 50).map(element => {
+    const decorative = element => {
+      const role = roleOf(element);
+      if (['presentation', 'none'].includes(role)) return true;
+      if (element.closest('[aria-hidden="true"]')) return true;
+      if (element.namespaceURI === 'http://www.w3.org/2000/svg') {
+        const owner = element.ownerSVGElement;
+        return Boolean(owner) || !nameOf(element);
+      }
+      return false;
+    };
+    const interactiveRoles = new Set(['link', 'button', 'textbox', 'searchbox', 'combobox', 'listbox', 'option',
+      'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'tab', 'menuitem', 'menuitemcheckbox',
+      'menuitemradio', 'treeitem']);
+    const candidates = all.filter(element => inScope(element) && roleOf(element) && !decorative(element) &&
+      visible(element));
+    const limit = args.max_elements ?? 50;
+    let chosen = candidates;
+    if (candidates.length > limit) {
+      const order = new Map(candidates.map((element, index) => [element, index]));
+      const interactive = candidates.filter(element => interactiveRoles.has(roleOf(element)));
+      const rest = candidates.filter(element => !interactiveRoles.has(roleOf(element)));
+      chosen = [...interactive, ...rest].slice(0, limit).sort((a, b) => order.get(a) - order.get(b));
+    }
+    const elements = chosen.map(element => {
       const ref = `e${state.next++}`;
       state.entries.set(ref, element);
       const rect = element.getBoundingClientRect();
@@ -195,12 +227,15 @@ export async function pageHelper(operation, args = {}) {
       if (element.matches('input[type="checkbox"],input[type="radio"]')) row.checked = element.checked;
       if (element.hasAttribute('aria-checked')) row.checked = element.getAttribute('aria-checked') === 'true';
       if (element.matches('input,textarea,select') || element.isContentEditable) row.value_redacted = true;
+      if (row.role === 'link' && typeof element.href === 'string' && /^https?:/i.test(element.href)) {
+        row.href = element.href.slice(0, 500);
+      }
       return row;
     });
     const text = textData(scope, true);
     const elementsTruncated = candidates.length > elements.length;
     return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
-      ...text, elements, elements_truncated: elementsTruncated, truncated: elementsTruncated || text.text_truncated,
+      ...text, elements, elements_truncated: elementsTruncated, next_ref: state.next, truncated: elementsTruncated || text.text_truncated,
       scope: 'top-level-and-open-shadow-roots', input_mode: 'dom', viewport };
   }
   if (operation === 'get_interactive_elements') {
@@ -244,8 +279,14 @@ export async function pageHelper(operation, args = {}) {
     }
   } else if (args.ref) {
     element = state.entries.get(args.ref);
-    if (!element?.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
-      return { error: 'ELEMENT_STALE' };
+    if (!element) {
+      const number = Number(args.ref.slice(1));
+      const stale_reason = state.first === null || number < state.first || number >= state.next
+        ? 'ref_from_other_document' : 'ref_superseded';
+      return { error: 'ELEMENT_STALE', stale_reason, current_document: globalThis[documentKey] };
+    }
+    if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+      return { error: 'ELEMENT_STALE', stale_reason: 'element_detached', current_document: globalThis[documentKey] };
     }
   } else if (args.selector) {
     let matches;

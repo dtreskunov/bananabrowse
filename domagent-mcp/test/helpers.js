@@ -53,8 +53,8 @@ export async function start(options = {}) {
 
 /** A scripted extension: registers, authenticates and speaks the v6 wire protocol. */
 export class FakeExtension {
-  constructor(base, { origin = EXTENSION, name = "Bob's Chrome" } = {}) {
-    Object.assign(this, { base, origin, name, messages: [], waiters: [], groups: new Map(), autoReady: true,
+  constructor(base, { origin = EXTENSION, name = "Bob's Chrome", extensionVersion = '6.0.0' } = {}) {
+    Object.assign(this, { base, origin, name, extensionVersion, messages: [], waiters: [], groups: new Map(), autoReady: true,
       handlers: {} });
   }
   async http(path, body) {
@@ -93,7 +93,7 @@ export class FakeExtension {
     this.closed = new Promise(resolve => this.ws.on('close', (code, reason) => resolve({ code, reason: reason.toString() })));
     await new Promise((resolve, reject) => { this.ws.once('open', resolve); this.ws.once('error', reject); });
     this.send({ type: 'hello', version: VERSION, access_token: this.access_token,
-      browser_info: { extension_version: '6.0.0', browser_name: 'chrome', browser_version: '150.0' } });
+      browser_info: { extension_version: this.extensionVersion, browser_name: 'chrome', browser_version: '150.0' } });
     const challenge = await this.next('challenge');
     this.send({ type: 'proof', signature: await sign(this.key, connectPayload({ origin: ORIGIN, nonce: challenge.nonce,
       browser_id: this.browser_id, connection_id: challenge.connection_id })) });

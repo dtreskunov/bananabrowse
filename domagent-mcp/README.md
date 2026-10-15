@@ -1,6 +1,6 @@
 # DomAgent service (v6)
 
-Self-hosted MCP server and browser hub. Service **6.0.0-beta.3**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **6.1.0-beta.1**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -13,6 +13,7 @@ SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 | `DOMAGENT_DB` | SQLite path, default `./data/domagent.db`. A v5 or older DB is refused (`SCHEMA_VERSION_UNSUPPORTED`) |
 | `DOMAGENT_PROTECTED_ORIGINS` | Comma-separated origins that sessions can never share or open, e.g. your identity provider. The service origin is always protected |
 | `DOMAGENT_AGENT_<ID>` | One per agent: `"Name|https://homepage|sha256:<hex of API key>"`. `<ID>` becomes the lowercase agent ID (`_` → `-`), used in `/mcp/<agent-id>`. The homepage may be empty |
+| `DOMAGENT_ARTIFACTS_DIR` | Artifact blobs (6.1), default `<dir of DOMAGENT_DB>/artifacts`; created 0700, files 0600. Must be writable (systemd `ReadWritePaths`) |
 | `DOMAGENT_PAIRING_SECRET` / `_FILE` | Optional HMAC key for in-memory pairing codes; random per process by default |
 
 Changing agents requires a restart. Removing an agent deletes its pairings and
@@ -44,6 +45,7 @@ disconnects revoked browsers.
 | `POST /api/token` | Key-bound refresh `{browser_id, refresh_token, nonce, signature}` → rotated refresh token and a 10-minute access token |
 | `GET /extension` (WebSocket) | Browser connection: `hello` with access token → `challenge` → `proof` signed by the device key → `welcome` |
 | `POST /mcp/<agent-id>` | Streamable HTTP MCP, `Authorization: Bearer <key>`, stateless |
+| `GET`/`HEAD`/`DELETE /mcp/<agent-id>/artifacts/<artifact_id>` | Download (`X-Content-SHA256`, `Content-Disposition: attachment`) or delete one of the agent's artifacts; same bearer key as MCP; foreign/expired IDs are `404` |
 
 Registration is open and rate-limited. A registered browser can do nothing
 until a person pairs an agent in its window, and unpaired browsers are deleted
@@ -62,7 +64,10 @@ wait up to 600 s.
 SQLite holds browsers (public key, hashed refresh tokens), pairings, sessions
 and tab ID rows. Sessions last 7 days from the last time the browser reported
 their group alive, and are deleted as soon as an inventory shows the group gone.
-No page content, commands or activity history is stored on the server. Access
+No commands or activity history is stored on the server. Page content is
+stored only as artifacts an agent explicitly creates (`evaluate_script` with
+`return_as: "artifact"`): agent-scoped, 24 h TTL, 64 MiB / 100 per agent, oldest
+evicted first, pruned when the agent is removed from the configuration. Access
 tokens, pairing codes, pending requests and live tab state are in memory, so a
 restart disconnects browsers briefly; they refresh their tokens, reconnect and
 reattach automatically.

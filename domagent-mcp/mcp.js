@@ -3,24 +3,25 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TAB_ID_SCHEMA, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA,
   BROWSER_ID_SCHEMA, SESSION_ID_SCHEMA, SESSION_TAB_LIMIT, schemaArgumentErrors, waitErrorDetails,
-  inspectionErrorDetails } from '../shared/protocol.js';
-import { sanitizeDiagnostics } from '../shared/diagnostics.js';
+  inspectionErrorDetails, errorDetails, ARTIFACT_TEXT_MIME, DEFAULT_ARTIFACT_READ_BYTES, MAX_ARTIFACT_READ_BYTES,
+  MAX_ARTIFACT_BYTES } from '../shared/protocol.js';
+import { agentDiagnostics } from '../shared/diagnostics.js';
 import { Fault, requireValue, requireArguments, validationDetails, dispatchDetails, failureCode, audit } from './errors.js';
 import { compactResult, textResult } from '../shared/results.js';
 import { SERVICE_VERSION } from './version.js';
 
 const NOTES = {
-  get_page_snapshot: 'Preferred first read. Compact DOM summary: 4000 text characters, 50 elements and 16 KiB by default. Narrow with selector; check explicit truncation. Field values are redacted.',
+  get_page_snapshot: 'Preferred first read. Compact DOM summary: 4000 text characters, 50 elements (interactive first; links include href) and 16 KiB by default. Narrow with selector; check explicit truncation. Field values are redacted. Refs are valid only for the latest snapshot of the returned document: after navigation or a new snapshot, use the new refs.',
   get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
   get_interactive_elements: 'Prefer snapshots for actionable refs. Geometry is viewport-relative. Hidden inputs are excluded. Explicit truncation.',
-  click: 'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events.',
+  click: 'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events. A click may only open a menu or change the page: take a new snapshot before the next ref-based action. For links, navigating to the snapshot href is often more reliable.',
   inspect_element: 'Immediate read-only readiness diagnosis; no timeout_ms. Does not focus/scroll/mutate. Hard output cap 4 KiB.',
   type_text: 'Replace an editable value; dispatch DOM input/change, not native keystrokes.',
   set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
   navigate: 'Navigate the tab to ordinary HTTP(S), including from blank/browser-owned documents. Protected destinations are blocked. navigation_started is not proof of loaded content.',
   wait_for_page: 'Wait for this tab to settle; optionally require a visible content_selector match. Never replays navigation or POST.',
-  evaluate_script: 'Only for focused data absent from snapshots. JavaScript expression/source, not a function body: document.title works; top-level return does not. MAIN is the default world; USER_SCRIPT requires native support. Page CSP may refuse. Default 16 KiB/hard 64 KiB.',
+  evaluate_script: 'For data absent from snapshots. The final expression statement is the result; top-level await/return work. MAIN (default) sees page globals; USER_SCRIPT requires native support. Page CSP may refuse. Inline results: default 16 KiB, hard 64 KiB. For bulk data use return_as:"artifact": the full result (up to ~8 MiB) is stored on the service and you get a handle with sha256 and download_url; fetch it with the same Authorization header used for MCP, or page through it with read_artifact.',
 };
 const description = { type: 'string', minLength: 40, maxLength: 500,
   description: 'What this action does and why, shown to the user in the DomAgent activity feed. 40–500 Unicode code points.' };
@@ -51,6 +52,13 @@ export const tools = [
     inputSchema: schema({ session_id: session, message: { type: 'string', minLength: 1, maxLength: 500 } }) },
   { name: 'request_handoff', description: 'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the DomAgent window. Only this tab waits; others can keep working.',
     inputSchema: schema({ tab_id: TAB_ID_SCHEMA, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait }, ['tab_id', 'instructions']) },
+  { name: 'list_artifacts', description: 'Artifacts you created with evaluate_script return_as:"artifact" that have not expired (24 hours) or been evicted (quota 64 MiB / 100 per agent, oldest first).',
+    inputSchema: schema({}) },
+  { name: 'read_artifact', description: `Read a byte range of one of your artifacts. Prefer downloading download_url with the MCP Authorization header (curl -fsS -H "Authorization: Bearer ..." URL -o file) so the data never passes through the conversation; use this only for previews or when HTTP is unavailable. Text is returned as UTF-8, binary as base64. Default ${DEFAULT_ARTIFACT_READ_BYTES / 1024} KiB, maximum ${MAX_ARTIFACT_READ_BYTES / 1024} KiB per call.`,
+    inputSchema: schema({ artifact_id: { type: 'string', pattern: '^a[0-9A-Za-z_-]{22}(?![\\s\\S])' },
+      offset: { type: 'integer', minimum: 0, maximum: MAX_ARTIFACT_BYTES, default: 0 },
+      max_bytes: { type: 'integer', minimum: 256, maximum: MAX_ARTIFACT_READ_BYTES, default: DEFAULT_ARTIFACT_READ_BYTES } },
+    ['artifact_id']) },
   ...OPERATIONS.map(name => ({ name,
     description: `${name} in a session tab. ${NOTES[name] || ''}`.trim(),
     inputSchema: { ...schema({ tab_id: TAB_ID_SCHEMA, ...OPERATION_SCHEMAS[name].properties, description },
@@ -64,7 +72,88 @@ export const INSTRUCTIONS = 'DomAgent v6 lets you work in the user\'s real brows
   'If the browser is offline the user has closed the DomAgent window; ask them to reopen it or choose another browser. ' +
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
-  'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user.';
+  'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user. ' +
+  'For bulk data use evaluate_script with return_as:"artifact" and download the artifact; never copy large results through the conversation.';
+
+const HINTS = {
+  RESULT_TOO_LARGE: 'Narrow the request (selector, max_elements, fewer fields). For evaluate_script, pass return_as:"artifact" to store the full result and download it instead of reading it inline.',
+  ELEMENT_STALE: 'Refs are valid only for the latest get_page_snapshot of the same document. Take a new snapshot and use its ref and document.',
+  TARGET_STALE: 'The page navigated or is still loading. Call wait_for_page, then take a new snapshot.',
+  SCRIPT_SYNTAX_ERROR: 'Fix the script near line/column. The final expression statement is the result; top-level await and return are supported.',
+  SCRIPT_RUNTIME_ERROR: 'The script threw in the page. Check line/column and the message; guard optional page globals.',
+  INVALID_ARGUMENTS: 'See argument_errors. For unexpected_field, allowed lists the accepted fields.',
+  HANDOFF_REQUIRED: 'This needs the person: call request_handoff with clear instructions (for example to log in), then continue.',
+  OUTCOME_UNKNOWN: 'The action may have happened. Inspect the page before retrying.',
+};
+const STALE_HINTS = {
+  document_changed: 'The page navigated since that snapshot (current_document differs). Take a new snapshot and use its refs.',
+  ref_from_other_document: 'That ref was issued for an earlier document in this tab. Take a new snapshot of the current page and use its refs.',
+  ref_superseded: 'A newer snapshot replaced that ref. Use refs from your latest snapshot.',
+  element_detached: 'The element was removed from the page (for example a menu re-rendered). Take a new snapshot.',
+};
+function hint(code, details) {
+  if (code === 'CAPABILITY_UNAVAILABLE' && details.required_extension_version) {
+    return `Requires DomAgent extension ${details.required_extension_version} or newer. Ask the user to update the extension.`;
+  }
+  return STALE_HINTS[details.stale_reason] || HINTS[code];
+}
+
+const MIME_BY_EXTENSION = { json: 'application/json', ndjson: 'application/x-ndjson', jsonl: 'application/x-ndjson',
+  csv: 'text/csv', html: 'text/html', htm: 'text/html', md: 'text/markdown', txt: 'text/plain',
+  gz: 'application/gzip', zip: 'application/zip', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
+function shapeOf(value) {
+  if (Array.isArray(value)) {
+    const first = value.find(item => item && typeof item === 'object' && !Array.isArray(item));
+    return { type: 'array', length: value.length, ...(first ? { item_keys: Object.keys(first).slice(0, 40) } : {}) };
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    return { type: 'object', keys: keys.slice(0, 40), ...(keys.length > 40 ? { key_count: keys.length } : {}) };
+  }
+  return { type: value === null ? 'null' : typeof value };
+}
+function storeArtifact(hub, agentId, result, args) {
+  const value = result?.value ?? null;
+  const extension = args.artifact_name?.split('.').pop()?.toLowerCase();
+  let data, mime, shape;
+  if (typeof value === 'string' && (args.artifact_encoding ?? 'utf8') === 'base64') {
+    const compact = value.replace(/\s+/g, '');
+    requireValue(/^[A-Za-z0-9+/]*={0,2}$/.test(compact) && compact.length % 4 !== 1, 'INVALID_RESULT');
+    data = Buffer.from(compact, 'base64');
+    mime = args.artifact_mime || MIME_BY_EXTENSION[extension] || 'application/octet-stream';
+  } else if (typeof value === 'string') {
+    data = Buffer.from(value, 'utf8');
+    mime = args.artifact_mime || MIME_BY_EXTENSION[extension] || 'text/plain';
+    if (mime === 'application/json') {
+      try { shape = shapeOf(JSON.parse(value)); } catch { /* the page chose the bytes; shape is best effort */ }
+    }
+  } else {
+    requireValue((args.artifact_encoding ?? 'utf8') === 'utf8', 'INVALID_RESULT');
+    data = Buffer.from(JSON.stringify(value), 'utf8');
+    mime = args.artifact_mime || 'application/json';
+    shape = shapeOf(value);
+  }
+  const meta = hub.artifacts.put(agentId, data, { mime, name: args.artifact_name || null, source: 'evaluate_script' });
+  return { artifact: publicArtifact(hub, meta), ...(shape ? { shape } : {}),
+    ...(ARTIFACT_TEXT_MIME.test(mime) ? { preview: data.subarray(0, 600).toString('utf8').replace(/\uFFFD+$/, '') } : {}),
+    execution_world: result?.execution_world };
+}
+export function publicArtifact(hub, meta) {
+  return { artifact_id: meta.id, name: meta.name, mime: meta.mime, bytes: meta.bytes, sha256: meta.sha256,
+    expires_at: new Date(meta.expires_at).toISOString(),
+    download_url: `${hub.config.origin}/mcp/${meta.agent_id}/artifacts/${meta.id}` };
+}
+function readArtifact(hub, agentId, args) {
+  const { meta, data } = hub.artifacts.read(agentId, args.artifact_id);
+  const offset = Math.min(args.offset ?? 0, data.length);
+  let end = Math.min(data.length, offset + (args.max_bytes ?? DEFAULT_ARTIFACT_READ_BYTES));
+  const text = ARTIFACT_TEXT_MIME.test(meta.mime);
+  // Never split a UTF-8 sequence, so each page decodes cleanly and offsets stay exact.
+  if (text) while (end < data.length && end > offset && (data[end] & 0xc0) === 0x80) end--;
+  const slice = data.subarray(offset, end);
+  return { artifact_id: meta.id, offset, next_offset: end, total_bytes: data.length, eof: end >= data.length,
+    encoding: text ? 'utf8' : 'base64', data: text ? slice.toString('utf8') : slice.toString('base64') };
+}
 
 function validateUrls(args) {
   if (!Object.hasOwn(args, 'urls')) return [];
@@ -99,6 +188,8 @@ export async function callTool(name, args, agent, hub, signal) {
       result = await hub.createTab(agent.id, args.session_id, args.url === undefined ? {} : { url: args.url },
         args.description, signal);
     } else if (name === 'report_progress') result = hub.reportProgress(agent.id, args.session_id, args.message);
+    else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map(meta => publicArtifact(hub, meta));
+    else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
     else if (name === 'request_handoff') {
       const { tab_id, timeout_seconds, ...handoff } = args;
       result = await hub.operate(agent.id, tab_id, name, handoff, null, (timeout_seconds ?? 300) * 1000, signal);
@@ -112,20 +203,26 @@ export async function callTool(name, args, agent, hub, signal) {
         Buffer.from(result.data, 'base64').subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'INVALID_RESULT');
       return { content: [{ type: 'image', data: result.data, mimeType: 'image/png' }] };
     }
+    if (name === 'evaluate_script' && args.return_as === 'artifact') {
+      return textResult(storeArtifact(hub, agent.id, result, args));
+    }
+    if (['read_artifact', 'list_artifacts'].includes(name)) return textResult(result);
     try { return textResult(compactResult(name, result, args)); }
     catch (error) {
       if (['RESULT_TOO_LARGE', 'INVALID_RESULT', 'INVALID_ARGUMENT'].includes(error.code)) {
-        throw new Fault(error.code);
+        throw Object.assign(new Fault(error.code), errorDetails(error));
       }
       throw error;
     }
   } catch (error) {
     const code = failureCode(error);
     audit('mcp_tool_failure', { agent_id: agent.id, code, ...inspectionErrorDetails(error) });
-    const diagnostics = sanitizeDiagnostics(error?.diagnostics);
+    const diagnostics = agentDiagnostics(error?.diagnostics);
+    const details = errorDetails({ ...error, code });
+    const advice = hint(code, details);
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({
       error: code, ...validationDetails(error), ...waitErrorDetails(error), ...inspectionErrorDetails(error),
-      ...dispatchDetails(error), ...(diagnostics ? { diagnostics } : {}),
+      ...dispatchDetails(error), ...details, ...(diagnostics ? { diagnostics } : {}), ...(advice ? { hint: advice } : {}),
     }) }] };
   }
 }

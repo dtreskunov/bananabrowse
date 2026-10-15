@@ -5,8 +5,9 @@ import {
   SESSION_TAB_LIMIT, SESSION_CONCURRENCY, ACCESS_TOKEN_MS, connectPayload, verify, navigationUrl,
   OPERATION_SCHEMAS, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA, TAB_ID_SCHEMA, schemaArgumentErrors,
   inspectionErrorDetails, waitErrorDetails, validBrowserInfo, normalizePairingCode, validName,
-  validShortId, agentColor,
+  validShortId, agentColor, errorDetails, EXTENSION_FEATURES, versionAtLeast, MAX_MESSAGE_BYTES,
 } from '../shared/protocol.js';
+import { ArtifactStore } from './artifacts.js';
 import { token, hash, cleanText } from './store.js';
 import { sanitizeDiagnostics } from '../shared/diagnostics.js';
 import { RateLimiter } from './rate.js';
@@ -44,13 +45,15 @@ export class Hub {
     this.store = store; this.config = config; this.now = config.now || Date.now;
     this.agents = config.agents || new Map();
     store.pruneAgents([...this.agents.keys()]);
+    this.artifacts = new ArtifactStore({ directory: config.artifacts ?? null, now: this.now });
+    this.artifacts.prune([...this.agents.keys()]);
     this.connections = new Map(); this.sockets = new Set();
     this.live = new Map(); this.calls = new Map(); this.tombstones = new Map();
     this.tokens = new Map(); this.codes = new Map(); this.sessionRequests = new Map();
     this.codeKey = config.pairingSecret || randomBytes(32).toString('base64url');
     this.rates = new RateLimiter(this.now);
     this.lastStoreSweep = 0;
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES, perMessageDeflate: false });
     this.wss.on('connection', (ws, req) => this.connected(ws, req));
     this.timer = setInterval(() => this.sweep(), 1000);
     this.timer.unref();
@@ -553,6 +556,13 @@ export class Hub {
       try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
     }
     if (operation === 'evaluate_script') args = { world: 'MAIN', ...args };
+    if (args.return_as === 'artifact') {
+      const version = live.conn?.browser_info?.extension_version;
+      if (!versionAtLeast(version, EXTENSION_FEATURES.artifacts)) {
+        throw Object.assign(new Fault('CAPABILITY_UNAVAILABLE'), { dispatch_status: 'not_dispatched',
+          required_extension_version: EXTENSION_FEATURES.artifacts });
+      }
+    }
     requireValue(target.queued < 32 && this.calls.size < 1024, 'QUEUE_FULL', 429);
     const human = operation === 'request_handoff';
     const deadline = this.now() + (human ? waitMs : EXECUTION_MS);
@@ -650,12 +660,12 @@ export class Hub {
       const code = RESULT_ERRORS.has(m.error.code) ? m.error.code : 'OPERATION_FAILED';
       const diagnostics = sanitizeDiagnostics(m.error.diagnostics);
       call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error),
-        dispatchDetails(m.error), diagnostics ? { diagnostics } : {}));
+        dispatchDetails(m.error), errorDetails({ ...m.error, code }), diagnostics ? { diagnostics } : {}));
       return;
     }
     try { this.checkAuthority(call); } catch (error) { call.cancel(failureCode(error)); return; }
     requireValue(call.phase === 'executing', 'INVALID_MESSAGE');
-    requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= 4 * 1024 * 1024, 'INVALID_MESSAGE');
+    requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= MAX_MESSAGE_BYTES, 'INVALID_MESSAGE');
     if (call.operation === 'create_tab') {
       const created = call.live.tabs.get(m.result?.tab_id);
       // A receipt cannot invent a tab: it must already be published by inventory sync.
@@ -702,6 +712,7 @@ export class Hub {
     if (this.now() - this.lastStoreSweep >= 5_000) {
       this.lastStoreSweep = this.now();
       this.store.sweep();
+      this.artifacts.sweep();
       this.reconcile();
     }
     for (const conn of [...this.connections.values()]) {

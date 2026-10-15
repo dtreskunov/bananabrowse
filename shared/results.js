@@ -2,8 +2,8 @@ import {
   DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, DEFAULT_TEXT_CHARS, DEFAULT_ELEMENTS, MAX_TEXT_CHARS, MAX_ELEMENTS,
 } from './protocol.js';
 
-function failure(code) {
-  throw Object.assign(new Error(code), { code });
+function failure(code, details = {}) {
+  throw Object.assign(new Error(code), { code, ...details });
 }
 
 export function textResult(value) {
@@ -67,6 +67,7 @@ export function compactResult(operation, value, args = {}) {
       result.text = prefix(original, low);
     }
   }
-  if (resultBytes(result) > limit) failure('RESULT_TOO_LARGE');
+  const bytes = resultBytes(result);
+  if (bytes > limit) failure('RESULT_TOO_LARGE', { actual_bytes: bytes, limit_bytes: limit });
   return result;
 }

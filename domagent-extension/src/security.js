@@ -1,12 +1,12 @@
-import { EXECUTION_MS, serviceOrigin } from '../../shared/protocol.js';
+import { EXECUTION_MS, MAX_MESSAGE_BYTES, serviceOrigin } from '../../shared/protocol.js';
 
-export const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+export { MAX_MESSAGE_BYTES };
 export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
 export const MAX_QUEUE = 16;
 export const COMMAND_TIMEOUT_MS = EXECUTION_MS;
 
-export function fail(code) {
-  throw Object.assign(new Error(code), { code });
+export function fail(code, details = {}) {
+  throw Object.assign(new Error(code), details, { code });
 }
 
 export function text(value, max = 256) {
@@ -62,9 +62,9 @@ export function errorCode(error) {
 
 export function boundedResult(value) {
   const serialized = JSON.stringify(value);
-  if (serialized === undefined || new TextEncoder().encode(serialized).length > MAX_RESULT_BYTES) {
-    fail('RESULT_TOO_LARGE');
-  }
+  if (serialized === undefined) fail('RESULT_TOO_LARGE');
+  const bytes = new TextEncoder().encode(serialized).length;
+  if (bytes > MAX_RESULT_BYTES) fail('RESULT_TOO_LARGE', { actual_bytes: bytes, limit_bytes: MAX_RESULT_BYTES });
   return JSON.parse(serialized);
 }
 

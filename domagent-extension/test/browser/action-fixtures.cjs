@@ -153,12 +153,25 @@ async function exerciseActions(call) {
   const large = await call('evaluate_script', { script: '"x".repeat(100000)' });
   assert.equal(large.isError, true);
   assert.equal(JSON.parse(large.content[0].text).error, 'RESULT_TOO_LARGE');
-  const syntax = await call('evaluate_script', { script: 'return document.title;' });
+  const artifact = await result('evaluate_script', { script: '"x".repeat(100000)', return_as: 'artifact',
+    artifact_name: 'bulk.txt' });
+  assert.deepEqual([artifact.artifact.bytes, artifact.artifact.mime], [100000, 'text/plain']);
+  const json = await result('evaluate_script', { script: 'const rows = await Promise.resolve([{ a: 1 }, { a: 2 }]);\nrows',
+    return_as: 'artifact' });
+  assert.deepEqual(json.shape, { type: 'array', length: 2, item_keys: ['a'] });
+  assert.equal((await result('evaluate_script', { script: 'return document.title;' })).value, snapshot.title);
+  assert.equal((await result('evaluate_script', {
+    script: 'const title = await Promise.resolve(document.title);\ntitle',
+  })).value, snapshot.title);
+  const syntax = await call('evaluate_script', { script: 'const a = 1;\nconst = ;' });
   assert.equal(syntax.isError, true);
-  assert.equal(JSON.parse(syntax.content[0].text).error, 'SCRIPT_SYNTAX_ERROR');
-  const runtime = await call('evaluate_script', { script: 'throw new Error("fixture runtime error")' });
+  const syntaxError = JSON.parse(syntax.content[0].text);
+  assert.deepEqual([syntaxError.error, syntaxError.line, syntaxError.snippet], ['SCRIPT_SYNTAX_ERROR', 2, 'const = ;']);
+  assert.equal(JSON.stringify(syntaxError).includes('stack'), false);
+  const runtime = await call('evaluate_script', { script: 'const a = 1;\nthrow new Error("fixture runtime error")' });
   assert.equal(runtime.isError, true);
-  assert.equal(JSON.parse(runtime.content[0].text).error, 'SCRIPT_RUNTIME_ERROR');
+  const runtimeError = JSON.parse(runtime.content[0].text);
+  assert.deepEqual([runtimeError.error, runtimeError.line], ['SCRIPT_RUNTIME_ERROR', 2]);
   await result('navigate', { url: `${snapshot.url}?document-change=1` });
   const immediateSnapshot = await result('get_page_snapshot');
   assert.notEqual(immediateSnapshot.document, snapshot.document);

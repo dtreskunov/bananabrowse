@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { VERSION, extensionOrigin, keyId, verify, registerPayload, tokenPayload, validName } from '../shared/protocol.js';
+import { ARTIFACT_TEXT_MIME, VERSION, extensionOrigin, keyId, verify, registerPayload, tokenPayload, validName } from '../shared/protocol.js';
 import { token, hash } from './store.js';
 import { Hub } from './hub.js';
 import { handleMcp } from './mcp.js';
@@ -33,6 +33,23 @@ async function proof(publicKey, payload, signature) {
   let verified = false;
   try { verified = await verify(publicKey, payload, signature); } catch { throw new Fault('NOT_AUTHORIZED', 401); }
   requireValue(verified, 'NOT_AUTHORIZED', 401);
+}
+function sendArtifact(res, hub, agent, id, method) {
+  if (method === 'DELETE') {
+    hub.artifacts.remove(agent.id, id);
+    audit('artifact_deleted', { agent_id: agent.id });
+    res.writeHead(204); res.end(); return;
+  }
+  const { meta, data } = hub.artifacts.read(agent.id, id);
+  const filename = (meta.name || id).replace(/[^A-Za-z0-9._-]/g, '_');
+  res.writeHead(200, {
+    'Content-Type': ARTIFACT_TEXT_MIME.test(meta.mime) ? `${meta.mime}; charset=utf-8` : meta.mime,
+    'Content-Length': data.length,
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'X-Content-SHA256': meta.sha256,
+    ETag: `"${meta.sha256}"`
+  });
+  res.end(method === 'HEAD' ? undefined : data);
 }
 export function agentKeyMatches(agent, presented) {
   if (!agent || typeof presented !== 'string' || presented.length < 16 || presented.length > 512) return false;
@@ -139,15 +156,18 @@ export function createApp(store, config) {
       json(res, 200, { browser_id: browser.id, refresh_token: refresh, ...hub.issueAccessToken(browser.id) });
       return;
     }
-    const mcp = /^\/mcp\/([a-z0-9-]{1,32})$/.exec(path);
+    const mcp = /^\/mcp\/([a-z0-9-]{1,32})(?:\/artifacts\/(a[0-9A-Za-z_-]{22}))?$/.exec(path);
     if (mcp) {
-      requireValue(method === 'POST', 'METHOD_NOT_ALLOWED', 405);
+      const artifactId = mcp[2];
+      requireValue(artifactId ? ['GET', 'HEAD', 'DELETE'].includes(method) : method === 'POST', 'METHOD_NOT_ALLOWED', 405);
       requireValue(!origin || origin === config.origin, 'NOT_AUTHORIZED', 403);
       const agent = hub.agents.get(mcp[1]);
       const presented = /^Bearer ([^\s]+)$/.exec(req.headers.authorization || '')?.[1];
       requireValue(agentKeyMatches(agent, presented), 'NOT_AUTHORIZED', 401);
       requireValue(activeMcp < 256, 'RATE_LIMITED', 429);
-      rates.take(`mcp:${agent.id}`, 600); activeMcp++;
+      rates.take(`mcp:${agent.id}`, 600);
+      if (artifactId) { sendArtifact(res, hub, agent, artifactId, method); return; }
+      activeMcp++;
       try { await handleMcp(req, res, await body(req), agent, hub); } finally { activeMcp--; }
       return;
     }

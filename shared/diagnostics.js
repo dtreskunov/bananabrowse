@@ -119,3 +119,20 @@ export function diagnosticDetails(error, context = {}) {
   const safeContext = sanitizeDiagnostics(context) || {};
   return { diagnostics: sanitizeDiagnostics({ ...safeContext, ...diagnostics }) || {} };
 }
+
+const AGENT_FIELDS = Object.freeze(['name', 'message', 'layer', 'phase', 'execution_world']);
+/**
+ * Compact projection for MCP callers: error name and message only. Stack traces, native
+ * exception objects and causes cost thousands of tokens and rarely help an agent recover;
+ * actionable locations are reported separately as line/column/snippet.
+ */
+export function agentDiagnostics(input) {
+  const safe = sanitizeDiagnostics(input);
+  if (!safe) return undefined;
+  const result = {};
+  for (const key of AGENT_FIELDS) {
+    if (typeof safe[key] !== 'string' || !safe[key]) continue;
+    result[key] = safe[key].length > 500 ? `${safe[key].slice(0, 500)}[truncated]` : safe[key];
+  }
+  return Object.keys(result).length ? result : undefined;
+}

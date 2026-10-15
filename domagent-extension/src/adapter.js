@@ -4,7 +4,7 @@ import { compactResult } from '../../shared/results.js';
 import { pageHelper } from './page.js';
 import { actionSummary } from './approval-summary.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
-import { compileScriptSource } from './script-source.js';
+import { compileScriptSource, locateScriptError, prepareEvaluateExpression, stackLocation } from './script-source.js';
 
 export function injectionReason(error) {
   const message = typeof error?.message === 'string' ? error.message : '';
@@ -25,6 +25,7 @@ export class BrowserAdapter {
     this.guards = new Map();
     this.attached = new Set();
     this.contexts = new Map();
+    this.refBases = new Map();
     this.nextRule = 1;
     this.onTabEvent = () => {};
     this.onWarning = () => console.error('DomAgent browser protection unavailable');
@@ -102,7 +103,7 @@ export class BrowserAdapter {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
-    this.api.tabs.onRemoved.addListener(tabId => this.onTabEvent(tabId, 'closed'));
+    this.api.tabs.onRemoved.addListener(tabId => { this.refBases.delete(tabId); this.onTabEvent(tabId, 'closed'); });
     this.api.webNavigation.onBeforeNavigate.addListener(details => {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
@@ -226,6 +227,7 @@ export class BrowserAdapter {
   }
 
   async helper(tabId, operation, args) {
+    if (operation === 'get_page_snapshot') args = { ...args, ref_base: this.refBases.get(tabId) ?? 1 };
     let responses;
     try {
       responses = await this.api.scripting.executeScript({
@@ -252,7 +254,16 @@ export class BrowserAdapter {
         code: 'TARGET_STALE', ...(operation === 'inspect' ? { injection_reason: 'empty_result' } : {}),
       });
     }
-    if (response.result.error) fail(response.result.error);
+    if (response.result.error) {
+      const { stale_reason, snapshot_document, current_document } = response.result;
+      fail(response.result.error, Object.fromEntries(Object.entries({ stale_reason, snapshot_document, current_document })
+        .filter(([, value]) => typeof value === 'string')));
+    }
+    if (operation === 'get_page_snapshot') {
+      const { next_ref, ...snapshot } = response.result;
+      if (Number.isSafeInteger(next_ref)) this.refBases.set(tabId, next_ref);
+      response.result = snapshot;
+    }
     return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
       ? compactResult(operation, response.result, args) : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}) };
@@ -422,8 +433,9 @@ export class BrowserAdapter {
     if (operation === 'evaluate_script') {
       if (this.browserName === 'chrome' && args.world !== 'USER_SCRIPT') {
         // The remote caller chooses only page source, never a CDP method/target/context.
+        const prepared = prepareEvaluateExpression(args.script);
         const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-          expression: args.script, awaitPromise: true, returnByValue: true,
+          expression: prepared.expression, awaitPromise: true, returnByValue: true,
           userGesture: false, timeout: 10_000, uniqueContextId: context.uniqueId,
         });
         if (response.exceptionDetails || response.result?.subtype === 'error') {
@@ -432,14 +444,22 @@ export class BrowserAdapter {
           const native = Object.assign(new Error(exception?.description || code), {
             name: exception?.className || 'Error', native: response.exceptionDetails,
           });
-          throw Object.assign(new Error(code), { code,
-            ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: 'MAIN' }) });
+          const details = response.exceptionDetails;
+          const located = stackLocation(exception?.description, prepared.marker) ||
+            (code === 'SCRIPT_SYNTAX_ERROR' && !prepared.async && Number.isSafeInteger(details?.lineNumber)
+              ? { line: details.lineNumber + 1, column: (details.columnNumber ?? -1) + 1 } : null);
+          throw locateScriptError(Object.assign(new Error(code), { code,
+            ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: 'MAIN' }) }),
+          args.script, located?.line, located?.column);
         }
         if (response.result?.unserializableValue !== undefined || response.result?.type === 'function') {
           fail('SCRIPT_SERIALIZATION_ERROR');
         }
+        const evaluated = { value: response.result?.value ?? null, execution_world: 'MAIN' };
+        // Artifacts are stored by the service; only the transport bound applies here.
+        if (args.return_as === 'artifact') return evaluated;
         try {
-          return compactResult(operation, { value: response.result?.value ?? null, execution_world: 'MAIN' }, args);
+          return compactResult(operation, evaluated, args);
         } catch (error) {
           if (error.code === 'RESULT_TOO_LARGE') throw error;
           fail('SCRIPT_SERIALIZATION_ERROR');
@@ -449,8 +469,10 @@ export class BrowserAdapter {
       let compiled;
       try { compiled = compileScriptSource(args.script); }
       catch (error) {
-        throw Object.assign(new Error('SCRIPT_SYNTAX_ERROR'), { code: 'SCRIPT_SYNTAX_ERROR', dispatch_status: 'not_dispatched',
-          ...diagnosticDetails(error, { layer: 'extension', phase: 'validation', execution_world: args.world || 'MAIN' }) });
+        throw locateScriptError(Object.assign(new Error('SCRIPT_SYNTAX_ERROR'), { code: 'SCRIPT_SYNTAX_ERROR',
+          dispatch_status: 'not_dispatched',
+          ...diagnosticDetails(error, { layer: 'extension', phase: 'validation', execution_world: args.world || 'MAIN' }) }),
+        args.script, error.line, error.column);
       }
       try {
         if (!this.api.userScripts?.execute) throw new Error('Native user-script API is unavailable or not enabled.');
@@ -485,9 +507,10 @@ export class BrowserAdapter {
         else if (details.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(details.message || '')) {
           code = 'SCRIPT_POLICY_BLOCKED';
         }
-        throw Object.assign(new Error(code), { code, ...diagnosticDetails(details, {
+        const located = stackLocation(details.stack, compiled.marker, compiled.wrapper_line_offset);
+        throw locateScriptError(Object.assign(new Error(code), { code, ...diagnosticDetails(details, {
           layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN',
-        }) });
+        }) }), args.script, located?.line);
       }
       if (response.error !== undefined) {
         const native = response.error;
@@ -496,13 +519,17 @@ export class BrowserAdapter {
         else if (native?.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(native.message || '')) {
           code = 'SCRIPT_POLICY_BLOCKED';
         }
-        throw Object.assign(new Error(code), { code,
-          ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN' }) });
+        const located = stackLocation(native?.stack, compiled.marker, compiled.wrapper_line_offset);
+        throw locateScriptError(Object.assign(new Error(code), { code,
+          ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN' }) }),
+        args.script, located?.line);
       }
       if (document.document_id && response.documentId !== document.document_id) fail('TARGET_STALE');
       if (typeof response.result === 'function' || typeof response.result === 'symbol') fail('SCRIPT_SERIALIZATION_ERROR');
+      const evaluated = { value: response.result ?? null, execution_world: args.world || 'MAIN' };
+      if (args.return_as === 'artifact') return evaluated;
       try {
-        return compactResult(operation, { value: response.result ?? null, execution_world: args.world || 'MAIN' }, args);
+        return compactResult(operation, evaluated, args);
       } catch (error) {
         if (error.code === 'RESULT_TOO_LARGE') throw error;
         throw Object.assign(new Error('SCRIPT_SERIALIZATION_ERROR'), { code: 'SCRIPT_SERIALIZATION_ERROR',

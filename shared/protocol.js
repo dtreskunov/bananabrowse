@@ -17,6 +17,31 @@ export const DEFAULT_TEXT_CHARS = 4000;
 export const MAX_TEXT_CHARS = 16_000;
 export const DEFAULT_ELEMENTS = 50;
 export const MAX_ELEMENTS = 100;
+// One WebSocket frame carries the whole result; artifacts are bounded by it, minus envelope room.
+export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_ARTIFACT_BYTES = MAX_MESSAGE_BYTES - 64 * 1024;
+export const ARTIFACT_TTL_MS = 86_400_000;
+export const ARTIFACT_QUOTA_BYTES = 64 * 1024 * 1024;
+export const ARTIFACT_QUOTA_COUNT = 100;
+export const DEFAULT_ARTIFACT_READ_BYTES = 16 * 1024;
+export const MAX_ARTIFACT_READ_BYTES = 48 * 1024;
+export const ARTIFACT_MIME_TYPES = Object.freeze([
+  'application/json', 'application/x-ndjson', 'text/plain', 'text/csv', 'text/html', 'text/markdown',
+  'application/octet-stream', 'application/gzip', 'application/zip', 'application/pdf', 'image/png', 'image/jpeg',
+]);
+/** Artifact MIME types served and paged as UTF-8 text. */
+export const ARTIFACT_TEXT_MIME = /^(?:text\/|application\/(?:json|x-ndjson)$)/;
+export const ARTIFACT_ID_PATTERN = /^a[0-9A-Za-z_-]{22}$/;
+/** Lowest extension version that understands each optional capability. */
+export const EXTENSION_FEATURES = Object.freeze({ artifacts: '6.1.0' });
+export function versionAtLeast(version, minimum) {
+  const parts = value => String(value || '0').split('.').map(part => Number.parseInt(part, 10) || 0);
+  const [a, b] = [parts(version), parts(minimum)];
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) > (b[index] || 0);
+  }
+  return true;
+}
 export const GROUP_COLORS = Object.freeze(['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
 
 const shortId = prefix => Object.freeze({ type: 'string', pattern: `^${prefix}[0-9a-z]{1,12}(?![\\s\\S])` });
@@ -69,6 +94,35 @@ export function inspectionErrorDetails(error) {
   }
   return result;
 }
+const STALE_REASONS = ['document_changed', 'ref_from_other_document', 'ref_superseded', 'element_detached'];
+const DOCUMENT_NONCE = /^[0-9a-f]{8,128}$/;
+const boundedInteger = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+/** Whitelisted, value-free error details that help an agent recover without leaking page data. */
+export function errorDetails(error) {
+  if (!error || typeof error !== 'object') return {};
+  const result = {};
+  if (['ELEMENT_STALE', 'TARGET_STALE'].includes(error.code) && STALE_REASONS.includes(error.stale_reason)) {
+    result.stale_reason = error.stale_reason;
+    for (const key of ['snapshot_document', 'current_document']) {
+      if (typeof error[key] === 'string' && DOCUMENT_NONCE.test(error[key])) result[key] = error[key];
+    }
+  }
+  if (['RESULT_TOO_LARGE', 'INVALID_RESULT'].includes(error.code) &&
+      boundedInteger(error.actual_bytes, 2 ** 40) && boundedInteger(error.limit_bytes, 2 ** 40)) {
+    result.actual_bytes = error.actual_bytes;
+    result.limit_bytes = error.limit_bytes;
+  }
+  if (['SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR'].includes(error.code)) {
+    if (boundedInteger(error.line, 10_000_000) && error.line > 0) result.line = error.line;
+    if (boundedInteger(error.column, 10_000_000) && error.column > 0) result.column = error.column;
+    if (typeof error.snippet === 'string' && error.snippet.length <= 300) result.snippet = error.snippet;
+  }
+  if (error.code === 'CAPABILITY_UNAVAILABLE' && typeof error.required_extension_version === 'string' &&
+      /^[0-9]+(?:\.[0-9]+){0,3}$/.test(error.required_extension_version)) {
+    result.required_extension_version = error.required_extension_version;
+  }
+  return result;
+}
 export function waitErrorDetails(error) {
   const contentReadiness = error?.readiness_stage === 'content_readiness';
   const causes = contentReadiness ? [...READINESS_ERRORS, 'PAGE_UNAVAILABLE', 'TARGET_STALE'] : READINESS_ERRORS;
@@ -109,9 +163,17 @@ export const OPERATION_SCHEMAS = Object.freeze({
   type_text: operation({ ...targeted, text }, ['text'], true),
   get_text: operation({ ...targeted, ...readText, ...output }),
   evaluate_script: operation({ script: { ...text, minLength: 1,
-    description: 'JavaScript source/expression evaluated in the page, not a function body. Maximum 65536 UTF-16 code units, not lines. Use document.title or (() => document.title)(); top-level return is invalid. Return only focused JSON data; page CSP may refuse evaluation.' },
+    description: 'JavaScript evaluated in the page. The value of the final expression statement is returned (promises are awaited). Top-level await and top-level return are supported. Maximum 65536 UTF-16 code units. Page CSP may refuse evaluation.' },
     world: { type: 'string', enum: ['MAIN', 'USER_SCRIPT'], default: 'MAIN',
-      description: 'Execution world. MAIN is the default; USER_SCRIPT requires native browser support and local enablement, never an isolated-world fallback.' },
+      description: 'Execution world. MAIN (default) sees page globals such as framework state; USER_SCRIPT requires native browser support and local enablement, never an isolated-world fallback.' },
+    return_as: { type: 'string', enum: ['value', 'artifact'], default: 'value',
+      description: 'value: return the JSON result inline (16 KiB default, 64 KiB hard cap). artifact: store the full result (up to ~8 MiB) on the DomAgent service and return only a handle with bytes, sha256, a preview and a download_url. Use artifact for bulk data; never transcribe large results through the conversation.' },
+    artifact_name: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\\s\\S])',
+      description: 'Optional file name for return_as:"artifact", e.g. activities.json.' },
+    artifact_mime: { type: 'string', enum: ARTIFACT_MIME_TYPES,
+      description: 'Optional media type for return_as:"artifact". Defaults to application/json for non-string results and text/plain for strings.' },
+    artifact_encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8',
+      description: 'For string results with return_as:"artifact": base64 stores the decoded bytes (for binary data such as gzip or images).' },
     ...output }, ['script']),
   get_screenshot: operation({}),
   get_interactive_elements: operation({ ...readElements, ...output }),
@@ -139,13 +201,37 @@ export const DESCRIPTION_SCHEMA = Object.freeze({ type: 'string', minLength: MIN
   maxLength: 500, unit: 'unicode_code_points', trimMinimum: true });
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![\\s\\S])';
 
+function editDistance(a, b) {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+function closestKey(key, allowed) {
+  let best = null, distance = Infinity;
+  for (const candidate of allowed) {
+    const score = editDistance(key.toLowerCase(), candidate.toLowerCase());
+    if (score < distance) { best = candidate; distance = score; }
+  }
+  return distance <= Math.max(2, Math.floor(key.length / 3)) ? best : null;
+}
+
 export function schemaArgumentErrors(spec, args) {
   if (!spec || !args || typeof args !== 'object' || Array.isArray(args)) {
     return [{ field: 'arguments', reason: 'expected_object' }];
   }
   const errors = [];
-  if (Object.keys(args).some(key => !Object.hasOwn(spec.properties, key))) {
-    errors.push({ field: 'arguments', reason: 'unexpected_field' });
+  const allowed = Object.keys(spec.properties);
+  for (const key of Object.keys(args).filter(key => !Object.hasOwn(spec.properties, key)).slice(0, 8)) {
+    // Field names are caller-supplied; bound them, but never echo values.
+    const field = key.slice(0, 64);
+    const suggestion = closestKey(field, allowed);
+    errors.push({ field, reason: 'unexpected_field', allowed, ...(suggestion ? { did_you_mean: suggestion } : {}) });
   }
   for (const key of spec.required || []) {
     if (!Object.hasOwn(args, key)) errors.push({ field: key, reason: 'required' });

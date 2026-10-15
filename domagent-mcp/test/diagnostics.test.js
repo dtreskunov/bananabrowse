@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { diagnosticDetails, sanitizeDiagnostics } from '../../shared/diagnostics.js';
+import { agentDiagnostics, diagnosticDetails, sanitizeDiagnostics } from '../../shared/diagnostics.js';
+import { errorDetails } from '../../shared/protocol.js';
 
 test('beta7 diagnosticDetails returns the spread wrapper with complete stack/cause/native exception', () => {
   const cause = new TypeError('native browser exception');
@@ -82,4 +83,26 @@ test('beta7 native diagnostics bound strings, depth, entries, cycles and getters
   const polluted = sanitizeDiagnostics(JSON.parse('{"__proto__":{"polluted":true},"message":"safe"}'));
   assert.deepEqual(polluted, { message: 'safe' });
   assert.equal({}.polluted, undefined);
+});
+
+test('agent-facing diagnostics drop stacks, causes and native objects and bound messages', () => {
+  const error = new Error('x'.repeat(2000), { cause: new TypeError('inner') });
+  error.exception = { name: 'DOMException', message: 'SecurityError', stack: 'native frame' };
+  const { diagnostics } = diagnosticDetails(error, { layer: 'browser', phase: 'execution', execution_world: 'MAIN' });
+  const compact = agentDiagnostics(diagnostics);
+  assert.deepEqual(Object.keys(compact).sort(), ['execution_world', 'layer', 'message', 'name', 'phase']);
+  assert(compact.message.length <= 520);
+  assert(!JSON.stringify(compact).includes('native frame'));
+  assert.equal(agentDiagnostics(undefined), undefined);
+});
+
+test('errorDetails projects only whitelisted, well-formed details per code', () => {
+  assert.deepEqual(errorDetails({ code: 'ELEMENT_STALE', stale_reason: 'ref_superseded', current_document: 'abcdef0123',
+    snapshot_document: 'not hex!', extra: 'x' }), { stale_reason: 'ref_superseded', current_document: 'abcdef0123' });
+  assert.deepEqual(errorDetails({ code: 'ELEMENT_STALE', stale_reason: 'made_up' }), {});
+  assert.deepEqual(errorDetails({ code: 'RESULT_TOO_LARGE', actual_bytes: 10, limit_bytes: 5 }), { actual_bytes: 10, limit_bytes: 5 });
+  assert.deepEqual(errorDetails({ code: 'SCRIPT_SYNTAX_ERROR', line: 2, column: 11, snippet: 'const b = ;' }),
+    { line: 2, column: 11, snippet: 'const b = ;' });
+  assert.deepEqual(errorDetails({ code: 'SCRIPT_RUNTIME_ERROR', line: -1, snippet: 'x'.repeat(301) }), {});
+  assert.deepEqual(errorDetails({ code: 'ELEMENT_NOT_FOUND', line: 3 }), {});
 });

@@ -1,1 +1,1 @@
-export const SERVICE_VERSION = '6.0.0-beta.3';
+export const SERVICE_VERSION = '6.1.0-beta.1';

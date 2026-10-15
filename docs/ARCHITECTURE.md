@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.0.0-beta.3 / extension 6.0.2 (wire v6, DB
+Status: implemented in service 6.1.0-beta.1 / extension 6.1.0 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -167,7 +167,7 @@ notifications have no buttons, so all decisions happen in the window.
 
 ## 7. MCP surface (`/mcp/<agent-id>`, API key in the Authorization header)
 
-24 tools: the 9 below plus the 15 page operations.
+26 tools: the 11 below plus the 15 page operations.
 
 | Tool | Contract |
 | --- | --- |
@@ -179,7 +179,53 @@ notifications have no buttons, so all decisions happen in the window.
 | `list_tabs({session_id})` / `create_tab({session_id, url?, description})` | Grouped tabs only; 8-tab cap |
 | `report_progress({session_id, message})` | Activity feed line; ≤500 characters |
 | `request_handoff({tab_id, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
+| `list_artifacts()` | Caller's unexpired artifacts (metadata only) |
+| `read_artifact({artifact_id, offset?, max_bytes?})` | Byte range (default 16 KiB, max 48 KiB); UTF-8 text never split mid-character, binary as base64; `next_offset`/`eof` |
 | 15 page operations | `tab_id` plus a 40–500 character `description` shown in the feed; v5 semantics, limits and errors |
+
+### Artifacts (6.1)
+
+`evaluate_script` with `return_as: "artifact"` stores the script result on the
+service instead of returning it. Strings are stored as UTF-8 (or decoded with
+`artifact_encoding: "base64"`); other values as JSON. The tool returns only a
+handle (`artifact_id`, `name`, `mime`, `bytes`, `sha256`, `expires_at`,
+`download_url`), a JSON `shape` summary and a 600-byte text preview, so bulk
+data never passes through the model. Limits: 8 MiB − 64 KiB per artifact (the
+browser message cap is 8 MiB), 24 h TTL, 64 MiB / 100 artifacts per agent with
+oldest-first eviction. Artifacts are files under `DOMAGENT_ARTIFACTS_DIR`
+(default `<dir of DOMAGENT_DB>/artifacts`, 0700/0600; in memory for `:memory:`)
+and survive restarts; artifacts of agents removed from the config are pruned.
+Requires extension 6.1.0+; older extensions get `CAPABILITY_UNAVAILABLE` with
+`required_extension_version` before dispatch.
+
+`GET|HEAD|DELETE /mcp/<agent-id>/artifacts/<artifact_id>` uses the same bearer
+key as MCP. A foreign or expired ID is `404`. Downloads carry
+`Content-Disposition: attachment`, `X-Content-SHA256` and an `ETag`; the
+service's CSP/`nosniff`/`no-store` headers apply. Query strings are rejected.
+
+### Agent-facing errors (6.1)
+
+Error results carry the code, a one-line `hint`, compact `diagnostics` (name,
+message ≤500 characters, layer, phase, execution world; never stacks, causes or
+native objects) and code-specific details, projected through a whitelist
+(`errorDetails`):
+
+- `ELEMENT_STALE`/`TARGET_STALE`: `stale_reason` (`document_changed`,
+  `ref_from_other_document`, `ref_superseded`, `element_detached`) with
+  `snapshot_document`/`current_document`.
+- `RESULT_TOO_LARGE`/`INVALID_RESULT`: `actual_bytes`, `limit_bytes`.
+- `SCRIPT_SYNTAX_ERROR`/`SCRIPT_RUNTIME_ERROR`: 1-based `line`, `column` (syntax
+  only) and the offending source line as `snippet`.
+- `INVALID_ARGUMENTS`: one `unexpected_field` entry per unknown key with
+  `allowed` and `did_you_mean`.
+
+Scripts that only parse with top-level `await`/`return` run inside an async
+function; the final expression statement is the result. Line numbers are
+preserved. Refs keep increasing across documents in a tab, so a ref from an
+earlier document is reported stale rather than resolving to a different
+element. Snapshots list interactive rows first (then restore document order),
+skip decorative SVG/`presentation`/`aria-hidden` content and include absolute
+`href` for http(s) links.
 
 Errors: `NOT_FOUND` (unknown or foreign IDs), `BROWSER_OFFLINE`,
 `SESSION_DETACHED` (Chrome reattach pending), `SESSION_ENDED`,
@@ -210,6 +256,8 @@ which the extension ungroups. A group approved but not yet committed carries its
 `request_id`, so the server doesn't treat it as unknown. Tab ID assignment is
 idempotent per browser tab, so a sync that races ahead of its acknowledgement
 can't renumber tabs. Sessions missing from an inventory are deleted.
+
+Messages are capped at 8 MiB (6.1; 4 MiB before), results at 8 MiB − 4 KiB.
 
 Commands keep v5's ready/execute handshake (handoffs are "ready" when the
 user clicks Done), cancellation, and no-replay-after-uncertainty rules.

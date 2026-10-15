@@ -1,4 +1,5 @@
 import { readFileSync, lstatSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { AGENT_ID_PATTERN, serviceOrigin, validName } from '../shared/protocol.js';
 import { Fault, requireValue } from './errors.js';
 
@@ -62,7 +63,9 @@ export function loadConfig(env = process.env) {
     protectedOrigins.push(...(env.DOMAGENT_PROTECTED_ORIGINS || '').split(',').map(value => value.trim())
       .filter(Boolean).map(value => new URL(value).origin));
   } catch { throw new Fault('INVALID_PROTECTED_ORIGIN'); }
+  const db = env.DOMAGENT_DB || './data/domagent.db';
+  const artifacts = env.DOMAGENT_ARTIFACTS_DIR || (db === ':memory:' ? null : join(dirname(db), 'artifacts'));
   return { origin, bind: env.DOMAGENT_BIND || '127.0.0.1', port,
-    db: env.DOMAGENT_DB || './data/domagent.db', protectedOrigins: [...new Set(protectedOrigins)],
+    db, artifacts, protectedOrigins: [...new Set(protectedOrigins)],
     agents: parseAgents(env), pairingSecret: secret(env, 'DOMAGENT_PAIRING_SECRET') };
 }

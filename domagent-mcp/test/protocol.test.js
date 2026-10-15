@@ -39,7 +39,7 @@ test('beta7 field errors distinguish type, required, bounds and target conflicts
     ['set_checked', { selector: '#private', checked: 'private' }, 'checked', 'expected_boolean'],
     ['press_key', { selector: '#private', key: 'private' }, 'key', 'invalid_enum'],
     ['click', { ref: 'e1\n', document: '12345678' }, 'ref', 'invalid_format'],
-    ['get_text', { private: 'private' }, 'arguments', 'unexpected_field'],
+    ['get_text', { selectr: 'private' }, 'selectr', 'unexpected_field'],
   ];
   for (const [name, args, field, reason] of invalid) {
     const errors = operationArgumentErrors(name, args);
@@ -50,6 +50,11 @@ test('beta7 field errors distinguish type, required, bounds and target conflicts
     assert.deepEqual(operationArgumentErrors('get_text', args), [{ field: 'arguments', reason: 'expected_object' }]);
   }
   assert.deepEqual(operationArgumentErrors('evaluate_script', {}), [{ field: 'script', reason: 'required' }]);
+  const typo = operationArgumentErrors('get_text', { selectr: '#a' }).find(error => error.reason === 'unexpected_field');
+  assert.equal(typo.did_you_mean, 'selector');
+  assert(typo.allowed.includes('selector'));
+  const many = operationArgumentErrors('get_text', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, 1])));
+  assert.equal(many.filter(error => error.reason === 'unexpected_field').length, 8);
 });
 
 test('beta7 descriptions count Unicode points after trimming minimum and raw maximum', () => {

@@ -2,7 +2,7 @@ import {
   VERSION, LIVENESS_MS, SESSION_TAB_LIMIT, SESSION_CONCURRENCY, HUMAN_WAIT_MS, EXECUTION_MS,
   registerPayload, tokenPayload, connectPayload, serviceOrigin, sign, pairingCode, validBrowserInfo,
   validDescription, validOperationArgs, navigationUrl, inspectionErrorDetails, waitErrorDetails, agentColor,
-  validName,
+  validName, errorDetails,
 } from '../../shared/protocol.js';
 import { boundedResult, errorCode, fail, id as validId, originList, protectedUnion } from './security.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
@@ -871,7 +871,8 @@ export class Controller {
     } catch (error) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') { tab.pageState = 'unavailable'; void this.sync(); }
       this.finishTask(session, tab, task, { code: error.code === 'PAGE_UNAVAILABLE' ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error),
-        ...inspectionErrorDetails(error), ...diagnosticDetails(error, { layer: 'extension', phase: 'preparation' }) });
+        ...inspectionErrorDetails(error), ...errorDetails(error),
+        ...diagnosticDetails(error, { layer: 'extension', phase: 'preparation' }) });
     } finally { task.preparing = false; }
   }
   decideHandoff(requestId, action) {
@@ -931,7 +932,7 @@ export class Controller {
     } catch (error) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') { tab.pageState = 'unavailable'; void this.sync(); }
       this.finishTask(session, tab, task, { code: error.code === 'PAGE_UNAVAILABLE' ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error),
-        ...inspectionErrorDetails(error), ...waitErrorDetails(error),
+        ...inspectionErrorDetails(error), ...waitErrorDetails(error), ...errorDetails(error),
         ...(error.dispatch_status === 'not_dispatched' ? { dispatch_status: 'not_dispatched' } : {}),
         ...diagnosticDetails(error, { layer: 'extension', phase: 'execution' }) });
     } finally {

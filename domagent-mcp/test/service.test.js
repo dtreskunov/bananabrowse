@@ -7,7 +7,7 @@ import { tools } from '../mcp.js';
 
 const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
 
-test('public metadata and the 24-tool catalogue', async t => {
+test('public metadata and the 26-tool catalogue', async t => {
   const fixture = await start(); t.after(() => fixture.close());
   const health = await (await fetch(`${fixture.base}/health`)).json();
   assert.equal(health.protocol_version, 6);
@@ -15,10 +15,10 @@ test('public metadata and the 24-tool catalogue', async t => {
   assert.deepEqual([metadata.service, metadata.origin], ['domagent', ORIGIN]);
   const agent = await fixture.mcp();
   const listed = await agent.client.listTools();
-  assert.equal(listed.tools.length, 24);
+  assert.equal(listed.tools.length, 26);
   assert.deepEqual(listed.tools.slice(0, 9).map(tool => tool.name), ['pair_browser', 'list_browsers', 'request_session',
     'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'report_progress', 'request_handoff']);
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 26);
 });
 
 test('agent authentication uses the path ID and a hashed bearer key', async t => {

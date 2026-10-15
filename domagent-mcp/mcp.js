@@ -141,7 +141,7 @@ function storeArtifact(hub, agentId, result, args) {
 export function publicArtifact(hub, meta) {
   return { artifact_id: meta.id, name: meta.name, mime: meta.mime, bytes: meta.bytes, sha256: meta.sha256,
     expires_at: new Date(meta.expires_at).toISOString(),
-    download_url: `${hub.config.origin}/mcp/${meta.agent_id}/artifacts/${meta.id}` };
+    download_url: `${hub.config.origin}/mcp/${meta.agent_id}?artifact=${meta.id}` };
 }
 function readArtifact(hub, agentId, args) {
   const { meta, data } = hub.artifacts.read(agentId, args.artifact_id);

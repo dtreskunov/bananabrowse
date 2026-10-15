@@ -67,9 +67,9 @@ test('evaluate_script return_as artifact stores bytes for HTTP download and page
   assert.equal(stored.artifact.bytes, Buffer.byteLength(body));
   assert.equal(stored.artifact.sha256, sha(body));
   assert(stored.preview.startsWith('[{"id":0'));
-  assert.equal(stored.artifact.download_url, `https://service.test/mcp/atlas/artifacts/${stored.artifact.artifact_id}`);
+  assert.equal(stored.artifact.download_url, `https://service.test/mcp/atlas?artifact=${stored.artifact.artifact_id}`);
 
-  const path = `/mcp/atlas/artifacts/${stored.artifact.artifact_id}`;
+  const path = `/mcp/atlas?artifact=${stored.artifact.artifact_id}`;
   const download = await fetch(`${fixture.base}${path}`, { headers: auth(AGENT_KEY) });
   assert.equal(download.status, 200);
   assert.equal(download.headers.get('content-type'), 'application/json; charset=utf-8');
@@ -79,9 +79,12 @@ test('evaluate_script return_as artifact stores bytes for HTTP download and page
   assert.equal((await fetch(`${fixture.base}${path}`, { method: 'HEAD', headers: auth(AGENT_KEY) })).status, 200);
   assert.equal((await fetch(`${fixture.base}${path}`)).status, 401);
   assert.equal((await fetch(`${fixture.base}${path}`, { headers: auth(OTHER_KEY) })).status, 401);
-  assert.equal((await fetch(`${fixture.base}/mcp/orion/artifacts/${stored.artifact.artifact_id}`,
+  assert.equal((await fetch(`${fixture.base}/mcp/orion?artifact=${stored.artifact.artifact_id}`,
     { headers: auth(OTHER_KEY) })).status, 404);
-  assert.equal((await fetch(`${fixture.base}${path}?x=1`, { headers: auth(AGENT_KEY) })).status, 400);
+  assert.equal((await fetch(`${fixture.base}${path}&x=1`, { headers: auth(AGENT_KEY) })).status, 400);
+  assert.equal((await fetch(`${fixture.base}/mcp/atlas?artifact=nope`, { headers: auth(AGENT_KEY) })).status, 400);
+  assert.equal((await fetch(`${fixture.base}/health?artifact=${stored.artifact.artifact_id}`)).status, 400);
+  assert.equal((await fetch(`${fixture.base}/mcp/atlas`, { headers: auth(AGENT_KEY) })).status, 405);
   assert.equal((await fetch(`${fixture.base}${path}`, { method: 'POST', headers: auth(AGENT_KEY) })).status, 405);
 
   // Paged reads never split a UTF-8 sequence and reassemble exactly.

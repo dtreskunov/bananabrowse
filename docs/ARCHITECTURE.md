@@ -198,10 +198,12 @@ and survive restarts; artifacts of agents removed from the config are pruned.
 Requires extension 6.1.0+; older extensions get `CAPABILITY_UNAVAILABLE` with
 `required_extension_version` before dispatch.
 
-`GET|HEAD|DELETE /mcp/<agent-id>/artifacts/<artifact_id>` uses the same bearer
-key as MCP. A foreign or expired ID is `404`. Downloads carry
-`Content-Disposition: attachment`, `X-Content-SHA256` and an `ETag`; the
-service's CSP/`nosniff`/`no-store` headers apply. Query strings are rejected.
+`GET|HEAD|DELETE /mcp/<agent-id>?artifact=<artifact_id>` uses the same bearer
+key as MCP. The artifact rides on the exact MCP path so credential proxies that
+match the path exactly (OneCLI ignores the query string) cover it too. A foreign
+or expired ID is `404`. Downloads carry `Content-Disposition: attachment`,
+`X-Content-SHA256` and an `ETag`; the service's CSP/`nosniff`/`no-store` headers
+apply. Any other query string is rejected.
 
 ### Agent-facing errors (6.1)
 

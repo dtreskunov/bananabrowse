@@ -48,9 +48,9 @@ order.
 - **Artifacts.** `evaluate_script` accepts `return_as: "artifact"` (plus
   `artifact_name`, `artifact_mime`, `artifact_encoding`) and returns a handle
   instead of the data. New tools `list_artifacts` and `read_artifact`; new route
-  `GET|HEAD|DELETE /mcp/<agent-id>/artifacts/<id>` with the MCP bearer key.
-  Credential injectors that match `/mcp/<agent-id>` exactly must also cover
-  `/mcp/<agent-id>/artifacts/*`. Artifacts need extension 6.1.0; older
+  `GET|HEAD|DELETE /mcp/<agent-id>?artifact=<id>` with the MCP bearer key. It
+  shares the MCP path, so credential injectors that match `/mcp/<agent-id>`
+  exactly need no change. Artifacts need extension 6.1.0; older
   extensions answer `CAPABILITY_UNAVAILABLE` with `required_extension_version`.
 - **Storage.** Artifacts live in `DOMAGENT_ARTIFACTS_DIR` (default
   `<dir of DOMAGENT_DB>/artifacts`). Under systemd hardening the directory must

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { ARTIFACT_TEXT_MIME, VERSION, extensionOrigin, keyId, verify, registerPayload, tokenPayload, validName } from '../shared/protocol.js';
+import { ARTIFACT_ID_PATTERN, ARTIFACT_TEXT_MIME, VERSION, extensionOrigin, keyId, verify, registerPayload, tokenPayload, validName } from '../shared/protocol.js';
 import { token, hash } from './store.js';
 import { Hub } from './hub.js';
 import { handleMcp } from './mcp.js';
@@ -91,7 +91,9 @@ export function createApp(store, config) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     const url = new URL(req.url, config.origin), path = url.pathname, method = req.method, origin = req.headers.origin;
-    requireValue(!url.search, 'INVALID_ARGUMENTS');
+    // Artifacts live at /mcp/<agent>?artifact=<id> so that credential proxies scoped to the exact MCP path also cover them.
+    const query = [...url.searchParams], artifactId = query.length === 1 && query[0][0] === 'artifact' ? query[0][1] : null;
+    requireValue(!url.search || (/^\/mcp\//.test(path) && ARTIFACT_ID_PATTERN.test(artifactId || '')), 'INVALID_ARGUMENTS');
     if (path === '/health' && method === 'GET') {
       json(res, 200, { service: 'domagent', status: 'ok', version: SERVICE_VERSION, protocol_version: VERSION });
       return;
@@ -156,9 +158,8 @@ export function createApp(store, config) {
       json(res, 200, { browser_id: browser.id, refresh_token: refresh, ...hub.issueAccessToken(browser.id) });
       return;
     }
-    const mcp = /^\/mcp\/([a-z0-9-]{1,32})(?:\/artifacts\/(a[0-9A-Za-z_-]{22}))?$/.exec(path);
+    const mcp = /^\/mcp\/([a-z0-9-]{1,32})$/.exec(path);
     if (mcp) {
-      const artifactId = mcp[2];
       requireValue(artifactId ? ['GET', 'HEAD', 'DELETE'].includes(method) : method === 'POST', 'METHOD_NOT_ALLOWED', 405);
       requireValue(!origin || origin === config.origin, 'NOT_AUTHORIZED', 403);
       const agent = hub.agents.get(mcp[1]);

@@ -39,8 +39,13 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     await app.locator('#domain').fill(service.origin);
     await app.locator('#name').fill("Bob's Chrome");
     await app.getByRole('button', { name: 'Connect' }).click();
-    await expect(app.locator('.status')).toHaveText('Connected', { timeout: 15_000 });
-    await expect(app.getByRole('heading', { name: "Bob's Chrome" })).toBeVisible();
+    await expect(app.locator('.app')).toHaveAttribute('data-phase', 'online', { timeout: 15_000 });
+    // A healthy connection is silent: no header, browser name or server in the main view.
+    await expect(app).toHaveTitle('DomAgent');
+    await expect(app.locator('.strip, .connecting')).toHaveCount(0);
+    await expect(app.getByText("Bob's Chrome")).toHaveCount(0);
+    await expect(app.getByText(new URL(service.origin).host)).toHaveCount(0);
+    await expect(app.getByRole('heading', { name: 'Pair your first agent' })).toBeVisible();
 
     await app.getByRole('button', { name: 'Pair an agent' }).click();
     await expect(app.getByText(/Expires in/)).toBeVisible();
@@ -72,7 +77,10 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     const waited = await call('wait_for_page');
     expect(waited.isError).not.toBe(true);
     await exerciseActions(call);
-    await expect(app.getByText('Atlas', { exact: true }).first()).toBeVisible();
+    await expect(app.locator('.agent-row')).toHaveCount(1);
+    await expect(app.locator('.agent-row')).toContainText('Atlas');
+    await expect(app.locator('.agent-row .agent-status')).toHaveText('1 session');
+    await expect(app.getByText('Inactive')).toHaveCount(0);
     await expect(app.locator('.feed').first()).toBeVisible();
 
     const created = await agent.call('create_tab', { session_id: session.session_id, url: `${service.pageUrl}login`, description });
@@ -91,6 +99,8 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
       'Order #WN65795153 https://example.test/a/very/long/unbroken/path/'.repeat(4) + 'x'.repeat(200) })
       .then(value => ({ value }), error => ({ error }));
     await expect(app.getByRole('heading', { name: 'Atlas needs your help' })).toBeVisible();
+    await expect(app.locator('.agent-row .agent-status')).toHaveText('Needs you');
+    await expect(app).toHaveTitle('DomAgent (1)');
     // Long instructions, purposes and tab titles wrap or ellipsize; nothing scrolls sideways, even in a narrow window.
     expect(await app.locator('textarea').count()).toBe(0);
     for (const width of [900, 360]) {
@@ -105,6 +115,15 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     await app.getByRole('button', { name: 'Done' }).click();
     expect(await handoff).toEqual({ value: { state: 'completed', user_confirmed: true } });
     await expect.poll(() => worker.evaluate(id => chrome.tabGroups.get(id).then(g => g.color), group.id)).toBe('green');
+    await expect(app).toHaveTitle('DomAgent');
+
+    // Identity details live in Settings; pairing another agent starts from there too.
+    await app.getByRole('button', { name: 'Settings' }).click();
+    await expect(app.getByLabel('This browser')).toHaveValue("Bob's Chrome");
+    await expect(app.locator('.settings').getByText(new URL(service.origin).host, { exact: true })).toBeVisible();
+    await expect(app.getByRole('button', { name: '+ Pair an agent' })).toBeEnabled();
+    await app.getByRole('button', { name: 'Close' }).click();
+    await expect(app.getByRole('button', { name: '+ Pair' })).toBeEnabled();
 
     // Closing the window asks first, then ends the connection gracefully.
     const dialogs = [];
@@ -123,7 +142,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     // Reopening reattaches the live group with the same tab IDs, without another approval.
     await worker.evaluate(() => chrome.windows.create({ url: chrome.runtime.getURL('app.html'), type: 'popup' }));
     app = await findApp();
-    await expect(app.locator('.status')).toHaveText('Connected', { timeout: 15_000 });
+    await expect(app.locator('.app')).toHaveAttribute('data-phase', 'online', { timeout: 15_000 });
     await expect.poll(async () => (await agent.call('list_sessions'))[0]?.state).toBe('attached');
     const tabs = await agent.call('list_tabs', { session_id: session.session_id });
     expect(tabs.map(tab => tab.tab_id)).toContain(tabId);
@@ -142,6 +161,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     await expect.poll(async () => (await agent.call('list_sessions')).length).toBe(0);
     expect(await worker.evaluate(() => chrome.tabs.query({}).then(tabs => tabs.length))).toBe(before);
     await expect(agent.call('get_text', { tab_id: tabId, description, selector: 'h1' })).rejects.toMatchObject({ code: 'SESSION_ENDED' });
+    await expect(app.locator('.agent-row .agent-status')).toHaveText('Idle');
 
     // A declined request creates nothing; an agent-ended session ungroups but keeps tabs.
     const declined = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'This one gets declined' })
@@ -154,6 +174,13 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     const two = await second;
     await agent.call('end_session', { session_id: two.session_id });
     await expect.poll(() => worker.evaluate(() => chrome.tabGroups.query({}).then(g => g.length))).toBe(0);
+
+    // Only an abnormal connection is shown: the strip names the server, offers Retry and the title says offline.
+    await service.close();
+    await expect(app.locator('.strip')).toContainText(`Offline: can't reach ${new URL(service.origin).host}`, { timeout: 15_000 });
+    await expect(app.locator('.strip')).toContainText("Agents can't reach this browser.");
+    await expect(app.locator('.strip button')).toBeVisible();
+    await expect(app).toHaveTitle('DomAgent: offline');
   } finally {
     process.env.TMPDIR = previousTmp;
     await context?.close().catch(() => {});
@@ -190,7 +217,7 @@ test('v6 Chrome new browser run (simulated): group IDs change, the user confirms
     let app = await findApp();
     await app.locator('#domain').fill(service.origin);
     await app.getByRole('button', { name: 'Connect' }).click();
-    await expect(app.locator('.status')).toHaveText('Connected', { timeout: 15_000 });
+    await expect(app.locator('.app')).toHaveAttribute('data-phase', 'online', { timeout: 15_000 });
     await app.getByRole('button', { name: 'Pair an agent' }).click();
     await expect(app.getByText(/Expires in/)).toBeVisible();
     const agent = await service.mcp();

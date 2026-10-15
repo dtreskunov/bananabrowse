@@ -2,9 +2,9 @@ import { useEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import { act, busy, controller, copy, duplicate, focusExisting, localError, now, requestSitePermission, state,
   suggestedName, api, browserName } from './runtime';
-import { countdown, failureMessage, feedStatus, groupByAgent, hostOf, operationLabel, sessionSummary, splitUrl,
-  statusLabel, tabStatus, timeOf } from './presentation';
-import type { AgentGroup, Agent, HandoffView, RequestView, SessionView, Snapshot } from './presentation';
+import { agentRows, connectionNotice, countdown, failureMessage, feedStatus, hostOf, operationLabel, sessionSummary,
+  splitUrl, tabStatus, timeOf, windowTitle } from './presentation';
+import type { AgentRow, Agent, HandoffView, RequestView, SessionView, Snapshot } from './presentation';
 
 const COLORS: Record<string, string> = { blue: '#1a73e8', red: '#d93025', yellow: '#e8a600', green: '#188038',
   pink: '#d01884', purple: '#a142f4', cyan: '#007b83', orange: '#e8710a', grey: '#5f6368' };
@@ -61,31 +61,38 @@ function Setup({ snapshot }: { snapshot: Snapshot }) {
   </main>;
 }
 
+const GEAR = 'M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.4-2.5a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9c-.6.2-1.2.6-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.8 1.7 1L11 21h4l.4-2.9c.6-.2 1.2-.6 1.7-1l2.5 1 2-3.5-2.2-1.6Z';
+
 function Main({ snapshot }: { snapshot: Snapshot }) {
   const [settings, setSettings] = useState(false);
-  const status = statusLabel(snapshot.phase);
-  const error = localError.value || (snapshot.phase === 'offline' ? snapshot.error : null);
-  return <div class="app">
-    <header class="titlebar">
-      <div class="identity">
-        <h1>{snapshot.identity!.name}</h1>
-        <small class="muted">{hostOf(snapshot.identity!.origin)}</small>
-      </div>
-      <span class={`status ${status.tone}`} role="status"><span class="status-dot"/>{status.text}</span>
-      {snapshot.phase === 'offline' && <button class="link" onClick={() => controller.retry()}>Retry</button>}
-      <button class={`icon ${settings ? 'pressed' : ''}`} aria-label="Settings" aria-pressed={settings}
-        onClick={() => setSettings(!settings)}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm7.4-2.5a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.4 2.9c-.6.2-1.2.6-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.8 1.7 1L11 21h4l.4-2.9c.6-.2 1.2-.6 1.7-1l2.5 1 2-3.5-2.2-1.6Z"/></svg>
-      </button>
-    </header>
+  const title = windowTitle(snapshot);
+  // The OS title bar carries connection and pending state, so the page needs no header.
+  useEffect(() => { document.title = title; }, [title]);
+  const pair = () => void act('Pairing', () => { setSettings(false); controller.startPairing(); });
+  return <div class="app" data-phase={snapshot.phase}>
+    <Connection snapshot={snapshot}/>
     <main>
-      <Notice code={error}/>
-      {settings ? <Settings snapshot={snapshot} close={() => setSettings(false)}/> : <>
+      <Notice code={localError.value}/>
+      {settings ? <Settings snapshot={snapshot} close={() => setSettings(false)} pair={pair}/> : <>
         <Requests snapshot={snapshot}/>
-        <Agents snapshot={snapshot}/>
+        <Agents snapshot={snapshot} pair={pair} openSettings={() => setSettings(true)}/>
         <Activity snapshot={snapshot}/>
       </>}
     </main>
+  </div>;
+}
+
+function Connection({ snapshot }: { snapshot: Snapshot }) {
+  const notice = connectionNotice(snapshot);
+  if (!notice) return null;
+  if (notice.kind === 'connecting') return <p class="connecting muted small" role="status">Connecting…</p>;
+  return <div class="strip" role="status">
+    <div>
+      <strong>{notice.code ? failureMessage(notice.code) : `Offline: can't reach ${hostOf(snapshot.identity!.origin)}`}</strong>
+      <span>Agents can't reach this browser.</span>
+    </div>
+    <button disabled={snapshot.phase === 'connecting'} onClick={() => controller.retry()}>
+      {snapshot.phase === 'connecting' ? 'Retrying…' : 'Retry'}</button>
   </div>;
 }
 
@@ -165,14 +172,10 @@ function Reattach({ session }: { session: SessionView }) {
   </article>;
 }
 
-function Pairing({ snapshot }: { snapshot: Snapshot }) {
+function PairingCode({ snapshot }: { snapshot: Snapshot }) {
   const pairing = snapshot.pairing;
   const [copied, setCopied] = useState(false);
-  if (snapshot.phase !== 'online') return null;
-  if (!pairing || pairing.proposal) {
-    return <button class="wide" disabled={busy.value !== null || Boolean(pairing)}
-      onClick={() => void act('Pairing', () => { setCopied(false); controller.startPairing(); })}>Pair an agent</button>;
-  }
+  if (!pairing || pairing.proposal) return null;
   return <div class="pairing card">
     <p>Tell your agent this code:</p>
     <output class="code" aria-live="polite">{pairing.code}</output>
@@ -184,17 +187,16 @@ function Pairing({ snapshot }: { snapshot: Snapshot }) {
   </div>;
 }
 
-function AgentBlock({ group }: { group: AgentGroup }) {
+function AgentItem({ row }: { row: AgentRow }) {
   return <li class="agent">
     <div class="agent-row">
-      <Dot color={group.agent.color}/>
-      <strong>{group.agent.name}</strong>
-      {group.agent.url && <a class="muted small" href={group.agent.url} target="_blank" rel="noreferrer">{hostOf(group.agent.url)}</a>}
+      <Dot color={row.agent.color}/>
+      <strong>{row.agent.name}</strong>
+      <span class={`agent-status ${row.tone}`}>{row.status}</span>
     </div>
-    {group.sessions.length > 0 && <ul class="sessions">
-      {group.sessions.map(session => <li key={session.client_id} class="session">
+    {row.sessions.length > 0 && <ul class="sessions">
+      {row.sessions.map(session => <li key={session.client_id} class="session">
         <div class="session-row"><span>{session.title}</span><small class="muted">{sessionSummary(session)}</small></div>
-        {session.purpose && <small class="muted purpose">{session.purpose}</small>}
         <ul class="tabs">
           {session.tabs.map(tab => <li key={tab.tabId}>
             <button class="link tab-link" title={tab.url} onClick={() => void act('Opening tab', () => controller.focusTab(tab.tabId))}>
@@ -208,22 +210,32 @@ function AgentBlock({ group }: { group: AgentGroup }) {
   </li>;
 }
 
-function Agents({ snapshot }: { snapshot: Snapshot }) {
-  const { active, inactive } = groupByAgent(snapshot.agents, snapshot.sessions.filter(s => s.state === 'attached'));
+function Agents({ snapshot, pair, openSettings }: { snapshot: Snapshot; pair: () => void; openSettings: () => void }) {
+  const rows = agentRows(snapshot.agents, snapshot.sessions);
+  const canPair = snapshot.phase === 'online' && !snapshot.pairing && busy.value === null;
   return <section class="agents" aria-label="Agents">
-    <div class="section-head"><h2>Agents</h2></div>
-    {!snapshot.agents.length && !active.length && <p class="muted small">No agents yet. Pair one to let it ask for browser sessions.</p>}
-    {active.length > 0 && <ul class="agent-list">{active.map(group => <AgentBlock key={group.agent.id} group={group}/>)}</ul>}
-    {inactive.length > 0 && <details class="inactive">
-      <summary>Inactive ({inactive.length})</summary>
-      <ul class="agent-list">{inactive.map(group => <AgentBlock key={group.agent.id} group={group}/>)}</ul>
-    </details>}
-    <Pairing snapshot={snapshot}/>
+    <div class="section-head">
+      <h2>Agents</h2>
+      <span class="head-actions">
+        {rows.length > 0 && <button class="link" disabled={!canPair} onClick={pair}>+ Pair</button>}
+        <button class="icon" aria-label="Settings" onClick={openSettings}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d={GEAR}/></svg>
+        </button>
+      </span>
+    </div>
+    {rows.length > 0 && <ul class="agent-list">{rows.map(row => <AgentItem key={row.agent.id} row={row}/>)}</ul>}
+    {!rows.length && !snapshot.pairing && <div class="card empty">
+      <h2>Pair your first agent</h2>
+      <p class="muted">Your agent will ask you for a code. Then it can ask to open browser sessions here.</p>
+      <button class="primary" disabled={!canPair} onClick={pair}>Pair an agent</button>
+    </div>}
+    <PairingCode snapshot={snapshot}/>
   </section>;
 }
 
 function Activity({ snapshot }: { snapshot: Snapshot }) {
-  const names = new Map(snapshot.agents.map(agent => [agent.id, agent.name]));
+  // With a single agent its name on every row is noise.
+  const names = new Map(snapshot.agents.length > 1 ? snapshot.agents.map(agent => [agent.id, agent.name]) : []);
   const entries = [...snapshot.feed].reverse().slice(0, 50);
   if (!entries.length) return null;
   return <section class="activity" aria-label="Activity">
@@ -241,7 +253,7 @@ function Activity({ snapshot }: { snapshot: Snapshot }) {
   </section>;
 }
 
-function Settings({ snapshot, close }: { snapshot: Snapshot; close: () => void }) {
+function Settings({ snapshot, close, pair }: { snapshot: Snapshot; close: () => void; pair: () => void }) {
   const [name, setName] = useState(snapshot.identity!.name);
   const [scripts, setScripts] = useState<boolean | null>(null);
   useEffect(() => {
@@ -250,11 +262,20 @@ function Settings({ snapshot, close }: { snapshot: Snapshot; close: () => void }
   return <section class="settings" aria-label="Settings">
     <div class="section-head"><h2>Settings</h2><button class="link" onClick={close}>Close</button></div>
     <form class="field" onSubmit={event => { event.preventDefault(); void act('Renaming', () => controller.renameBrowser(name)); }}>
-      <label for="browser-name">Browser name</label>
+      <label for="browser-name">This browser</label>
       <div class="inline"><input id="browser-name" maxLength={80} value={name} onInput={event => setName(event.currentTarget.value)}/>
         <button type="submit" disabled={busy.value !== null || snapshot.phase !== 'online' || name === snapshot.identity!.name}>Save</button></div>
     </form>
-    <div class="field"><span class="label">Server</span><span>{snapshot.identity!.origin}</span></div>
+    <div class="field"><span class="label">Server</span><span>{hostOf(snapshot.identity!.origin)}</span></div>
+    <div class="field"><span class="label">Agents</span>
+      {snapshot.agents.length > 0 && <ul class="plain">{snapshot.agents.map((agent: Agent) => <li key={agent.id} class="inline">
+        <span><Dot color={agent.color}/>{agent.name}</span>
+        <button disabled={busy.value !== null || snapshot.phase !== 'online'} onClick={() => {
+          if (confirm(`Unpair ${agent.name}? Its sessions end and their tabs are ungrouped.`)) void act('Unpairing', () => controller.revokeAgent(agent.id));
+        }}>Unpair</button></li>)}</ul>}
+      <button class="link" disabled={busy.value !== null || snapshot.phase !== 'online' || Boolean(snapshot.pairing)}
+        onClick={pair}>+ Pair an agent</button>
+    </div>
     <label class="check">
       <input type="checkbox" checked={snapshot.settings.openAtStartup}
         onChange={event => void act('Saving', () => controller.setOpenAtStartup(event.currentTarget.checked))}/>
@@ -264,13 +285,6 @@ function Settings({ snapshot, close }: { snapshot: Snapshot; close: () => void }
       {scripts ? <span>Enabled</span> : <button onClick={() => void act('Enabling', async () => {
         setScripts(await api.permissions.request({ permissions: ['userScripts'] }));
       })}>Enable</button>}</div>}
-    <div class="field"><span class="label">Paired agents</span>
-      {snapshot.agents.length ? <ul class="plain">{snapshot.agents.map((agent: Agent) => <li key={agent.id} class="inline">
-        <span><Dot color={agent.color}/>{agent.name}</span>
-        <button disabled={busy.value !== null || snapshot.phase !== 'online'} onClick={() => {
-          if (confirm(`Unpair ${agent.name}? Its sessions end and their tabs are ungrouped.`)) void act('Unpairing', () => controller.revokeAgent(agent.id));
-        }}>Unpair</button></li>)}</ul> : <span class="muted">None</span>}
-    </div>
     <div class="field danger-zone">
       <button class="danger" disabled={busy.value !== null} onClick={() => {
         if (confirm('Forget this browser? All pairings and sessions end. You will need to set DomAgent up again.')) {

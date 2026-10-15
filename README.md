@@ -14,7 +14,7 @@ browser profile.
 
 ## Version
 
-Service **6.0.0-beta.2**, extension **6.0.1**, browser wire **v6**, DB schema **6**.
+Service **6.0.0-beta.3**, extension **6.0.2**, browser wire **v6**, DB schema **6**.
 v6 is a clean break from v5: use a new database, re-register browsers and
 re-pair agents. See [the v6 upgrade notes](docs/V6-UPGRADE.md) and
 [architecture](docs/ARCHITECTURE.md).
@@ -49,8 +49,13 @@ extensions and unsigned temporary Firefox add-ons.
 | Close the DomAgent window | Agents see the browser as offline; sessions resume when you reopen it |
 | Settings → Unpair | That agent's sessions end and it can no longer ask |
 
-Settings also has the browser name, **Open DomAgent when the browser starts**
-(off by default), Firefox page-script permission, and **Forget this browser**.
+The window stays quiet while connected. It shows each agent with a one-word
+status (Needs you, Working, n sessions, Idle) and only mentions the connection
+when something is wrong. The window title shows `DomAgent (n)` when n items are
+waiting and `DomAgent: offline` when disconnected. Settings (the gear) holds
+the browser name, the server, paired agents, **Open DomAgent when the browser
+starts** (off by default), Firefox page-script permission and **Forget this
+browser**.
 
 Each agent gets a stable group color. Sessions survive window closes and
 browser restarts for up to 7 days while their group exists. After a Chrome

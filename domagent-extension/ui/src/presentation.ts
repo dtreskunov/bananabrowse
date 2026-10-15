@@ -24,25 +24,40 @@ export interface Snapshot {
   handoffs: HandoffView[]; feed: FeedEntry[]; settings: { openAtStartup: boolean }; pending_count: number;
 }
 
-export function statusLabel(phase: Snapshot['phase']): { text: string; tone: 'ok' | 'busy' | 'off' } {
-  if (phase === 'online') return { text: 'Connected', tone: 'ok' };
-  if (phase === 'connecting' || phase === 'loading') return { text: 'Connecting…', tone: 'busy' };
-  return { text: 'Offline', tone: 'off' };
+const CONNECTION_ERRORS = ['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'];
+/** Connection is silent when healthy; only abnormal states are surfaced. */
+export function connectionNotice(snapshot: Pick<Snapshot, 'phase' | 'error'>):
+  { kind: 'connecting' } | { kind: 'offline'; code: string | null } | null {
+  if (snapshot.phase === 'online') return null;
+  if ((snapshot.phase === 'connecting' || snapshot.phase === 'loading') && !snapshot.error) return { kind: 'connecting' };
+  // Only connection-specific causes replace the default text; unrelated errors never masquerade as connectivity.
+  return { kind: 'offline', code: snapshot.error && CONNECTION_ERRORS.includes(snapshot.error) ? snapshot.error : null };
 }
 
-export interface AgentGroup { agent: Agent; sessions: SessionView[]; active: boolean }
-/** Paired agents with their sessions; agents without attached sessions are inactive. */
-export function groupByAgent(agents: Agent[], sessions: SessionView[]): { active: AgentGroup[]; inactive: AgentGroup[] } {
-  const groups = new Map<string, AgentGroup>();
-  for (const agent of agents) groups.set(agent.id, { agent, sessions: [], active: false });
+export function windowTitle(snapshot: Pick<Snapshot, 'phase' | 'error' | 'pending_count'>): string {
+  if (connectionNotice(snapshot)?.kind === 'offline') return 'DomAgent: offline';
+  return snapshot.pending_count ? `DomAgent (${snapshot.pending_count})` : 'DomAgent';
+}
+
+export interface AgentRow { agent: Agent; sessions: SessionView[]; status: string; tone: 'help' | 'busy' | 'quiet' }
+/** One row per agent (paired agents first, in order), with its attached sessions and a one-word status. */
+export function agentRows(agents: Agent[], sessions: SessionView[]): AgentRow[] {
+  const rows = new Map<string, AgentRow>();
+  for (const agent of agents) rows.set(agent.id, { agent, sessions: [], status: '', tone: 'quiet' });
   for (const session of sessions) {
-    const group = groups.get(session.agent.id) || { agent: session.agent, sessions: [], active: false };
-    group.sessions.push(session);
-    if (session.state === 'attached') group.active = true;
-    groups.set(session.agent.id, group);
+    if (session.state !== 'attached') continue;
+    const row = rows.get(session.agent.id) || { agent: session.agent, sessions: [], status: '', tone: 'quiet' as const };
+    row.sessions.push(session);
+    rows.set(session.agent.id, row);
   }
-  const all = [...groups.values()];
-  return { active: all.filter(group => group.active), inactive: all.filter(group => !group.active) };
+  for (const row of rows.values()) {
+    const tabs = row.sessions.flatMap(session => session.tabs);
+    if (tabs.some(tab => tab.help)) Object.assign(row, { status: 'Needs you', tone: 'help' });
+    else if (tabs.some(tab => tab.working)) Object.assign(row, { status: 'Working', tone: 'busy' });
+    else if (row.sessions.length) row.status = `${row.sessions.length} session${row.sessions.length === 1 ? '' : 's'}`;
+    else row.status = 'Idle';
+  }
+  return [...rows.values()];
 }
 
 export function splitUrl(value: string): { origin: string; rest: string } {

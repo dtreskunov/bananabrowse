@@ -1,4 +1,4 @@
-# DomAgent for Chrome (6.0.1)
+# DomAgent for Chrome (6.0.2)
 
 Build with `npm --prefix domagent-mcp run build` and load `dist/chrome` with
 **Load unpacked** (`chrome://extensions`, Developer mode). Minimum Chrome **145**.

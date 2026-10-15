@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent",
-  "version": "6.0.1",
+  "version": "6.0.2",
   "description": "Let your AI agent work in browser tab groups you approve, from a small DomAgent window.",
   "browser_specific_settings": {
     "gecko": {

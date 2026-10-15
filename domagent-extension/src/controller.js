@@ -268,6 +268,8 @@ export class Controller {
     this.socket = null; this.connection = null; this.ready = false; this.generation++;
     try { socket.close(); } catch { /* already closed */ }
     this.phase = this.identity?.browser_id ? 'offline' : 'setup';
+    // Keeps the offline notice up across reconnect attempts; welcome clears it.
+    if (!['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'].includes(this.error)) this.error = 'BROWSER_OFFLINE';
     this.lastInventory = '';
     for (const request of this.requests.keys()) this.clearNotification(`domagent-request-${request}`);
     this.requests.clear();

@@ -1,6 +1,6 @@
 # DomAgent service (v6)
 
-Self-hosted MCP server and browser hub. Service **6.0.0-beta.2**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **6.0.0-beta.3**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 

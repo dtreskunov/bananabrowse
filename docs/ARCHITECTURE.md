@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.0.0-beta.2 / extension 6.0.1 (wire v6, DB
+Status: implemented in service 6.0.0-beta.3 / extension 6.0.2 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -138,16 +138,25 @@ The window is a single-instance `type: "popup"` window with remembered size and
 position. The toolbar button focuses it. It uses system fonts and colors, light
 and dark themes, and is sparse.
 
-- **Header:** browser name (editable inline), server, connection dot.
+A healthy connection is silent: there is no header. The window title is
+`DomAgent`, `DomAgent (n)` when n items are waiting, or `DomAgent: offline`.
+
+- **Connection strip:** only when not connected. "Connecting…" on first start;
+  otherwise an amber strip, "Offline: can't reach <server>. Agents can't reach
+  this browser.", with Retry.
 - **Requests:** pairing proposals, session requests (agent, purpose, starting
   URLs with origins emphasized, Approve/Decline) and handoffs
   (instructions, Done/Cancel). Always on top of the list.
-- **Agents:** paired agents. For each agent, its sessions; for each session, its tabs with
-  per-tab status. Agents without attached sessions are collapsed under
-  "Inactive". Clicking a tab focuses it in its window.
+- **Agents:** one flat list, one row per paired agent with a status of
+  **Needs you**, **Working**, **n sessions** or **Idle**. Attached sessions and
+  their tabs nest under the agent; clicking a tab focuses it. The heading has
+  "+ Pair" and the Settings gear. With no agents, a "Pair your first agent"
+  card replaces the list.
 - **Activity:** feed of `report_progress` messages and tool-call descriptions.
-- **Settings:** server, open at browser startup (off by default), paired
-  agents with Revoke, Forget this browser.
+  The agent name is shown only when more than one agent is paired.
+- **Settings:** this browser's name (rename), server, agents with Unpair and
+  "+ Pair an agent", open at browser startup (off by default), Firefox page
+  scripts, Forget this browser.
 
 **Attention.** Each agent gets a stable group color, hashed from its ID over the
 browser palette excluding grey. While a human action is pending in a group, the

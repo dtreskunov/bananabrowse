@@ -68,6 +68,8 @@ async function startService(directory) {
   };
   return { origin, ca, app, store, pageUrl, mcp, description,
     async close() {
+      if (this.closed) return;
+      this.closed = true;
       for (const client of clients) await client.close().catch(() => {});
       await app.close().catch(() => {}); store.close();
       tls.closeAllConnections?.(); tls.close(); pages.close();

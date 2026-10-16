@@ -1,7 +1,7 @@
 import { render } from 'preact';
-import { App } from './App';
-import { boot, localError } from './runtime';
 import './styles/global.css';
+import { App } from './components/App';
+import { boot, localError } from './runtime';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('INVALID_MESSAGE');

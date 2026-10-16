@@ -1,0 +1,4 @@
+.agent-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; margin-right: 6px; vertical-align: -1px; }
+.card h2 .agent-dot { margin-right: 0; }
+.notice { padding: 8px 10px; border-radius: 6px; background: var(--warning-bg); color: var(--warning); }
+.actions { display: flex; gap: 8px; margin-top: 4px; }

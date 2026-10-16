@@ -1,18 +1,6 @@
-:root {
-  color-scheme: light dark;
-  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --surface: Canvas; --surface-fg: CanvasText;
-  --raised: color-mix(in srgb, var(--surface-fg) 4%, var(--surface));
-  --muted: color-mix(in srgb, var(--surface-fg) 62%, var(--surface));
-  --border: color-mix(in srgb, var(--surface-fg) 14%, var(--surface));
-  --border-strong: color-mix(in srgb, var(--surface-fg) 28%, var(--surface));
-  --wash: color-mix(in srgb, var(--surface-fg) 7%, var(--surface));
-  --primary: AccentColor; --primary-fg: AccentColorText;
-  --danger: light-dark(#b3261e, #ff8f87); --success: light-dark(#1e7b3a, #7fd197);
-  --warning: light-dark(#8a5300, #f0c27a); --warning-bg: light-dark(#fff4e0, #3a2a10);
-  --radius: 8px;
-}
-@supports not (color: AccentColor) { :root { --primary: Highlight; --primary-fg: HighlightText; } }
+/* Tokens, resets, base elements and patterns shared across components. */
+@import './themes/default.css';
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--surface); color: var(--surface-fg); font: 13px/1.5 var(--font-ui); }
@@ -36,80 +24,22 @@ h1, h2, p, blockquote, ul, ol { margin: 0; }
 h1 { font-size: 15px; font-weight: 600; }
 h2 { font-size: 13px; font-weight: 600; }
 a { color: var(--primary); }
+blockquote { padding: 6px 10px; border-left: 3px solid var(--border-strong); overflow-wrap: anywhere; white-space: pre-wrap; }
 .muted { color: var(--muted); }
 .small, small { font-size: 12px; }
 
-.center { display: grid; place-content: center; gap: 10px; height: 100%; padding: 24px; text-align: center; }
-.setup { max-width: 420px; margin: 0 auto; padding: 32px 22px; }
-.setup h1 { font-size: 18px; margin-bottom: 6px; }
-.setup form { display: grid; gap: 6px; margin-top: 22px; }
-.setup label { font-weight: 600; margin-top: 10px; }
-.setup .primary { margin-top: 18px; }
-
-.app { display: flex; flex-direction: column; min-height: 100%; }
-.connecting { padding: 10px 14px 0; }
-.strip { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 14px;
-  background: var(--warning-bg); color: var(--warning); border-bottom: 1px solid color-mix(in srgb, var(--warning) 35%, var(--surface)); }
-.strip div { display: grid; min-width: 0; overflow-wrap: anywhere; }
-.strip span { font-size: 12px; }
-.strip button { flex: none; }
-main { padding: 14px; display: grid; gap: 18px; }
-/* Single-column grids must not grow to fit nowrap text (purposes, tab titles); let it ellipsize or wrap. */
-main, .requests, .card, .sessions, .tabs, .settings, .field, .urls, .activity ol { grid-template-columns: minmax(0, 1fr); }
-.card > *, .session, .agent, .feed > div { min-width: 0; }
+/* Single-column grids must not grow to fit nowrap text (purposes, tab titles); let it ellipsize or wrap.
+   Each component applies the same rule to its own grids. */
+.card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); display: grid; gap: 8px;
+  grid-template-columns: minmax(0, 1fr); }
+.card > * { min-width: 0; }
 .card p, .card h2, .card blockquote, .tab-link { overflow-wrap: anywhere; }
-.app > main { align-content: start; }
-
-.notice { padding: 8px 10px; border-radius: 6px; background: var(--warning-bg); color: var(--warning); }
-.card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); display: grid; gap: 8px; }
 .card.attention { border-color: color-mix(in srgb, var(--warning) 60%, var(--surface)); }
 .card h2 { display: flex; align-items: center; gap: 8px; }
-.requests { display: grid; gap: 10px; }
-blockquote { padding: 6px 10px; border-left: 3px solid var(--border-strong); overflow-wrap: anywhere; white-space: pre-wrap; }
-.urls { list-style: none; padding: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
-.actions { display: flex; gap: 8px; margin-top: 4px; }
-.instructions { white-space: pre-wrap; overflow-wrap: anywhere; }
-.choice { display: flex; align-items: center; gap: 8px; }
-
 .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; min-height: 30px; }
-.head-actions { display: flex; align-items: center; gap: 6px; }
 .section-head h2 { text-transform: uppercase; letter-spacing: .04em; font-size: 11px; color: var(--muted); }
-.agent-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; margin-right: 6px; vertical-align: -1px; }
-.card h2 .agent-dot { margin-right: 0; }
-.agent-list, .sessions, .tabs, .plain { list-style: none; padding: 0; }
-.agent { padding: 8px 0; border-top: 1px solid var(--border); }
-.agent-list > .agent:first-child { border-top: 0; }
-.agent-row { display: flex; align-items: center; gap: 4px; }
-.agent-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-status { margin-left: auto; flex: none; font-size: 12px; color: var(--muted); }
-.agent-status.busy { color: var(--surface-fg); }
-.agent-status.help { color: var(--warning); font-weight: 600; }
-.card.empty { justify-items: start; }
-.sessions { margin: 6px 0 0 16px; display: grid; gap: 8px; }
-.session-row { display: flex; justify-content: space-between; gap: 8px; }
-.session-row span { font-weight: 500; }
-.tabs { margin-top: 4px; display: grid; gap: 2px; }
-.tabs li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.head-actions { display: flex; align-items: center; gap: 6px; }
 .tab-link { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--wash); color: var(--muted); }
 .chip.warn { background: var(--warning-bg); color: var(--warning); }
 .chip.bad { color: var(--danger); }
-.pairing { justify-items: center; text-align: center; margin-top: 12px; }
-.code { font: 600 28px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 3px; user-select: all; }
-
-.activity ol { list-style: none; padding: 0; display: grid; }
-.feed { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 0;
-  border-top: 1px solid var(--border); }
-.feed time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; padding-top: 2px; white-space: nowrap; }
-.feed p { overflow-wrap: anywhere; }
-
-.settings { display: grid; gap: 14px; }
-.field { display: grid; gap: 4px; }
-.field .label, .field label { font-weight: 600; }
-.inline { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-.plain { display: grid; gap: 6px; }
-.check { display: flex; gap: 8px; align-items: center; }
-.danger-zone { padding-top: 8px; border-top: 1px solid var(--border); }
-@media (forced-colors: active) {
-  :root { --primary: Highlight !important; --primary-fg: HighlightText !important; --border: ButtonBorder !important; --muted: GrayText !important; }
-}

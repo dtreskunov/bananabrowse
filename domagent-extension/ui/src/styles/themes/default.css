@@ -1,0 +1,19 @@
+/* Design tokens. Browser theme colors from theme.ts override --surface, --surface-fg, --border and --primary*. */
+:root {
+  color-scheme: light dark;
+  --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --surface: Canvas; --surface-fg: CanvasText;
+  --raised: color-mix(in srgb, var(--surface-fg) 4%, var(--surface));
+  --muted: color-mix(in srgb, var(--surface-fg) 62%, var(--surface));
+  --border: color-mix(in srgb, var(--surface-fg) 14%, var(--surface));
+  --border-strong: color-mix(in srgb, var(--surface-fg) 28%, var(--surface));
+  --wash: color-mix(in srgb, var(--surface-fg) 7%, var(--surface));
+  --primary: AccentColor; --primary-fg: AccentColorText;
+  --danger: light-dark(#b3261e, #ff8f87); --success: light-dark(#1e7b3a, #7fd197);
+  --warning: light-dark(#8a5300, #f0c27a); --warning-bg: light-dark(#fff4e0, #3a2a10);
+  --radius: 8px;
+}
+@supports not (color: AccentColor) { :root { --primary: Highlight; --primary-fg: HighlightText; } }
+@media (forced-colors: active) {
+  :root { --primary: Highlight !important; --primary-fg: HighlightText !important; --border: ButtonBorder !important; --muted: GrayText !important; }
+}

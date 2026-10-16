@@ -79,3 +79,9 @@ order.
   extension 6.1.3; older extensions (including 6.1.2, which closed without
   asking, shipped in 6.1.0-beta.4) get `CAPABILITY_UNAVAILABLE` with
   `required_extension_version` before anything is sent to the browser.
+- **TypeScript build (6.1.0-beta.6, extension 6.1.4).** No protocol, schema or
+  behaviour change. The service is now TypeScript and must be built before it
+  runs: in `domagent-mcp/` run `npm ci && npm run build:service` after every
+  update, and start `dist/domagent-mcp/index.js` instead of `index.js` (update
+  systemd `ExecStart`; see `deployment/domagent.service`). The operator CLI is
+  `dist/domagent-mcp/admin.js`. The Docker image builds this itself.

@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.1.0-beta.5 / extension 6.1.3 (wire v6, DB
+Status: implemented in service 6.1.0-beta.6 / extension 6.1.4 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 

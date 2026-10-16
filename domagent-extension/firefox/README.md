@@ -1,4 +1,4 @@
-# DomAgent for Firefox (6.1.3)
+# DomAgent for Firefox (6.1.4)
 
 Build with `npm --prefix domagent-mcp run build` and load
 `dist/firefox/manifest.json` from `about:debugging` as a temporary add-on.

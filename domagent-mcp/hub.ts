@@ -15,6 +15,7 @@ import {
   connectPayload,
   verify,
   navigationUrl,
+  navigableUrl,
   OPERATION_SCHEMAS,
   HANDOFF_SCHEMA,
   DESCRIPTION_SCHEMA,
@@ -564,19 +565,10 @@ export class Hub {
           'INVALID_MESSAGE',
         );
         keys.add(tab.key);
-        let ordinary = false;
-        try {
-          navigationUrl(tab.url, this.config.protectedOrigins);
-          ordinary = true;
-        } catch {
-          let origin: string | null = null;
-          try {
-            origin = new URL(tab.url).origin;
-          } catch {
-            /* non-URL documents are navigation-only */
-          }
-          if (origin && this.config.protectedOrigins.includes(origin)) continue;
-        }
+        const ordinary = navigableUrl(tab.url, this.config.protectedOrigins) !== null;
+        // Non-URL documents are navigation-only; protected origins are not listed at all.
+        const origin = ordinary ? null : URL.parse(tab.url)?.origin;
+        if (origin && this.config.protectedOrigins.includes(origin)) continue;
         const capabilities =
           ordinary && !['navigation_only', 'unavailable'].includes(tab.page_state)
             ? [...new Set(tab.capabilities)]
@@ -1262,6 +1254,7 @@ export class Hub {
     }
     try {
       this.checkAuthority(call);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- every failure must settle the call, never leave it pending
     } catch (error) {
       call.cancel(failureCode(error));
       return;
@@ -1293,6 +1286,7 @@ export class Hub {
     }
     try {
       this.checkAuthority(call);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- every failure must settle the call, never leave it pending
     } catch (error) {
       call.cancel(failureCode(error));
       return;

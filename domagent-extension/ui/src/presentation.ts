@@ -141,21 +141,14 @@ export function agentRows(agents: Agent[], sessions: SessionView[]): AgentRow[] 
 }
 
 export function splitUrl(value: string): { origin: string; rest: string } {
-  try {
-    const url = new URL(value);
-    return { origin: url.host, rest: `${url.pathname === '/' ? '' : url.pathname}${url.search}` };
-  } catch {
-    return { origin: value, rest: '' };
-  }
+  const url = URL.parse(value);
+  if (!url) return { origin: value, rest: '' };
+  return { origin: url.host, rest: `${url.pathname === '/' ? '' : url.pathname}${url.search}` };
 }
 
 export function hostOf(value: string | null | undefined): string {
   if (!value) return '';
-  try {
-    return new URL(value).host;
-  } catch {
-    return value;
-  }
+  return URL.parse(value)?.host ?? value;
 }
 
 export function countdown(expiresAt: number | null, now: number): string {

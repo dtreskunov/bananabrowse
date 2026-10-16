@@ -242,8 +242,12 @@ Formatting and linting match nanoclaw-v2 and are configured at the repository ro
   formats staged code files automatically.
 - **ESLint** (`eslint.config.js`): `@eslint/js` and `typescript-eslint`
   recommended rules. Unused variables are errors unless prefixed with `_`;
-  explicit `any` and catch-all `catch` blocks are warnings. `npm run lint:fix`
-  applies safe fixes. Disable a rule only inline, with a `-- reason`.
+  explicit `any` is a warning. A `catch` that never rethrows is an error:
+  prefer `URL.parse`/`URL.canParse` or `throw failure(...)`, and mark a real
+  boundary with `// eslint-disable-next-line no-catch-all/no-catch-all -- reason`.
+  Chrome and Firefox APIs are typed by `@types/chrome` (`src/browser-api.ts`
+  adds the Firefox-only extras). `npm run lint:fix` applies safe fixes.
+  Disable a rule only inline, with a `-- reason`.
 - The Prettier reformat commit is listed in `.git-blame-ignore-revs`.
 
 ### General rules

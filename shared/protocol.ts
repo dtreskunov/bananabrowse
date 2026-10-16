@@ -658,15 +658,22 @@ export async function verify(jwk: Wire, payload: Uint8Array<ArrayBuffer>, signat
   return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, unbase64url(signature), payload);
 }
 
+function navigable(url: URL, protectedOrigins: readonly string[]): boolean {
+  return (
+    ['http:', 'https:'].includes(url.protocol) &&
+    !url.username &&
+    !url.password &&
+    !protectedOrigins.includes(url.origin)
+  );
+}
+
 export function navigationUrl(value: string, protectedOrigins: readonly string[]): string {
   const url = new URL(value);
-  if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    protectedOrigins.includes(url.origin)
-  ) {
-    throw new Error('HANDOFF_REQUIRED');
-  }
+  if (!navigable(url, protectedOrigins)) throw new Error('HANDOFF_REQUIRED');
   return url.href;
+}
+
+export function navigableUrl(value: string, protectedOrigins: readonly string[]): string | null {
+  const url = URL.parse(value);
+  return url && navigable(url, protectedOrigins) ? url.href : null;
 }

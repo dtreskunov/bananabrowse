@@ -73,6 +73,7 @@ export class ArtifactStore {
         const meta = JSON.parse(readFileSync(join(this.directory!, entry), 'utf8')) as ArtifactMeta;
         if (meta.id !== id || typeof meta.agent_id !== 'string') throw new Error('INVALID_ARTIFACT');
         this.index.set(id, meta);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- unreadable or corrupt artifacts are dropped at startup
       } catch {
         this.removeFiles(id);
       }
@@ -184,6 +185,7 @@ export class ArtifactStore {
     let data: Buffer | undefined;
     try {
       data = this.directory ? readFileSync(join(this.directory, `${id}${DATA}`)) : this.memory.get(id);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- an unreadable data file is treated as expired
     } catch {
       data = undefined;
     }

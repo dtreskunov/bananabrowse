@@ -5,7 +5,7 @@ import {
   navigationUrl,
   validOperationArgs,
 } from '../../shared/protocol.js';
-import { boundedResult, fail, protectedRegex } from './security.js';
+import { boundedResult, fail, failure, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
 import { pageHelper } from './page.js';
 import { actionSummary } from './approval-summary.js';
@@ -187,13 +187,9 @@ export class BrowserAdapter {
         (details) => {
           const guard = this.guards.get(details.tabId);
           if (!guard) return {};
-          let blocked = false;
-          try {
-            blocked = guard.origins.includes(new URL(details.url).origin);
-          } catch (error) {
-            this.onWarning(error);
-            blocked = true;
-          }
+          const url = URL.parse(details.url);
+          if (!url) this.onWarning(new TypeError('Invalid URL'));
+          const blocked = !url || guard.origins.includes(url.origin);
           if (blocked && details.type === 'main_frame') this.onTabEvent(details.tabId, 'protected_pending');
           return { cancel: blocked };
         },
@@ -254,6 +250,7 @@ export class BrowserAdapter {
       try {
         const window = await this.api.windows.get(this.selectedWindowId);
         if (window.type === 'normal') return window.id;
+        // eslint-disable-next-line no-catch-all/no-catch-all -- windows.get rejects untyped when the window is gone; fall back to a fresh lookup
       } catch {
         this.selectedWindowId = null;
       }
@@ -318,7 +315,7 @@ export class BrowserAdapter {
         this.contexts.delete(tabId);
       } catch (error) {
         this.onWarning(error);
-        fail('PROTECTION_UNAVAILABLE');
+        throw failure('PROTECTION_UNAVAILABLE');
       }
     }
     if (!retainProtection) await this.dropProtection(tabId);
@@ -570,12 +567,12 @@ export class BrowserAdapter {
         js: [{ code: compiled.code }],
       });
     } catch (error) {
-      const failure = Object.assign(new Error('SCRIPT_EXECUTION_UNAVAILABLE'), {
+      const unavailable = Object.assign(new Error('SCRIPT_EXECUTION_UNAVAILABLE'), {
         code: 'SCRIPT_EXECUTION_UNAVAILABLE',
         ...diagnosticDetails(error, { layer: 'browser', phase: 'dispatch', execution_world: world }),
       });
-      this.onWarning(failure);
-      throw failure;
+      this.onWarning(unavailable);
+      throw unavailable;
     }
     const response = responses?.[0];
     if (!response) fail('SCRIPT_EXECUTION_UNAVAILABLE');
@@ -725,7 +722,7 @@ export class BrowserAdapter {
         screenshot = await this.api.tabs.captureTab(tabId, { format: 'png' });
       } catch (error) {
         this.onWarning(error);
-        fail('CAPABILITY_UNAVAILABLE');
+        throw failure('CAPABILITY_UNAVAILABLE');
       }
       if (typeof screenshot !== 'string' || !screenshot.startsWith('data:image/png;base64,')) {
         fail('CAPABILITY_UNAVAILABLE');

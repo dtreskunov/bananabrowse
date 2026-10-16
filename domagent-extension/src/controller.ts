@@ -15,6 +15,7 @@ import {
   validDescription,
   validOperationArgs,
   navigationUrl,
+  navigableUrl,
   inspectionErrorDetails,
   waitErrorDetails,
   agentColor,
@@ -22,7 +23,7 @@ import {
   validName,
   errorDetails,
 } from '../../shared/protocol.js';
-import { boundedResult, errorCode, fail, id as validId, originList, protectedUnion } from './security.js';
+import { boundedResult, errorCode, fail, failure, id as validId, originList, protectedUnion } from './security.js';
 import type { BrowserApi, IdentifiedTab } from './browser-api.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
 import type { Wire } from '../../shared/protocol.js';
@@ -443,6 +444,7 @@ export class Controller {
     }, 1000);
     try {
       this.identity = (await this.identityStore.load()) as Wire | null;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- a corrupt identity must surface as an error and fall back to setup, not stop startup
     } catch (error) {
       this.identity = null;
       this.report(error);
@@ -493,7 +495,7 @@ export class Controller {
     try {
       value = JSON.parse(raw);
     } catch {
-      fail(response.ok ? 'INVALID_MESSAGE' : 'SERVICE_UNREACHABLE');
+      throw failure(response.ok ? 'INVALID_MESSAGE' : 'SERVICE_UNREACHABLE');
     }
     if (!response.ok) fail(value.error || 'SERVICE_UNREACHABLE');
     return value;
@@ -515,7 +517,7 @@ export class Controller {
       if (!response.ok || raw.length > 4096) fail('INVALID_SERVICE');
       metadata = JSON.parse(raw);
     } catch (error: any) {
-      fail(error.code === 'INVALID_SERVICE' ? error.code : 'SERVICE_UNREACHABLE');
+      throw failure(error.code === 'INVALID_SERVICE' ? error.code : 'SERVICE_UNREACHABLE');
     }
     if (metadata.service !== 'domagent' || metadata.origin !== origin) fail('INVALID_SERVICE');
     if (metadata.protocol_version !== VERSION) fail('UPGRADE_REQUIRED');
@@ -568,6 +570,7 @@ export class Controller {
     let accessToken: string;
     try {
       accessToken = await this.accessToken();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- connection boundary: every failure becomes an offline state with a retry
     } catch (error: any) {
       if (generation !== this.generation) return;
       if (error.code === 'NOT_AUTHORIZED') {
@@ -622,11 +625,7 @@ export class Controller {
     this.connection = null;
     this.ready = false;
     this.generation++;
-    try {
-      socket.close();
-    } catch {
-      /* already closed */
-    }
+    socket.close();
     this.phase = this.identity?.browser_id ? 'offline' : 'setup';
     // Keeps the offline notice up across reconnect attempts; welcome clears it.
     if (!['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'].includes(this.error!))
@@ -955,6 +954,7 @@ export class Controller {
           if (session.state !== 'attached') continue;
           try {
             await this.scan(session);
+            // eslint-disable-next-line no-catch-all/no-catch-all -- one broken session must not stop the scan of the others
           } catch (error) {
             this.report(error);
           }
@@ -974,6 +974,7 @@ export class Controller {
     let group: chrome.tabGroups.TabGroup | null = null;
     try {
       group = await this.api.tabGroups.get(session.groupId!);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- tabGroups.get rejects untyped when the group is gone
     } catch {
       group = null;
     }
@@ -1004,15 +1005,10 @@ export class Controller {
         continue;
       }
       if (!currentUrl) continue;
-      let ordinary = false;
-      try {
-        navigationUrl(currentUrl, this.protectedOrigins);
-        ordinary = true;
-      } catch {
-        if (/^https?:/i.test(currentUrl)) {
-          excluded++;
-          continue;
-        }
+      const ordinary = navigableUrl(currentUrl, this.protectedOrigins) !== null;
+      if (!ordinary && /^https?:/i.test(currentUrl)) {
+        excluded++;
+        continue;
       }
       if (session.tabs.size >= SESSION_TAB_LIMIT) {
         excluded++;
@@ -1059,11 +1055,14 @@ export class Controller {
       return;
     }
     if (/^https?:/.test(currentUrl) && this.adapter.browserName === 'chrome' && !this.adapter.attached.has(tab.tabId)) {
-      try {
-        navigationUrl(currentUrl, this.protectedOrigins);
-        await this.adapter.attach(tab.tabId);
-      } catch {
-        /* protected pages keep navigation-only scope; the guard blocks loading them */
+      // Protected pages keep navigation-only scope; the guard blocks loading them.
+      if (navigableUrl(currentUrl, this.protectedOrigins)) {
+        try {
+          await this.adapter.attach(tab.tabId);
+          // eslint-disable-next-line no-catch-all/no-catch-all -- attach is retried on the next scan; tab state stays observable
+        } catch {
+          /* best effort */
+        }
       }
     }
     tab.title = (current.title || 'Untitled').slice(0, 160);
@@ -1368,6 +1367,7 @@ export class Controller {
         tabs[index].navigation = { from: tabs[index].url, url };
         tabs[index].pageState = 'loading';
         await this.api.tabs.update(tabs[index].tabId, { url });
+        // eslint-disable-next-line no-catch-all/no-catch-all -- each start URL is independent; failures are reported, the rest still open
       } catch (error) {
         this.report(error);
       }
@@ -1501,6 +1501,7 @@ export class Controller {
       }
       this.drain(session);
       this.changed();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- command boundary: every failure becomes a result code for the service
     } catch (error) {
       this.result(message, { code: errorCode(error) });
     }
@@ -1529,6 +1530,7 @@ export class Controller {
       task.ready = true;
       this.addFeed({ id: task.message.request_id, status: 'ready' });
       this.send({ type: 'command.ready', request_id: task.message.request_id });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- task boundary: every failure settles the task with a result code
     } catch (error: any) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') {
         tab.pageState = 'unavailable';
@@ -1641,6 +1643,7 @@ export class Controller {
       if (tab && task.message.operation === 'navigate') await this.sync();
       this.finishTask(session, tab, task, null, boundedResult(value));
       after = task.after;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- task boundary: every failure settles the task with a result code
     } catch (error: any) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') {
         tab.pageState = 'unavailable';
@@ -1768,6 +1771,7 @@ export class Controller {
     if (!this.connection) return;
     try {
       this.send({ type: 'result', request_id: message.request_id, ...(error ? { error } : { result: value }) });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the socket can drop while sending; the failure is reported locally
     } catch (failure) {
       this.report(failure);
     }
@@ -1790,11 +1794,9 @@ export class Controller {
       if (event === 'navigation_pending') {
         tab.navigation = null;
         if (/^https?:/.test(destination || '')) {
-          try {
-            tab.navigation = { from: tab.url, url: navigationUrl(destination!, this.protectedOrigins) };
-          } catch {
-            continue;
-          }
+          const url = navigableUrl(destination!, this.protectedOrigins);
+          if (!url) continue;
+          tab.navigation = { from: tab.url, url };
         }
       }
       tab.documentGeneration++;
@@ -1924,14 +1926,11 @@ export class Controller {
     clearTimeout(this.reconnectTimer);
     try {
       if (this.connection) this.send({ type: 'bye' });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- bye on window close is best effort; the service also detects the drop
     } catch {
       /* best effort */
     }
-    try {
-      this.socket?.close(1000, 'WINDOW_CLOSED');
-    } catch {
-      /* best effort */
-    }
+    this.socket?.close(1000, 'WINDOW_CLOSED');
     for (const session of this.sessions.values())
       for (const tab of session.tabs.values()) {
         void this.adapter.release(tab.tabId).catch(() => {});

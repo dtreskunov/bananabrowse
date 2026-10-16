@@ -7,6 +7,7 @@ import {
   validTabId,
   waitErrorDetails,
   navigationUrl,
+  navigableUrl,
   validDescription,
   inspectionErrorDetails,
   validBrowserInfo,
@@ -119,10 +120,15 @@ test('navigation accepts only credential-free HTTP(S), excluding complete protec
     `${origin}/dashboard`,
     'https://CONTROL.example:443/a',
     'data:text/html,x',
-  ])
+    'not a url',
+  ]) {
     assert.throws(() => navigationUrl(url, [origin]));
-  navigationUrl('http://intranet.local/app', [origin]);
-  navigationUrl('https://control.example.evil/app', [origin]);
+    assert.equal(navigableUrl(url, [origin]), null);
+  }
+  assert.throws(() => navigationUrl('not a url', [origin]), TypeError);
+  assert.throws(() => navigationUrl(`${origin}/x`, [origin]), /HANDOFF_REQUIRED/);
+  for (const url of ['http://intranet.local/app', 'https://control.example.evil/app'])
+    assert.equal(navigableUrl(url, [origin]), navigationUrl(url, [origin]));
 });
 
 test('protected filters anchor scheme, port and hostname and cover all URL paths', () => {

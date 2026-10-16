@@ -72,6 +72,7 @@ export function prepareEvaluateExpression(script: string): { expression: string;
   let parsed: { program: Program; async: boolean } | null = null;
   try {
     parsed = parseScript(script);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- acorn can throw SyntaxError or RangeError; V8 reports the real error below
   } catch {
     parsed = null;
   }

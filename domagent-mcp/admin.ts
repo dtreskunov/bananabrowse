@@ -24,13 +24,7 @@ if (command === 'agent-key') {
   const [id, name, homepage = ''] = args;
   if (!id || !AGENT_ID_PATTERN.test(id)) fail('Agent ID must be 1-32 lowercase letters, digits or hyphens.');
   if (!validName(name || '')) fail('Provide a display name of at most 80 characters.');
-  if (homepage) {
-    try {
-      new URL(homepage);
-    } catch {
-      fail('Homepage must be a URL.');
-    }
-  }
+  if (homepage && !URL.canParse(homepage)) fail('Homepage must be a URL.');
   const key = `da_${randomBytes(32).toString('base64url')}`;
   const variable = `DOMAGENT_AGENT_${id.toUpperCase().replaceAll('-', '_')}`;
   console.log(`API key (shown once; store it in the agent's secret manager):\n${key}\n`);

@@ -6,8 +6,12 @@ export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
 export const MAX_QUEUE = 16;
 export const COMMAND_TIMEOUT_MS = EXECUTION_MS;
 
+export function failure(code: string, details: Wire = {}): Error {
+  return Object.assign(new Error(code), details, { code });
+}
+
 export function fail(code: string, details: Wire = {}): never {
-  throw Object.assign(new Error(code), details, { code });
+  throw failure(code, details);
 }
 
 export function text(value: unknown, max = 256): string {

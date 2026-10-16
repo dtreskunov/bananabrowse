@@ -31,6 +31,7 @@ export async function act(label: string, operation: () => Promise<unknown> | unk
   localError.value = null;
   try {
     await operation();
+    // eslint-disable-next-line no-catch-all/no-catch-all -- UI action boundary: every failure is shown to the user
   } catch (error) {
     localError.value = code(error);
     console.error('DomAgent:', code(error));
@@ -69,6 +70,7 @@ export async function boot(): Promise<void> {
       await api.windows.get(appWindowId);
       duplicate.value = true;
       return;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- windows.get rejects untyped when the window is gone; the record is stale
     } catch {
       /* stale record */
     }

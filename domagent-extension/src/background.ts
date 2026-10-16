@@ -19,6 +19,7 @@ async function appWindowId() {
   try {
     await api.windows.get(id);
     return id;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- windows.get rejects untyped when the window is gone; the record is stale
   } catch {
     await api.storage.session.remove('appWindowId');
     return null;

@@ -124,6 +124,7 @@ export function createApp(store: Store, config: Config) {
     try {
       rateLimit(req);
       hub.upgrade(req, socket, head);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- upgrade boundary: every rejection closes the socket instead of crashing the server
     } catch (error) {
       audit('ws_rejected', { code: failureCode(error) });
       socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');

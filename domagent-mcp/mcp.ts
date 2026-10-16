@@ -306,8 +306,9 @@ function encodeArtifact(value: unknown, args: Wire): { data: Buffer; mime: strin
 function jsonShape(text: string): Wire | undefined {
   try {
     return shapeOf(JSON.parse(text));
+    // eslint-disable-next-line no-catch-all/no-catch-all -- the page chose the bytes; shape is best effort
   } catch {
-    return undefined; /* the page chose the bytes; shape is best effort */
+    return undefined;
   }
 }
 function storeArtifact(hub: Hub, agentId: string, result: Wire | undefined, args: Wire): Wire {
@@ -460,6 +461,7 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       }
       throw error;
     }
+    // eslint-disable-next-line no-catch-all/no-catch-all -- tool boundary: every failure becomes an MCP error result
   } catch (error) {
     const code = failureCode(error);
     audit('mcp_tool_failure', { agent_id: agent.id, code, ...inspectionErrorDetails(error as Wire) });

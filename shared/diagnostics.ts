@@ -12,20 +12,17 @@ const nativeStackGetter =
 function redact(value: string): string {
   return value
     .replace(/\b(?:https?|wss?):\/\/[^\s<>"']+/gi, (raw) => {
-      try {
-        const url = new URL(raw);
-        if (url.username || url.password) {
-          url.username = 'redacted';
-          url.password = '';
-        }
-        // Query values and fragments can contain credentials under arbitrary names.
-        for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, REDACTED);
-        if (url.hash) url.hash = REDACTED;
-        url.pathname = url.pathname.replace(/\/(token|secret|password|apikey|api-key)\/[^/]+/gi, '/$1/redacted');
-        return url.href;
-      } catch {
-        return '[redacted URL]';
+      const url = URL.parse(raw);
+      if (!url) return '[redacted URL]';
+      if (url.username || url.password) {
+        url.username = 'redacted';
+        url.password = '';
       }
+      // Query values and fragments can contain credentials under arbitrary names.
+      for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, REDACTED);
+      if (url.hash) url.hash = REDACTED;
+      url.pathname = url.pathname.replace(/\/(token|secret|password|apikey|api-key)\/[^/]+/gi, '/$1/redacted');
+      return url.href;
     })
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/gi, '$1 [redacted]')
     .replace(
@@ -127,8 +124,8 @@ export function sanitizeDiagnostics(input: unknown): Wire | undefined {
       result.truncation_reasons = [...reasons];
     }
     return Object.keys(result).length ? result : undefined;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- host objects/proxies must not turn diagnostics into a failure
   } catch {
-    // Host objects/proxies are not allowed to turn diagnostic projection into a failure.
     return { truncated: true, truncation_reasons: ['unreadable'] };
   }
 }
@@ -163,6 +160,7 @@ export function diagnosticDetails(error: unknown, context: Wire = {}): { diagnos
         if (value !== undefined) source[key] = value;
       }
     }
+    // eslint-disable-next-line no-catch-all/no-catch-all -- host objects/proxies must not turn diagnostics into a failure
   } catch {
     source = { name: 'Error', message: 'Browser execution failed' };
   }

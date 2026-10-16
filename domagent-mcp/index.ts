@@ -14,6 +14,7 @@ try {
   app = createApp(store, config);
   await app.listen();
   audit('service_started');
+  // eslint-disable-next-line no-catch-all/no-catch-all -- process boundary: startup failures are audited and set the exit code
 } catch (error) {
   audit('service_start_failed', { code: failureCode(error) });
   store?.close();
@@ -27,6 +28,7 @@ async function stop() {
     if (app) await app.close();
     store?.close();
     audit('service_stopped');
+    // eslint-disable-next-line no-catch-all/no-catch-all -- process boundary: shutdown failures are audited and set the exit code
   } catch (error) {
     audit('service_stop_failed', { code: failureCode(error) });
     process.exitCode = 1;

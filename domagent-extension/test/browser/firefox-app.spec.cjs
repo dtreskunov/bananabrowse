@@ -34,7 +34,7 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     ].join('\n'),
   );
   const port = await freePort();
-  let child, exit, rdp, parent, appConsole, _backgroundConsole;
+  let child, exit, rdp, parent, appConsole;
   const launch = () => {
     child = spawn(
       process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(),
@@ -94,7 +94,6 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
   launch();
   try {
     await install();
-    _backgroundConsole = await findTarget('_generated_background_page.html').catch(() => null);
     // Installation opens the app window; it is a popup-type window.
     appConsole = await findTarget('/app.html');
     expect(await rdp.evaluate(appConsole, 'browser.windows.getCurrent().then(w => w.type)')).toBe('popup');

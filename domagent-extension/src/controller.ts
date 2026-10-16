@@ -1000,7 +1000,7 @@ export class Controller {
       const tracked = session.tabs.get(current.id);
       const currentUrl = current.pendingUrl || current.url || '';
       if (tracked) {
-        await this.updateTab(session, tracked, current, currentUrl);
+        await this.updateTab(tracked, current, currentUrl);
         continue;
       }
       if (!currentUrl) continue;
@@ -1048,7 +1048,7 @@ export class Controller {
     }
     session.excluded = excluded;
   }
-  async updateTab(_session: Session, tab: Tab, current: Wire, currentUrl: string) {
+  async updateTab(tab: Tab, current: Wire, currentUrl: string) {
     tab.windowId = current.windowId;
     if (!currentUrl) {
       tab.pageState = 'loading';

@@ -1,14 +1,21 @@
 // The extension UI and all browser control live in the app window (app.html).
 // This background script only opens/focuses that window and cleans up after it closes.
-declare const browser: any;
-declare const chrome: any;
+import { browserApi } from './browser-api.js';
+
 declare const BUILD_BROWSER: 'chrome' | 'firefox';
-const api: any = typeof browser === 'undefined' ? chrome : browser;
+const api = browserApi();
 const APP = 'app.html';
 
+interface SavedBounds {
+  width: number;
+  height: number;
+  left?: number;
+  top?: number;
+}
+
 async function appWindowId() {
-  const { appWindowId: id } = await api.storage.session.get('appWindowId');
-  if (!Number.isInteger(id)) return null;
+  const { appWindowId: id } = await api.storage.session.get<{ appWindowId?: unknown }>('appWindowId');
+  if (typeof id !== 'number' || !Number.isInteger(id)) return null;
   try {
     await api.windows.get(id);
     return id;
@@ -24,7 +31,7 @@ async function openApp() {
     await api.windows.update(existing, { focused: true });
     return;
   }
-  const { bounds } = await api.storage.local.get('bounds');
+  const { bounds } = await api.storage.local.get<{ bounds?: SavedBounds }>('bounds');
   const size = { width: 440, height: 760 };
   if (bounds && Number.isInteger(bounds.width) && Number.isInteger(bounds.height)) {
     Object.assign(size, { width: Math.max(360, bounds.width), height: Math.max(480, bounds.height) });
@@ -32,7 +39,7 @@ async function openApp() {
       Object.assign(size, { left: bounds.left, top: bounds.top });
   }
   const window = await api.windows.create({ url: api.runtime.getURL(APP), type: 'popup', focused: true, ...size });
-  await api.storage.session.set({ appWindowId: window.id });
+  await api.storage.session.set({ appWindowId: window!.id });
 }
 
 async function cleanup() {
@@ -47,7 +54,7 @@ async function cleanup() {
     const rules = await api.declarativeNetRequest.getSessionRules().catch(() => []);
     if (rules.length)
       await api.declarativeNetRequest
-        .updateSessionRules({ removeRuleIds: rules.map((rule: any) => rule.id) })
+        .updateSessionRules({ removeRuleIds: rules.map((rule) => rule.id) })
         .catch(() => {});
     const targets = await api.debugger.getTargets().catch(() => []);
     for (const target of targets) {
@@ -60,29 +67,29 @@ async function cleanup() {
 api.action.onClicked.addListener(() => {
   void openApp().catch((error) => console.error('DomAgent:', error?.message));
 });
-api.runtime.onInstalled.addListener((details: any) => {
+api.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') void openApp().catch((error) => console.error('DomAgent:', error?.message));
 });
 api.runtime.onStartup.addListener(() => {
   void api.storage.local
-    .get('settings')
-    .then(({ settings }: any) => {
+    .get<{ settings?: { openAtStartup?: unknown } }>('settings')
+    .then(({ settings }) => {
       if (settings?.openAtStartup === true) return openApp();
       return cleanup();
     })
-    .catch((error: any) => console.error('DomAgent:', error?.message));
+    .catch((error) => console.error('DomAgent:', error?.message));
 });
 api.windows.onRemoved.addListener((windowId: number) => {
   void api.storage.session
-    .get('appWindowId')
-    .then(async ({ appWindowId: id }: any) => {
+    .get<{ appWindowId?: unknown }>('appWindowId')
+    .then(async ({ appWindowId: id }) => {
       if (id !== windowId) return;
       await api.storage.session.remove('appWindowId');
       await cleanup();
     })
     .catch(() => {});
 });
-api.runtime.onMessage.addListener((message: any, sender: any, respond: (response: unknown) => void) => {
+api.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== api.runtime.id || message?.type !== 'open-app') return false;
   void openApp().then(
     () => respond({ ok: true }),

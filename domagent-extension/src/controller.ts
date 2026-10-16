@@ -18,10 +18,12 @@ import {
   inspectionErrorDetails,
   waitErrorDetails,
   agentColor,
+  type GroupColor,
   validName,
   errorDetails,
 } from '../../shared/protocol.js';
 import { boundedResult, errorCode, fail, id as validId, originList, protectedUnion } from './security.js';
+import type { BrowserApi, IdentifiedTab } from './browser-api.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
 import type { Wire } from '../../shared/protocol.js';
 import type { BrowserAdapter, Grant } from './adapter.js';
@@ -31,7 +33,7 @@ interface Agent {
   id: string;
   name: string;
   url?: string | null;
-  color?: string;
+  color?: GroupColor;
 }
 interface Candidate {
   groupId: number;
@@ -84,8 +86,8 @@ interface Session {
   candidates?: Candidate[];
   startTabs?: number[];
   startUrls?: string[];
-  color?: string;
-  painted?: string;
+  color?: GroupColor;
+  painted?: `${chrome.tabGroups.Color}`;
 }
 interface SessionRequest {
   request_id: string;
@@ -106,7 +108,7 @@ interface StorageArea {
   set(items: Wire): Promise<void>;
 }
 interface ControllerOptions {
-  api: any;
+  api: BrowserApi;
   adapter: BrowserAdapter;
   identity: Identity;
   storage: StorageArea;
@@ -151,7 +153,11 @@ export function defaultBrowserName(
 }
 
 /** Candidate native groups for a session whose group IDs did not survive a browser restart. */
-export function reattachCandidates(record: Wire, groups: any[], tabsByGroup: Map<number, any[]>): Candidate[] {
+export function reattachCandidates(
+  record: Wire,
+  groups: chrome.tabGroups.TabGroup[],
+  tabsByGroup: Map<number, chrome.tabs.Tab[]>,
+): Candidate[] {
   const urls = new Set((record.tabs || []).map((tab: Wire) => tab.url));
   return groups
     .filter((group) => group.title === record.title)
@@ -159,7 +165,7 @@ export function reattachCandidates(record: Wire, groups: any[], tabsByGroup: Map
       const tabs = tabsByGroup.get(group.id) || [];
       return {
         groupId: group.id,
-        title: group.title,
+        title: group.title!,
         tab_count: tabs.length,
         matching: tabs.filter((tab) => urls.has(tab.url)).length,
       };
@@ -168,7 +174,7 @@ export function reattachCandidates(record: Wire, groups: any[], tabsByGroup: Map
 }
 
 export class Controller {
-  declare api: any;
+  declare api: BrowserApi;
   declare adapter: BrowserAdapter;
   declare identityStore: Identity;
   declare storage: StorageArea;
@@ -459,7 +465,7 @@ export class Controller {
     tabGroups.onRemoved.addListener(refresh);
     tabGroups.onMoved?.addListener(refresh);
     const menus = this.api.menus || this.api.contextMenus;
-    menus?.onClicked.addListener((info: Wire, tab: Wire) => {
+    menus?.onClicked.addListener((info, tab) => {
       void this.menuClicked(info, tab).catch((error) => this.report(error));
     });
     this.api.notifications?.onClicked.addListener((id: string) => {
@@ -796,9 +802,9 @@ export class Controller {
     const run: Wire = await this.sessionStorage.get('run').catch(() => ({}));
     const sameRun = run.run === true;
     const groups = await this.api.tabGroups.query({});
-    const groupIds = new Set(groups.map((group: Wire) => group.id));
+    const groupIds = new Set<number | null>(groups.map((group) => group.id));
     const allTabs = await this.api.tabs.query({});
-    const tabsByGroup = new Map<number, any[]>();
+    const tabsByGroup = new Map<number, chrome.tabs.Tab[]>();
     for (const tab of allTabs)
       if (tab.groupId >= 0) {
         if (!tabsByGroup.has(tab.groupId)) tabsByGroup.set(tab.groupId, []);
@@ -809,7 +815,9 @@ export class Controller {
     if (this.api.sessions?.getTabValue) {
       for (const tab of allTabs) {
         if (tab.groupId < 0) continue;
-        const value = await this.api.sessions.getTabValue(tab.id, TAB_VALUE).catch(() => null);
+        const value = await this.api.sessions
+          .getTabValue<{ client_id: string; tab_id?: unknown }>(tab.id!, TAB_VALUE)
+          .catch(() => null);
         if (!value || !UUID.test(value.client_id || '')) continue;
         const entry = located.get(value.client_id) || { groups: new Map(), tabs: new Map() };
         entry.groups.set(tab.groupId, (entry.groups.get(tab.groupId) || 0) + 1);
@@ -871,7 +879,7 @@ export class Controller {
         for (const tab of record.tabs || []) knownTabs.set(tab.key, tab.id);
       }
       if (groupId !== null) {
-        const group = groups.find((g: Wire) => g.id === groupId);
+        const group = groups.find((g) => g.id === groupId)!;
         this.sessions.set(clientId, {
           ...base,
           state: 'attached',
@@ -909,7 +917,7 @@ export class Controller {
     for (const tab of tabs) {
       const index = unused.findIndex((old) => old.url === tab.url);
       if (index >= 0) {
-        this.knownTabs.set(tab.id, unused[index].id);
+        this.knownTabs.set(tab.id!, unused[index].id);
         unused.splice(index, 1);
       }
     }
@@ -963,9 +971,9 @@ export class Controller {
     this.changed();
   }
   async scan(session: Session) {
-    let group: any = null;
+    let group: chrome.tabGroups.TabGroup | null = null;
     try {
-      group = await this.api.tabGroups.get(session.groupId);
+      group = await this.api.tabGroups.get(session.groupId!);
     } catch {
       group = null;
     }
@@ -983,9 +991,9 @@ export class Controller {
     }
     if (group.title && group.title !== session.title) session.title = group.title;
     session.windowId = group.windowId;
-    const tabs = await this.api.tabs.query({ groupId: session.groupId });
+    const tabs = (await this.api.tabs.query({ groupId: session.groupId! })) as IdentifiedTab[];
     for (const [tabId, tab] of [...session.tabs]) {
-      if (!tabs.some((current: Wire) => current.id === tabId)) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
+      if (!tabs.some((current) => current.id === tabId)) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
     }
     let excluded = 0;
     for (const current of tabs) {
@@ -1096,7 +1104,9 @@ export class Controller {
     if (ungroup && session.groupId !== null && session.groupId !== undefined) {
       const tabs = await this.api.tabs.query({ groupId: session.groupId }).catch(() => []);
       if (tabs.length)
-        await this.api.tabs.ungroup(tabs.map((tab: Wire) => tab.id)).catch((error: unknown) => this.report(error));
+        await this.api.tabs
+          .ungroup(tabs.map((tab) => tab.id!) as [number, ...number[]])
+          .catch((error: unknown) => this.report(error));
     }
     this.records = this.records.filter((record) => record.client_id !== session.client_id);
     this.buildMenus();
@@ -1280,9 +1290,12 @@ export class Controller {
     const created: number[] = [];
     try {
       for (let index = 0; index < count; index++) {
-        created.push((await this.api.tabs.create({ windowId, url: 'about:blank', active: false })).id);
+        created.push((await this.api.tabs.create({ windowId, url: 'about:blank', active: false })).id!);
       }
-      const groupId = await this.api.tabs.group({ tabIds: created, createProperties: { windowId } });
+      const groupId = await this.api.tabs.group({
+        tabIds: created as [number, ...number[]],
+        createProperties: { windowId },
+      });
       await this.api.tabGroups.update(groupId, { title: request.title, color: request.agent.color, collapsed: false });
       const session: Session = {
         client_id: crypto.randomUUID(),
@@ -1686,16 +1699,20 @@ export class Controller {
   async createTab(session: Session, task: Task) {
     if (session.tabs.size + session.creating >= SESSION_TAB_LIMIT) fail('TAB_LIMIT_REACHED');
     session.creating++;
-    let created: any;
+    let created: IdentifiedTab;
     try {
-      created = await this.api.tabs.create({ windowId: session.windowId, url: 'about:blank', active: false });
+      created = (await this.api.tabs.create({
+        windowId: session.windowId,
+        url: 'about:blank',
+        active: false,
+      })) as IdentifiedTab;
     } catch (error) {
       session.creating--;
       throw error;
     }
     try {
       this.check(session, null, task);
-      await this.api.tabs.group({ groupId: session.groupId, tabIds: [created.id] });
+      await this.api.tabs.group({ groupId: session.groupId!, tabIds: [created.id] });
       this.check(session, null, task);
       await this.refresh();
       let tab = session.tabs.get(created.id);
@@ -1828,7 +1845,7 @@ export class Controller {
     const signature = JSON.stringify(sessions.map((session) => [session.client_id, session.title]));
     if (signature === this.menuSignature) return;
     this.menuSignature = signature;
-    const create = (properties: Wire) =>
+    const create = (properties: chrome.contextMenus.CreateProperties) =>
       new Promise<void>((resolve) => {
         menus.create(properties, () => {
           void this.api.runtime.lastError;
@@ -1839,7 +1856,7 @@ export class Controller {
       .then(async () => {
         await menus.removeAll();
         if (!sessions.length) return;
-        const contexts = this.browserName === 'firefox' ? ['tab'] : ['page'];
+        const contexts: [`${chrome.contextMenus.ContextType}`] = this.browserName === 'firefox' ? ['tab'] : ['page'];
         await create({ id: 'domagent-add', title: 'Add tab to DomAgent session', contexts });
         for (const session of sessions) {
           await create({
@@ -1853,18 +1870,18 @@ export class Controller {
       })
       .catch((error) => this.report(error));
   }
-  async menuClicked(info: Wire, tab: Wire) {
+  async menuClicked(info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab) {
     if (!tab || tab.id === undefined) return;
     const id = String(info.menuItemId);
     if (id === 'domagent-remove') {
-      if ([...this.sessions.values()].some((session) => session.tabs.has(tab.id)))
+      if ([...this.sessions.values()].some((session) => session.tabs.has(tab.id!)))
         await this.api.tabs.ungroup([tab.id]);
       return;
     }
     if (!id.startsWith('domagent-add:')) return;
     const session = this.sessions.get(id.slice('domagent-add:'.length));
     if (!session || session.state !== 'attached') fail('SESSION_DETACHED');
-    await this.api.tabs.group({ groupId: session.groupId, tabIds: [tab.id] });
+    await this.api.tabs.group({ groupId: session.groupId!, tabIds: [tab.id] });
   }
   async tick() {
     if (this.socket && this.connection && this.now() - this.lastPing >= LIVENESS_MS)
@@ -1897,7 +1914,7 @@ export class Controller {
       const desired = helping.has(session.client_id) && this.flashOn ? 'grey' : color;
       if (session.painted === desired) continue;
       session.painted = desired;
-      await this.api.tabGroups.update(session.groupId, { color: desired }).catch(() => {});
+      await this.api.tabGroups.update(session.groupId!, { color: desired }).catch(() => {});
     }
   }
   /** Window closing: say goodbye so the server detaches sessions immediately. */

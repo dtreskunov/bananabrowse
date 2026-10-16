@@ -16,7 +16,7 @@
       "DOM",
       "DOM.Iterable"
     ],
-    "types": [],
+    "types": ["chrome"],
     "noEmit": true
   },
   "include": [

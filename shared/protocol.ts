@@ -92,7 +92,17 @@ export function versionAtLeast(version: unknown, minimum: string): boolean {
   }
   return true;
 }
-export const GROUP_COLORS = Object.freeze(['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
+export const GROUP_COLORS = Object.freeze([
+  'blue',
+  'red',
+  'yellow',
+  'green',
+  'pink',
+  'purple',
+  'cyan',
+  'orange',
+] as const);
+export type GroupColor = (typeof GROUP_COLORS)[number];
 
 const shortId = (prefix: string) => Object.freeze({ type: 'string', pattern: `^${prefix}[0-9a-z]{1,12}(?![\\s\\S])` });
 export const BROWSER_ID_SCHEMA = shortId('b');
@@ -109,7 +119,7 @@ export const validShortId = (prefix: string, value: unknown): value is string =>
 export const validTabId = (value: unknown): value is string => validShortId('t', value);
 
 /** Stable per-agent native group color; grey is reserved for the attention flash. */
-export function agentColor(agentId: string): string {
+export function agentColor(agentId: string): GroupColor {
   let hash = 0;
   for (const char of String(agentId)) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
   return GROUP_COLORS[hash % GROUP_COLORS.length]!;

@@ -1,10 +1,8 @@
+import type { ThemeApi } from '../../src/browser-api.js';
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-export interface ThemeApi {
-  getCurrent(windowId: number): Promise<unknown>;
-  onUpdated: { addListener(listener: (update: unknown) => void): void };
-}
 const colors: Record<string, string[]> = {
   '--surface': ['sidebar', 'popup', 'toolbar'],
   '--surface-fg': ['sidebar_text', 'popup_text', 'toolbar_text', 'tab_text'],

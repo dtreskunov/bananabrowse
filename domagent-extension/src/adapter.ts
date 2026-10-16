@@ -12,6 +12,36 @@ import { actionSummary } from './approval-summary.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
 import { compileScriptSource, locateScriptError, prepareEvaluateExpression, stackLocation } from './script-source.js';
 import type { Wire } from '../../shared/protocol.js';
+import type { BrowserApi } from './browser-api.js';
+
+type ScriptWorld = `${chrome.userScripts.ExecutionWorld}`;
+// Const-asserted literals keep the DNR enums type-only; @types/chrome declares them as runtime enums.
+const BLOCK = 'block' as chrome.declarativeNetRequest.RuleActionType.BLOCK;
+const MAIN_FRAME = 'main_frame' as chrome.declarativeNetRequest.ResourceType.MAIN_FRAME;
+interface CdpExecutionContext {
+  id: number;
+  uniqueId?: string;
+  auxData?: { isDefault?: boolean; frameId: string };
+}
+interface CdpContextEvent {
+  context: CdpExecutionContext;
+  executionContextId: number;
+}
+interface CdpFrameTree {
+  frameTree: { frame: { id: string } };
+}
+interface CdpRemoteObject {
+  type?: string;
+  subtype?: string;
+  className?: string;
+  description?: string;
+  value?: unknown;
+  unserializableValue?: string;
+}
+interface CdpEvaluation {
+  result?: CdpRemoteObject;
+  exceptionDetails?: { exception?: CdpRemoteObject; lineNumber: number; columnNumber: number };
+}
 
 export function injectionReason(error: any): string {
   const message = typeof error?.message === 'string' ? error.message : '';
@@ -80,18 +110,18 @@ function evaluationResult(evaluated: unknown, args: Wire, onSerializationError: 
 }
 
 export class BrowserAdapter {
-  declare api: any;
+  declare api: BrowserApi;
   declare browserName: string;
   declare guards: Map<number, Wire>;
   declare attached: Set<number>;
-  declare contexts: Map<number, Map<string, any>>;
+  declare contexts: Map<number, Map<string, CdpExecutionContext>>;
   declare refBases: Map<number, number>;
   declare nextRule: number;
   declare onTabEvent: (tabId: number, event: string, url?: string) => void;
   declare onWarning: (error?: unknown) => void;
   declare selectedWindowId: number | null;
 
-  constructor(api: any, browserName: string) {
+  constructor(api: BrowserApi, browserName: string) {
     this.api = api;
     this.browserName = browserName;
     this.guards = new Map();
@@ -121,37 +151,40 @@ export class BrowserAdapter {
       const rules = await this.api.declarativeNetRequest.getSessionRules();
       if (rules.length)
         await this.api.declarativeNetRequest.updateSessionRules({
-          removeRuleIds: rules.map((rule: any) => rule.id),
+          removeRuleIds: rules.map((rule) => rule.id),
         });
       const targets = await this.api.debugger.getTargets();
-      for (const target of targets.filter((target: any) => target.attached && Number.isInteger(target.tabId))) {
+      for (const target of targets.filter((target) => target.attached && Number.isInteger(target.tabId))) {
         // Chrome only permits detaching this extension's own attachment. Never
         // resume a grant, even if the worker restarted while a tab stayed open.
         await this.api.debugger.detach({ tabId: target.tabId }).catch(() => {});
       }
-      this.api.debugger.onDetach.addListener((source: any) => {
-        this.attached.delete(source.tabId);
-        this.contexts.delete(source.tabId);
-        this.onTabEvent(source.tabId, 'detached');
+      this.api.debugger.onDetach.addListener((source) => {
+        const tabId = source.tabId!;
+        this.attached.delete(tabId);
+        this.contexts.delete(tabId);
+        this.onTabEvent(tabId, 'detached');
       });
-      this.api.debugger.onEvent.addListener((source: any, method: string, params: any) => {
-        if (!this.attached.has(source.tabId)) return;
-        if (method === 'Runtime.executionContextsCleared') this.contexts.delete(source.tabId);
-        if (method === 'Runtime.executionContextCreated' && params.context.auxData?.isDefault) {
-          const contexts = this.contexts.get(source.tabId) || new Map();
-          contexts.set(params.context.auxData.frameId, params.context);
-          this.contexts.set(source.tabId, contexts);
+      this.api.debugger.onEvent.addListener((source, method, params) => {
+        const tabId = source.tabId!;
+        if (!this.attached.has(tabId)) return;
+        const event = params as CdpContextEvent;
+        if (method === 'Runtime.executionContextsCleared') this.contexts.delete(tabId);
+        if (method === 'Runtime.executionContextCreated' && event.context.auxData?.isDefault) {
+          const contexts = this.contexts.get(tabId) || new Map();
+          contexts.set(event.context.auxData.frameId, event.context);
+          this.contexts.set(tabId, contexts);
         }
         if (method === 'Runtime.executionContextDestroyed') {
-          for (const [frame, context] of this.contexts.get(source.tabId) || []) {
-            if (context.id === params.executionContextId) this.contexts.get(source.tabId)!.delete(frame);
+          for (const [frame, context] of this.contexts.get(tabId) || []) {
+            if (context.id === event.executionContextId) this.contexts.get(tabId)!.delete(frame);
           }
         }
       });
     } else {
       if (!this.api.webRequest?.onBeforeRequest) fail('PROTECTION_UNAVAILABLE');
       this.api.webRequest.onBeforeRequest.addListener(
-        (details: any) => {
+        (details) => {
           const guard = this.guards.get(details.tabId);
           if (!guard) return {};
           let blocked = false;
@@ -168,7 +201,7 @@ export class BrowserAdapter {
         ['blocking'],
       );
     }
-    this.api.tabs.onActivated?.addListener((info: any) => {
+    this.api.tabs.onActivated?.addListener((info) => {
       void this.rememberWindow(info.windowId).catch(() => {});
     });
     this.api.windows?.onFocusChanged.addListener((windowId: number) => {
@@ -177,7 +210,7 @@ export class BrowserAdapter {
     this.api.windows?.onRemoved.addListener((windowId: number) => {
       if (this.selectedWindowId === windowId) this.selectedWindowId = null;
     });
-    this.api.tabs.onUpdated.addListener((tabId: number, change: any) => {
+    this.api.tabs.onUpdated.addListener((tabId, change) => {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
@@ -185,13 +218,13 @@ export class BrowserAdapter {
       this.refBases.delete(tabId);
       this.onTabEvent(tabId, 'closed');
     });
-    this.api.webNavigation.onBeforeNavigate.addListener((details: any) => {
+    this.api.webNavigation.onBeforeNavigate.addListener((details) => {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
       const protectedPage = guard?.origins.includes(new URL(details.url).origin);
       this.onTabEvent(details.tabId, protectedPage ? 'protected_pending' : 'navigation_pending', details.url);
     });
-    this.api.webNavigation.onErrorOccurred.addListener((details: any) => {
+    this.api.webNavigation.onErrorOccurred.addListener((details) => {
       if (details.frameId !== 0) return;
       this.onTabEvent(details.tabId, 'navigation', details.url);
       const guard = this.guards.get(details.tabId);
@@ -226,9 +259,9 @@ export class BrowserAdapter {
       }
     }
     const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
-    const window = windows.find((window: any) => window.focused) || windows.at(-1);
+    const window = windows.find((window) => window.focused) || windows.at(-1);
     if (window) return window.id;
-    return (await this.api.windows.create({ focused: false, url: 'about:blank' })).id;
+    return (await this.api.windows.create({ focused: false, url: 'about:blank' }))!.id;
   }
 
   async assertWorkspace(grant: Grant) {
@@ -246,17 +279,17 @@ export class BrowserAdapter {
     await this.permissions();
     if (this.guards.has(tabId)) fail('PROTECTION_UNAVAILABLE');
     if (this.browserName === 'chrome') {
-      const rules = origins.flatMap((origin: string) => {
+      const rules = origins.flatMap((origin: string): chrome.declarativeNetRequest.Rule[] => {
         const condition = { regexFilter: protectedRegex(origin), isUrlFilterCaseSensitive: false, tabIds: [tabId] };
         // Chrome's default resource types exclude main_frame. Keep a broad
         // rule for every subresource, and explicitly cover top-level redirects.
         return [
-          { id: this.nextRule++, priority: 1, action: { type: 'block' }, condition },
+          { id: this.nextRule++, priority: 1, action: { type: BLOCK }, condition },
           {
             id: this.nextRule++,
             priority: 1,
-            action: { type: 'block' },
-            condition: { ...condition, resourceTypes: ['main_frame'] },
+            action: { type: BLOCK },
+            condition: { ...condition, resourceTypes: [MAIN_FRAME] },
           },
         ];
       });
@@ -380,7 +413,7 @@ export class BrowserAdapter {
     if (!tab.url && !tab.pendingUrl) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
     }
-    navigationUrl(tab.pendingUrl || tab.url, origins);
+    navigationUrl((tab.pendingUrl || tab.url)!, origins);
     if (tab.status === 'loading' || tab.pendingUrl) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
     }
@@ -396,7 +429,7 @@ export class BrowserAdapter {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_state' });
     }
     const current = await this.api.tabs.get(tabId);
-    navigationUrl(current.pendingUrl || current.url, origins);
+    navigationUrl((current.pendingUrl || current.url)!, origins);
     if (page.url !== tab.url || current.url !== page.url || current.status === 'loading' || current.pendingUrl) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
     }
@@ -457,9 +490,9 @@ export class BrowserAdapter {
   }
 
   async evaluateScript(grant: Grant, document: Wire, args: Wire, checkCurrent: () => void): Promise<any> {
-    const world = args.world || 'MAIN';
+    const world: ScriptWorld = args.world || 'MAIN';
     if (this.browserName === 'chrome' && world !== 'USER_SCRIPT') {
-      const tree = await this.api.debugger.sendCommand({ tabId: grant.tabId }, 'Page.getFrameTree');
+      const tree = (await this.api.debugger.sendCommand({ tabId: grant.tabId }, 'Page.getFrameTree')) as CdpFrameTree;
       const context = this.contexts.get(grant.tabId)?.get(tree.frameTree?.frame.id);
       if (!context?.uniqueId) fail('TARGET_STALE');
       checkCurrent();
@@ -468,17 +501,17 @@ export class BrowserAdapter {
     return this.evaluateWithUserScripts(grant, document, args, world);
   }
 
-  async evaluateWithDebugger(tabId: number, context: any, args: Wire): Promise<any> {
+  async evaluateWithDebugger(tabId: number, context: CdpExecutionContext, args: Wire): Promise<any> {
     // The remote caller chooses only page source, never a CDP method/target/context.
     const prepared = prepareEvaluateExpression(args.script);
-    const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+    const response = (await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
       expression: prepared.expression,
       awaitPromise: true,
       returnByValue: true,
       userGesture: false,
       timeout: 10_000,
       uniqueContextId: context.uniqueId,
-    });
+    })) as CdpEvaluation;
     const details = response.exceptionDetails;
     if (details || response.result?.subtype === 'error') {
       const exception = details?.exception || response.result;
@@ -490,7 +523,7 @@ export class BrowserAdapter {
       const located =
         stackLocation(exception?.description, prepared.marker) ||
         (code === 'SCRIPT_SYNTAX_ERROR' && !prepared.async && Number.isSafeInteger(details?.lineNumber)
-          ? { line: details.lineNumber + 1, column: (details.columnNumber ?? -1) + 1 }
+          ? { line: details!.lineNumber + 1, column: (details!.columnNumber ?? -1) + 1 }
           : null);
       throw scriptError(code, native, 'execution', 'MAIN', args.script, located);
     }
@@ -502,7 +535,7 @@ export class BrowserAdapter {
     );
   }
 
-  async evaluateWithUserScripts(grant: Grant, document: Wire, args: Wire, world: string): Promise<any> {
+  async evaluateWithUserScripts(grant: Grant, document: Wire, args: Wire, world: ScriptWorld): Promise<any> {
     const tabId = grant.tabId;
     let compiled: ReturnType<typeof compileScriptSource>;
     try {
@@ -575,7 +608,7 @@ export class BrowserAdapter {
     if (['wait_for_page', 'request_handoff'].includes(operation)) {
       const tab = await this.api.tabs.get(grant.tabId);
       const url = grant.navigation?.url || tab.pendingUrl || tab.url;
-      navigationUrl(url, grant.protected_origins);
+      navigationUrl(url!, grant.protected_origins);
       return { summary: actionSummary(operation, args, { title: tab.title, url }) };
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
@@ -679,10 +712,10 @@ export class BrowserAdapter {
     if (operation === 'evaluate_script') return this.evaluateScript(grant, document, args, checkCurrent);
     if (operation === 'get_screenshot') {
       if (this.browserName === 'chrome') {
-        const screenshot = await this.api.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+        const screenshot = (await this.api.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
           format: 'png',
           captureBeyondViewport: false,
-        });
+        })) as { data?: unknown };
         if (typeof screenshot.data !== 'string' || !screenshot.data.length) fail('CAPABILITY_UNAVAILABLE');
         return boundedResult({ mimeType: 'image/png', data: screenshot.data });
       }

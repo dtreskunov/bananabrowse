@@ -2,13 +2,11 @@ import { signal } from '@preact/signals';
 import { Controller, defaultBrowserName } from '../../src/controller.js';
 import { BrowserAdapter } from '../../src/adapter.js';
 import { Identity } from '../../src/keys.js';
+import { browserApi } from '../../src/browser-api.js';
 import { initializeTheme } from './theme';
 import type { Snapshot } from './presentation';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-declare const browser: any;
-declare const chrome: any;
-export const api: any = typeof browser === 'undefined' ? chrome : browser;
+export const api = browserApi();
 export const browserName: 'chrome' | 'firefox' = api.runtime.getBrowserInfo ? 'firefox' : 'chrome';
 export const state = signal<Snapshot | null>(null);
 export const busy = signal<string | null>(null);
@@ -65,8 +63,8 @@ function saveBounds(): void {
 
 export async function boot(): Promise<void> {
   const own = await api.windows.getCurrent();
-  const { appWindowId } = await api.storage.session.get('appWindowId');
-  if (Number.isInteger(appWindowId) && appWindowId !== own.id) {
+  const { appWindowId } = await api.storage.session.get<{ appWindowId?: unknown }>('appWindowId');
+  if (typeof appWindowId === 'number' && Number.isInteger(appWindowId) && appWindowId !== own.id) {
     try {
       await api.windows.get(appWindowId);
       duplicate.value = true;
@@ -110,7 +108,7 @@ export async function boot(): Promise<void> {
   setInterval(() => {
     now.value = Date.now();
   }, 1000);
-  void initializeTheme(api.theme, own.id).catch(() => {});
+  void initializeTheme(api.theme, own.id!).catch(() => {});
   await controller.initialize();
   state.value = controller.snapshot() as Snapshot;
 }

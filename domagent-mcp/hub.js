@@ -40,6 +40,13 @@ function waitFor(deadline, signal, register, now) {
   });
 }
 
+function requireExtension(conn, feature) {
+  const required = EXTENSION_FEATURES[feature];
+  if (versionAtLeast(conn?.browser_info?.extension_version, required)) return;
+  throw Object.assign(new Fault('CAPABILITY_UNAVAILABLE'), { dispatch_status: 'not_dispatched',
+    required_extension_version: required });
+}
+
 export class Hub {
   constructor(store, config) {
     this.store = store; this.config = config; this.now = config.now || Date.now;
@@ -301,12 +308,13 @@ export class Hub {
     for (const call of [...this.calls.values()]) if (call.live === live) call.cancel(reason);
     for (const slot of [...live.slots]) slot.cancel(new Fault(reason));
   }
-  endSession(id, reason = 'SESSION_ENDED', notify = true) {
+  endSession(id, reason = 'SESSION_ENDED', notify = true, closeTabs = false) {
     const row = this.store.session(id), live = this.live.get(id);
     const browserId = row?.browser_id || live?.browser_id, clientId = row?.group_client_id || live?.client_id;
     if (live) { this.invalidate(live, reason); this.live.delete(id); }
     if (row) this.store.deleteSession(id);
-    if (notify && clientId) this.send(this.online(browserId), { type: 'session.end', session_id: id, client_id: clientId });
+    if (notify && clientId) this.send(this.online(browserId), { type: 'session.end', session_id: id, client_id: clientId,
+      ...(closeTabs ? { close_tabs: true } : {}) });
   }
 
   // ---------- pairing ----------
@@ -487,10 +495,15 @@ export class Hub {
       client_id: m.client_id, agent_id: request.agent_id, title: row.title, purpose: row.purpose });
     request.finish(null);
   }
-  endSessionByAgent(agentId, sessionId) {
-    this.requireSession(agentId, sessionId);
-    this.endSession(sessionId, 'SESSION_ENDED', true);
-    return { session_id: sessionId, ended: true };
+  endSessionByAgent(agentId, sessionId, closeTabs = false) {
+    const row = this.requireSession(agentId, sessionId);
+    if (closeTabs) {
+      const conn = this.online(row.browser_id);
+      requireValue(conn, 'BROWSER_OFFLINE');
+      requireExtension(conn, 'close_tabs');
+    }
+    this.endSession(sessionId, 'SESSION_ENDED', true, closeTabs);
+    return { session_id: sessionId, ended: true, tabs_closed: closeTabs };
   }
   reportProgress(agentId, sessionId, message) {
     const row = this.requireSession(agentId, sessionId);
@@ -564,13 +577,7 @@ export class Hub {
       try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
     }
     if (operation === 'evaluate_script') args = { world: 'MAIN', ...args };
-    if (args.return_as === 'artifact') {
-      const version = live.conn?.browser_info?.extension_version;
-      if (!versionAtLeast(version, EXTENSION_FEATURES.artifacts)) {
-        throw Object.assign(new Fault('CAPABILITY_UNAVAILABLE'), { dispatch_status: 'not_dispatched',
-          required_extension_version: EXTENSION_FEATURES.artifacts });
-      }
-    }
+    if (args.return_as === 'artifact') requireExtension(live.conn, 'artifacts');
     requireValue(target.queued < 32 && this.calls.size < 1024, 'QUEUE_FULL', 429);
     const human = operation === 'request_handoff';
     const deadline = this.now() + (human ? waitMs : EXECUTION_MS);
@@ -607,6 +614,25 @@ export class Hub {
       requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
       return await this.dispatch(live, null, 'create_tab', args, description, deadline, signal);
     } finally { live.creating--; if (hasSlot) this.releaseSlot(live); }
+  }
+  async closeTab(agentId, tabId, description, signal) {
+    const target = this.findTarget(agentId, tabId), live = target.live;
+    this.checkAuthority({ live, target: null, operation: 'close_tab' });
+    requireExtension(live.conn, 'close_tabs');
+    // Closing the last tab would remove the group under the command; end the session instead.
+    if (live.tabs.size === 1 && !live.creating) {
+      this.endSessionByAgent(agentId, live.session_id, true);
+      return { tab_id: target.id, closed: true, session_ended: true };
+    }
+    const deadline = this.now() + EXECUTION_MS;
+    let hasSlot = false;
+    try {
+      await this.slot(live, deadline, signal); hasSlot = true;
+      requireValue(live.tabs.get(target.id) === target, 'TAB_NOT_IN_SESSION');
+      requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
+      await this.dispatch(live, null, 'close_tab', { tab_id: target.id }, description, deadline, signal);
+      return { tab_id: target.id, closed: true, session_ended: false };
+    } finally { if (hasSlot) this.releaseSlot(live); }
   }
   dispatch(live, target, operation, args, description, deadline, signal) {
     const conn = this.checkAuthority({ live, target, operation });

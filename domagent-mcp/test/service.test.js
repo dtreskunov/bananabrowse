@@ -7,7 +7,7 @@ import { tools } from '../mcp.js';
 
 const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
 
-test('public metadata and the 27-tool catalogue', async t => {
+test('public metadata and the 28-tool catalogue', async t => {
   const fixture = await start(); t.after(() => fixture.close());
   const health = await (await fetch(`${fixture.base}/health`)).json();
   assert.equal(health.protocol_version, 6);
@@ -15,10 +15,11 @@ test('public metadata and the 27-tool catalogue', async t => {
   assert.deepEqual([metadata.service, metadata.origin], ['domagent', ORIGIN]);
   const agent = await fixture.mcp();
   const listed = await agent.client.listTools();
-  assert.equal(listed.tools.length, 27);
-  assert.deepEqual(listed.tools.slice(0, 10).map(tool => tool.name), ['pair_browser', 'list_browsers', 'unpair_browser',
-    'request_session', 'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'report_progress', 'request_handoff']);
-  assert.equal(tools.length, 27);
+  assert.equal(listed.tools.length, 28);
+  assert.deepEqual(listed.tools.slice(0, 11).map(tool => tool.name), ['pair_browser', 'list_browsers', 'unpair_browser',
+    'request_session', 'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'close_tab', 'report_progress',
+    'request_handoff']);
+  assert.equal(tools.length, 28);
 });
 
 test('agent authentication uses the path ID and a hashed bearer key', async t => {
@@ -217,6 +218,50 @@ test('create_tab publishes the new tab through inventory before returning its ID
   extension.close();
 });
 
+test('closing tabs needs extension 6.1.2; the last tab or close_tabs ends the session and closes its tabs', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const old = await paired(fixture);
+  let pending = old.agent.call('request_session', { browser_id: old.extension.browser_id, purpose: 'Old extension' });
+  await old.extension.approveNext([page(91)]);
+  let session = await pending;
+  const [oldTab] = session.tabs;
+  const tooOld = error => error.code === 'CAPABILITY_UNAVAILABLE' &&
+    error.details.required_extension_version === '6.1.2' && error.details.dispatch_status === 'not_dispatched';
+  await assert.rejects(old.agent.call('close_tab', { tab_id: oldTab.tab_id, description: DESCRIPTION }), tooOld);
+  await assert.rejects(old.agent.call('end_session', { session_id: session.session_id, close_tabs: true }), tooOld);
+  assert.equal((await old.agent.call('list_sessions')).length, 1);
+  old.extension.close();
+
+  const { extension, agent } = await paired(fixture, { extensionVersion: '6.1.2' });
+  pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Close tabs' });
+  const { group } = await extension.approveNext([page(92), page(93)]);
+  session = await pending;
+  const [first, second] = session.tabs.map(tab => tab.tab_id);
+  extension.serve(async command => {
+    assert.deepEqual([command.operation, command.tab_id, command.args], ['close_tab', null, { tab_id: first }]);
+    group.tabs = group.tabs.filter(tab => tab.id !== command.args.tab_id);
+    await extension.sync();
+    return { tab_id: command.args.tab_id };
+  });
+  assert.deepEqual(await agent.call('close_tab', { tab_id: first, description: DESCRIPTION }),
+    { tab_id: first, closed: true, session_ended: false });
+  await assert.rejects(agent.call('get_text', { tab_id: first, description: DESCRIPTION }), /TAB_NOT_IN_SESSION/);
+  assert.deepEqual(await agent.call('close_tab', { tab_id: second, description: DESCRIPTION }),
+    { tab_id: second, closed: true, session_ended: true });
+  assert.equal((await extension.next('session.end', m => m.session_id === session.session_id)).close_tabs, true);
+  extension.groups.clear();
+
+  pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'End and close' });
+  await extension.approveNext([page(94)]);
+  session = await pending;
+  assert.deepEqual(await agent.call('end_session', { session_id: session.session_id, close_tabs: true }),
+    { session_id: session.session_id, ended: true, tabs_closed: true });
+  assert.equal((await extension.next('session.end', m => m.session_id === session.session_id)).close_tabs, true);
+  const open = (await agent.call('list_sessions')).map(row => row.session_id);
+  assert.equal(open.includes(session.session_id), false);
+  extension.close();
+});
+
 test('handoff waits for the user, only blocks its tab and resolves on Done', async t => {
   const fixture = await start(); t.after(() => fixture.close());
   const { extension, agent } = await paired(fixture);
@@ -282,8 +327,10 @@ test('end_session, pairing revocation and forgetting the browser end sessions an
   let pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'One' });
   const first = await extension.approveNext([page(61)]);
   const one = await pending;
-  assert.deepEqual(await agent.call('end_session', { session_id: one.session_id }), { session_id: one.session_id, ended: true });
+  assert.deepEqual(await agent.call('end_session', { session_id: one.session_id }),
+    { session_id: one.session_id, ended: true, tabs_closed: false });
   const ended = await extension.next('session.end');
+  assert.equal(ended.close_tabs, undefined);
   assert.deepEqual([ended.session_id, ended.client_id], [one.session_id, first.group.client_id]);
   extension.groups.delete(first.group.client_id);
 

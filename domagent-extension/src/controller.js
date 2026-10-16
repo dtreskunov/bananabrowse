@@ -584,10 +584,14 @@ export class Controller {
     const cleanup = this.adapter.release(tab.tabId).catch(error => this.report(error));
     this.endingTasks.add(cleanup); void cleanup.finally(() => this.endingTasks.delete(cleanup));
   }
-  async closeLocal(session, ungroup) {
+  async closeLocal(session, ungroup, closeTabs = false) {
     if (this.sessions.get(session.client_id) === session) this.sessions.delete(session.client_id);
+    // Only tracked tabs are closed; anything else left in the group (e.g. protected sites) is just ungrouped.
+    const tracked = [...session.tabs.keys()];
     for (const tab of [...session.tabs.values()]) this.dropTab(session, tab, 'SESSION_ENDED');
     for (const task of [...session.tasks]) this.finishTask(session, null, task, { code: 'SESSION_ENDED' });
+    // One by one: a batch remove rejects entirely if any tab is already gone.
+    if (closeTabs) await Promise.all(tracked.map(id => this.api.tabs.remove(id).catch(() => {})));
     if (ungroup && session.groupId !== null && session.groupId !== undefined) {
       const tabs = await this.api.tabs.query({ groupId: session.groupId }).catch(() => []);
       if (tabs.length) await this.api.tabs.ungroup(tabs.map(tab => tab.id)).catch(error => this.report(error));
@@ -787,9 +791,10 @@ export class Controller {
   async sessionEnded(message) {
     const session = this.sessions.get(message.client_id);
     if (!session) return;
+    const closeTabs = message.close_tabs === true;
     this.addFeed({ session_id: session.session_id, agent_id: session.agent_id, kind: 'session', status: 'cancelled',
-      description: `Session “${session.title}” ended. Its tabs stay open.` });
-    await this.closeLocal(session, true);
+      description: `Session “${session.title}” ended. ${closeTabs ? 'Its tabs were closed.' : 'Its tabs stay open.'}` });
+    await this.closeLocal(session, true, closeTabs);
     await this.sync(true);
   }
   progress(message) {
@@ -819,15 +824,19 @@ export class Controller {
       validId(message.request_id);
       session = this.findSession(message.session_id);
       if (!session || session.state !== 'attached') fail('SESSION_DETACHED');
-      const create = message.operation === 'create_tab';
+      const create = message.operation === 'create_tab', close = message.operation === 'close_tab';
       const human = message.operation === 'request_handoff';
       if (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)) fail('INVALID_ARGUMENT');
       if (!human && !validDescription(message.description)) fail('INVALID_ARGUMENT');
-      tab = create ? null : [...session.tabs.values()].find(t => t.id === message.tab_id);
-      if (!create && !tab) fail('TAB_NOT_IN_SESSION');
+      // Tab lifecycle commands queue on the session, not on a tab.
+      tab = create || close ? null : [...session.tabs.values()].find(t => t.id === message.tab_id);
+      if (!create && !close && !tab) fail('TAB_NOT_IN_SESSION');
       if (create) {
         if (Object.keys(message.args).some(key => key !== 'url')) fail('INVALID_ARGUMENT');
         if (message.args.url !== undefined) navigationUrl(String(message.args.url), this.protectedOrigins);
+      } else if (close) {
+        if (Object.keys(message.args).some(key => key !== 'tab_id')) fail('INVALID_ARGUMENT');
+        if (!this.sessionTab(session, message.args.tab_id)) fail('TAB_NOT_IN_SESSION');
       } else if (!validOperationArgs(message.operation, message.args)) fail('INVALID_ARGUMENT');
       const duration = message.wait_timeout_ms;
       if (!Number.isSafeInteger(duration) || duration <= 0 || duration > HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
@@ -920,6 +929,7 @@ export class Controller {
       if (task.human) operation = Promise.resolve({ state: 'completed', user_confirmed: true });
       else if (tab) operation = this.adapter.execute(tab, task.message.operation, task.message.args,
         after => this.check(session, tab, task, after), task.preview);
+      else if (task.message.operation === 'close_tab') operation = this.closeTab(session, task);
       else operation = this.createTab(session, task);
       const timeout = new Promise((_, reject) => {
         task.abort = () => reject(Object.assign(new Error('OUTCOME_UNKNOWN'), { code: 'OUTCOME_UNKNOWN' }));
@@ -940,6 +950,15 @@ export class Controller {
       if (!task.human) session.running--;
       this.drain(session); this.changed();
     }
+  }
+  sessionTab(session, id) { return [...session.tabs.values()].find(tab => tab.id === id) || null; }
+  async closeTab(session, task) {
+    const tab = this.sessionTab(session, task.message.args.tab_id);
+    if (!tab) fail('TAB_NOT_IN_SESSION');
+    await this.api.tabs.remove(tab.tabId);
+    if (session.tabs.get(tab.tabId) === tab) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
+    await this.sync(true);
+    return { tab_id: tab.id };
   }
   async createTab(session, task) {
     if (session.tabs.size + session.creating >= SESSION_TAB_LIMIT) fail('TAB_LIMIT_REACHED');

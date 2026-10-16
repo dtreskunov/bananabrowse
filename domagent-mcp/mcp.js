@@ -44,12 +44,14 @@ export const tools = [
       timeout_seconds: humanWait }, ['browser_id', 'purpose']) },
   { name: 'list_sessions', description: 'Your sessions. state is attached (usable) or detached (browser window closed or reattach pending). Sessions survive up to 7 days while their tab group exists; one ends when the user closes or ungroups its tab group.',
     inputSchema: schema({}) },
-  { name: 'end_session', description: 'End a session. Its tabs are ungrouped and stay open.',
-    inputSchema: schema({ session_id: session }) },
+  { name: 'end_session', description: 'End a session. By default its tabs are ungrouped and stay open; close_tabs: true closes the tabs DomAgent tracks (untracked tabs, such as protected sites, are only ungrouped). Closing needs extension 6.1.2 and an online browser.',
+    inputSchema: schema({ session_id: session, close_tabs: { type: 'boolean', default: false } }, ['session_id']) },
   { name: 'list_tabs', description: 'Tabs in an attached session with tab_id, title, URL, page_state, capabilities and execution_state. Every tab in the session tab group is in scope, including tabs the user drags in and tabs a site opens from a grouped tab.',
     inputSchema: schema({ session_id: session }) },
   { name: 'create_tab', description: `Open a new background tab in the session tab group (maximum ${SESSION_TAB_LIMIT}). Never steals focus. Do not retry automatically after an uncertain result.`,
     inputSchema: schema({ session_id: session, url: urlField, description }, ['session_id', 'description']) },
+  { name: 'close_tab', description: 'Close one tab in your session, for example one you opened and no longer need. Pending commands on it fail with TAB_NOT_IN_SESSION. Closing the session\'s last tab ends the session (session_ended: true). Needs extension 6.1.2.',
+    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, description }) },
   { name: 'report_progress', description: 'Post a short progress update to the user\'s DomAgent activity feed for this session.',
     inputSchema: schema({ session_id: session, message: { type: 'string', minLength: 1, maxLength: 500 } }) },
   { name: 'request_handoff', description: 'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the DomAgent window. Only this tab waits; others can keep working.',
@@ -185,7 +187,8 @@ export async function callTool(name, args, agent, hub, signal) {
     else if (name === 'unpair_browser') result = hub.unpairBrowser(agent.id, args.browser_id);
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
-    else if (name === 'end_session') result = hub.endSessionByAgent(agent.id, args.session_id);
+    else if (name === 'end_session') result = hub.endSessionByAgent(agent.id, args.session_id, args.close_tabs === true);
+    else if (name === 'close_tab') result = await hub.closeTab(agent.id, args.tab_id, args.description, signal);
     else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id);
     else if (name === 'create_tab') {
       result = await hub.createTab(agent.id, args.session_id, args.url === undefined ? {} : { url: args.url },

@@ -91,6 +91,10 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
       await chrome.tabs.group({ groupId: id, tabIds: [tab.id] });
     }, { id: group.id, url: `${service.pageUrl}login` });
     await expect.poll(async () => (await agent.call('list_tabs', { session_id: session.session_id })).length).toBe(3);
+    expect(await agent.call('close_tab', { tab_id: created.tab_id, description }))
+      .toEqual({ tab_id: created.tab_id, closed: true, session_ended: false });
+    expect((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id))
+      .not.toContain(created.tab_id);
 
     await agent.call('report_progress', { session_id: session.session_id, message: 'Fixture checks are halfway done' });
     await expect(app.getByText('Fixture checks are halfway done')).toBeVisible();
@@ -136,7 +140,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     // The extension's own debugger sessions are gone: detaching any session tab is refused.
     await expect.poll(() => worker.evaluate(id => chrome.tabs.query({ groupId: id }).then(tabs => Promise.all(tabs.map(tab =>
       chrome.debugger.detach({ tabId: tab.id }).then(() => 'detached', () => 'not-attached')))), group.id))
-      .toEqual(['not-attached', 'not-attached', 'not-attached']);
+      .toEqual(['not-attached', 'not-attached']);
     await expect.poll(() => worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules().then(r => r.length))).toBe(0);
 
     // Reopening reattaches the live group with the same tab IDs, without another approval.
@@ -146,7 +150,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     await expect.poll(async () => (await agent.call('list_sessions'))[0]?.state).toBe('attached');
     const tabs = await agent.call('list_tabs', { session_id: session.session_id });
     expect(tabs.map(tab => tab.tab_id)).toContain(tabId);
-    expect(tabs).toHaveLength(3);
+    expect(tabs).toHaveLength(2);
     expect((await agent.raw('get_text', { tab_id: tabId, description, selector: 'h1' })).isError).not.toBe(true);
 
     // A second app page is refused while one is open.

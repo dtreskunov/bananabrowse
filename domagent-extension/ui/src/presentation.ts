@@ -132,7 +132,7 @@ export function operationLabel(operation: string | undefined): string {
     get_text: 'Reading text', get_page_snapshot: 'Reading the page', inspect_element: 'Checking an element',
     navigate: 'Opening a page', wait_for_page: 'Waiting for the page', type_text: 'Typing',
     click: 'Clicking', select_option: 'Choosing an option', set_checked: 'Toggling a checkbox',
-    evaluate_script: 'Running a script', create_tab: 'Opening a tab', request_handoff: 'Asked for your help',
+    evaluate_script: 'Running a script', create_tab: 'Opening a tab', close_tab: 'Closing a tab', request_handoff: 'Asked for your help',
     get_screenshot: 'Taking a screenshot', get_interactive_elements: 'Listing controls', press_key: 'Pressing a key',
     scroll: 'Scrolling', clear_overlays: 'Clearing overlays',
   };

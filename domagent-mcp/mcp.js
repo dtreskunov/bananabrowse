@@ -44,14 +44,16 @@ export const tools = [
       timeout_seconds: humanWait }, ['browser_id', 'purpose']) },
   { name: 'list_sessions', description: 'Your sessions. state is attached (usable) or detached (browser window closed or reattach pending). Sessions survive up to 7 days while their tab group exists; one ends when the user closes or ungroups its tab group.',
     inputSchema: schema({}) },
-  { name: 'end_session', description: 'End a session. By default its tabs are ungrouped and stay open; close_tabs: true closes the tabs DomAgent tracks (untracked tabs, such as protected sites, are only ungrouped). Closing needs extension 6.1.2 and an online browser.',
-    inputSchema: schema({ session_id: session, close_tabs: { type: 'boolean', default: false } }, ['session_id']) },
+  { name: 'end_session', description: 'End a session. By default its tabs are ungrouped and stay open. close_tabs: true instead asks the user to approve closing the session\'s tabs (system notification plus a prompt in the DomAgent window showing your description) and waits; ACTION_DECLINED means the user kept them and the session continues. Untracked tabs, such as protected sites, are only ungrouped. Closing needs extension 6.1.3 and an online browser.',
+    inputSchema: schema({ session_id: session, close_tabs: { type: 'boolean', default: false },
+      description: { ...description, description: `Required with close_tabs. ${description.description}` },
+      timeout_seconds: humanWait }, ['session_id']) },
   { name: 'list_tabs', description: 'Tabs in an attached session with tab_id, title, URL, page_state, capabilities and execution_state. Every tab in the session tab group is in scope, including tabs the user drags in and tabs a site opens from a grouped tab.',
     inputSchema: schema({ session_id: session }) },
   { name: 'create_tab', description: `Open a new background tab in the session tab group (maximum ${SESSION_TAB_LIMIT}). Never steals focus. Do not retry automatically after an uncertain result.`,
     inputSchema: schema({ session_id: session, url: urlField, description }, ['session_id', 'description']) },
-  { name: 'close_tab', description: 'Close one tab in your session, for example one you opened and no longer need. Pending commands on it fail with TAB_NOT_IN_SESSION. Closing the session\'s last tab ends the session (session_ended: true). Needs extension 6.1.2.',
-    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, description }) },
+  { name: 'close_tab', description: 'Ask the user to close one tab in your session, for example a scratch tab you opened. The user gets a system notification and approves or keeps the tab in the DomAgent window; this waits for that decision (ACTION_DECLINED: the tab stays). After closing, pending commands on it fail with TAB_NOT_IN_SESSION. Closing the session\'s last tab ends the session (session_ended: true). Needs extension 6.1.3.',
+    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, description, timeout_seconds: humanWait }, ['tab_id', 'description']) },
   { name: 'report_progress', description: 'Post a short progress update to the user\'s DomAgent activity feed for this session.',
     inputSchema: schema({ session_id: session, message: { type: 'string', minLength: 1, maxLength: 500 } }) },
   { name: 'request_handoff', description: 'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the DomAgent window. Only this tab waits; others can keep working.',
@@ -187,8 +189,16 @@ export async function callTool(name, args, agent, hub, signal) {
     else if (name === 'unpair_browser') result = hub.unpairBrowser(agent.id, args.browser_id);
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
-    else if (name === 'end_session') result = hub.endSessionByAgent(agent.id, args.session_id, args.close_tabs === true);
-    else if (name === 'close_tab') result = await hub.closeTab(agent.id, args.tab_id, args.description, signal);
+    else if (name === 'end_session') {
+      if (args.close_tabs !== true) result = hub.endSessionByAgent(agent.id, args.session_id);
+      else {
+        requireArguments(Object.hasOwn(args, 'description') ? [] : [{ field: 'description', reason: 'required' }]);
+        result = await hub.closeSessionTabs(agent.id, args.session_id, args.description,
+          (args.timeout_seconds ?? 300) * 1000, signal);
+      }
+    } else if (name === 'close_tab') {
+      result = await hub.closeTab(agent.id, args.tab_id, args.description, (args.timeout_seconds ?? 300) * 1000, signal);
+    }
     else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id);
     else if (name === 'create_tab') {
       result = await hub.createTab(agent.id, args.session_id, args.url === undefined ? {} : { url: args.url },
@@ -243,7 +253,8 @@ export async function handleMcp(req, res, body, agent, hub) {
   server.setRequestHandler(CallToolRequestSchema, (request, extra) => callTool(request.params.name,
     request.params.arguments || {}, agent, hub, AbortSignal.any([disconnected.signal, extra.signal])));
   const streaming = body?.method === 'tools/call' &&
-    ['pair_browser', 'request_session', 'request_handoff'].includes(body.params?.name);
+    (['pair_browser', 'request_session', 'request_handoff', 'close_tab'].includes(body.params?.name) ||
+      (body.params?.name === 'end_session' && body.params?.arguments?.close_tabs === true));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: !streaming });
   const keepalive = streaming ? setInterval(() => {
     if (res.headersSent && !res.writableEnded && !res.destroyed &&

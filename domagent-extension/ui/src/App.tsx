@@ -4,7 +4,7 @@ import { act, busy, controller, copy, duplicate, focusExisting, localError, now,
   suggestedName, api, browserName } from './runtime';
 import { agentRows, connectionNotice, countdown, failureMessage, feedStatus, hostOf, operationLabel, sessionSummary,
   splitUrl, tabStatus, timeOf, windowTitle } from './presentation';
-import type { AgentRow, Agent, HandoffView, RequestView, SessionView, Snapshot } from './presentation';
+import type { AgentRow, Agent, ClosureView, HandoffView, RequestView, SessionView, Snapshot } from './presentation';
 
 const COLORS: Record<string, string> = { blue: '#1a73e8', red: '#d93025', yellow: '#e8a600', green: '#188038',
   pink: '#d01884', purple: '#a142f4', cyan: '#007b83', orange: '#e8710a', grey: '#5f6368' };
@@ -99,7 +99,7 @@ function Connection({ snapshot }: { snapshot: Snapshot }) {
 function Requests({ snapshot }: { snapshot: Snapshot }) {
   const proposal = snapshot.pairing?.proposal;
   const reattach = snapshot.sessions.filter(session => session.state === 'unconfirmed');
-  if (!proposal && !snapshot.requests.length && !snapshot.handoffs.length && !reattach.length) return null;
+  if (!proposal && !snapshot.requests.length && !snapshot.handoffs.length && !snapshot.closures.length && !reattach.length) return null;
   return <section class="requests" aria-label="Waiting for you">
     {proposal && <article class="card">
       <h2><Dot color="grey"/>Pair with {proposal.agent.name}?</h2>
@@ -112,6 +112,7 @@ function Requests({ snapshot }: { snapshot: Snapshot }) {
     </article>}
     {snapshot.requests.map(request => <SessionRequest key={request.request_id} request={request}/>)}
     {snapshot.handoffs.map(handoff => <Handoff key={handoff.request_id} handoff={handoff}/>)}
+    {snapshot.closures.map(closure => <Closure key={closure.request_id} closure={closure}/>)}
     {reattach.map(session => <Reattach key={session.client_id} session={session}/>)}
   </section>;
 }
@@ -148,6 +149,29 @@ function Handoff({ handoff }: { handoff: HandoffView }) {
     <Actions>
       <button class="primary" disabled={busy.value !== null} onClick={() => void act('Finishing', () => controller.decideHandoff(handoff.request_id, 'done'))}>Done</button>
       <button disabled={busy.value !== null} onClick={() => void act('Cancelling', () => controller.decideHandoff(handoff.request_id, 'cancel'))}>Cancel</button>
+    </Actions>
+  </article>;
+}
+
+function Closure({ closure }: { closure: ClosureView }) {
+  const count = `${closure.tabs.length} tab${closure.tabs.length === 1 ? '' : 's'}`;
+  return <article class="card attention">
+    <h2><Dot color={closure.agent.color}/>{closure.agent.name} asks to close {closure.kind === 'tab' ? 'a tab' : count}</h2>
+    <blockquote>{closure.description}</blockquote>
+    <ul class="urls">
+      {closure.tabs.map(tab => <li key={tab.tabId}>
+        <button class="link tab-link" title={tab.url} onClick={() => void act('Opening tab', () => controller.focusTab(tab.tabId))}>
+          {tab.title || hostOf(tab.url)}
+        </button>
+      </li>)}
+    </ul>
+    <p class="muted small">
+      {closure.kind === 'session' ? `Session “${closure.session_title}” ends. ` : `From “${closure.session_title}”. `}
+      Closed tabs and anything unsaved in them are gone{closure.excluded ? `; ${closure.excluded} not shared tab(s) stay open` : ''}.
+    </p>
+    <Actions>
+      <button class="primary" disabled={busy.value !== null} onClick={() => void act('Closing', () => controller.decideClose(closure.request_id, true))}>Close {closure.kind === 'tab' ? 'tab' : count}</button>
+      <button disabled={busy.value !== null} onClick={() => void act('Keeping', () => controller.decideClose(closure.request_id, false))}>Keep open</button>
     </Actions>
   </article>;
 }
@@ -247,7 +271,7 @@ function Activity({ snapshot }: { snapshot: Snapshot }) {
           <small class="muted">{[entry.agent_id && names.get(entry.agent_id), operationLabel(entry.operation)].filter(Boolean).join(' · ')}</small>
           <p>{entry.description}</p>
         </div>
-        {feedStatus(entry.status) && <span class={`chip ${entry.status === 'failed' || entry.status === 'uncertain' ? 'bad' : entry.status === 'needs_help' ? 'warn' : ''}`}>{feedStatus(entry.status)}</span>}
+        {feedStatus(entry.status) && <span class={`chip ${entry.status === 'failed' || entry.status === 'uncertain' ? 'bad' : ['needs_help', 'needs_approval'].includes(entry.status) ? 'warn' : ''}`}>{feedStatus(entry.status)}</span>}
       </li>)}
     </ol>
   </section>;

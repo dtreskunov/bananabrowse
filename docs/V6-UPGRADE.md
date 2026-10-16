@@ -69,7 +69,13 @@ order.
   agent drop its own pairing; `list_browsers` adds `last_seen` and `paired_at`;
   pairing renames a browser to `name (n)` if the agent already has a browser
   with that name. Remove existing orphans with `admin.js browser-revoke`.
-- **Closing tabs (6.1.0-beta.4, extension 6.1.2).** New tool
-  `close_tab({tab_id, description})`; `end_session` accepts `close_tabs: true`.
-  Both need extension 6.1.2; older extensions get `CAPABILITY_UNAVAILABLE`
-  with `required_extension_version` before anything is sent to the browser.
+- **Closing tabs (6.1.0-beta.5, extension 6.1.3).** New tool
+  `close_tab({tab_id, description, timeout_seconds?})`; `end_session` accepts
+  `close_tabs: true` with a `description`. Closing is never automatic: the
+  extension shows a system notification and an approval card (the agent's
+  description and the tabs affected) and closes only after the user clicks
+  **Close**; **Keep open** returns `ACTION_DECLINED` and the session continues.
+  The service cannot order a close: `session.end` only ungroups. Both need
+  extension 6.1.3; older extensions (including 6.1.2, which closed without
+  asking, shipped in 6.1.0-beta.4) get `CAPABILITY_UNAVAILABLE` with
+  `required_extension_version` before anything is sent to the browser.

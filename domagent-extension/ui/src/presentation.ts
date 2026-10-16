@@ -10,6 +10,10 @@ export interface HandoffView {
   request_id: string; agent: Agent; session_title: string; tab_title: string; tabId: number;
   instructions: string;
 }
+export interface ClosureView {
+  request_id: string; agent: Agent; kind: 'tab' | 'session'; session_title: string; description: string;
+  tabs: { tabId: number; title: string; url: string }[]; excluded: number;
+}
 export interface FeedEntry {
   id: string; time: number; kind?: string; agent_id?: string; session_id?: string; title?: string | null;
   operation?: string; description: string; status: string; code?: string;
@@ -21,7 +25,7 @@ export interface Snapshot {
   last_setup: { origin: string; name: string } | null;
   agents: Agent[]; sessions: SessionView[]; requests: RequestView[];
   pairing: { code: string; state: string; expires_at: number | null; proposal: { request_id: string; agent: Agent } | null } | null;
-  handoffs: HandoffView[]; feed: FeedEntry[]; settings: { openAtStartup: boolean }; pending_count: number;
+  handoffs: HandoffView[]; closures: ClosureView[]; feed: FeedEntry[]; settings: { openAtStartup: boolean }; pending_count: number;
 }
 
 const CONNECTION_ERRORS = ['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'];
@@ -98,7 +102,7 @@ export function sessionSummary(session: SessionView): string {
 
 const STATUS_TEXT: Record<string, string> = {
   queued: 'Queued', ready: 'Starting', running: 'Running', complete: 'Done', failed: 'Failed',
-  cancelled: 'Stopped', uncertain: 'Unconfirmed', needs_help: 'Needs you', approved: 'Started', info: '',
+  cancelled: 'Stopped', uncertain: 'Unconfirmed', needs_help: 'Needs you', needs_approval: 'Needs approval', approved: 'Started', info: '',
 };
 export function feedStatus(status: string): string { return STATUS_TEXT[status] ?? status; }
 

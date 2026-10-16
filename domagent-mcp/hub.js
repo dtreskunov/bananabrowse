@@ -308,13 +308,12 @@ export class Hub {
     for (const call of [...this.calls.values()]) if (call.live === live) call.cancel(reason);
     for (const slot of [...live.slots]) slot.cancel(new Fault(reason));
   }
-  endSession(id, reason = 'SESSION_ENDED', notify = true, closeTabs = false) {
+  endSession(id, reason = 'SESSION_ENDED', notify = true) {
     const row = this.store.session(id), live = this.live.get(id);
     const browserId = row?.browser_id || live?.browser_id, clientId = row?.group_client_id || live?.client_id;
     if (live) { this.invalidate(live, reason); this.live.delete(id); }
     if (row) this.store.deleteSession(id);
-    if (notify && clientId) this.send(this.online(browserId), { type: 'session.end', session_id: id, client_id: clientId,
-      ...(closeTabs ? { close_tabs: true } : {}) });
+    if (notify && clientId) this.send(this.online(browserId), { type: 'session.end', session_id: id, client_id: clientId });
   }
 
   // ---------- pairing ----------
@@ -495,15 +494,19 @@ export class Hub {
       client_id: m.client_id, agent_id: request.agent_id, title: row.title, purpose: row.purpose });
     request.finish(null);
   }
-  endSessionByAgent(agentId, sessionId, closeTabs = false) {
-    const row = this.requireSession(agentId, sessionId);
-    if (closeTabs) {
-      const conn = this.online(row.browser_id);
-      requireValue(conn, 'BROWSER_OFFLINE');
-      requireExtension(conn, 'close_tabs');
-    }
-    this.endSession(sessionId, 'SESSION_ENDED', true, closeTabs);
-    return { session_id: sessionId, ended: true, tabs_closed: closeTabs };
+  endSessionByAgent(agentId, sessionId) {
+    this.requireSession(agentId, sessionId);
+    this.endSession(sessionId, 'SESSION_ENDED', true);
+    return { session_id: sessionId, ended: true, tabs_closed: false };
+  }
+  // Closing tabs is never automatic: the extension asks the user and only closes after an explicit approval.
+  async closeSessionTabs(agentId, sessionId, description, waitMs, signal) {
+    const { live } = this.requireAttached(agentId, sessionId);
+    requireExtension(live.conn, 'close_tabs');
+    requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
+    await this.dispatch(live, null, 'close_session', {}, description, this.now() + waitMs, signal);
+    this.endSession(sessionId, 'SESSION_ENDED', false);
+    return { session_id: sessionId, ended: true, tabs_closed: true };
   }
   reportProgress(agentId, sessionId, message) {
     const row = this.requireSession(agentId, sessionId);
@@ -615,24 +618,17 @@ export class Hub {
       return await this.dispatch(live, null, 'create_tab', args, description, deadline, signal);
     } finally { live.creating--; if (hasSlot) this.releaseSlot(live); }
   }
-  async closeTab(agentId, tabId, description, signal) {
+  async closeTab(agentId, tabId, description, waitMs, signal) {
     const target = this.findTarget(agentId, tabId), live = target.live;
     this.checkAuthority({ live, target: null, operation: 'close_tab' });
     requireExtension(live.conn, 'close_tabs');
-    // Closing the last tab would remove the group under the command; end the session instead.
-    if (live.tabs.size === 1 && !live.creating) {
-      this.endSessionByAgent(agentId, live.session_id, true);
-      return { tab_id: target.id, closed: true, session_ended: true };
-    }
-    const deadline = this.now() + EXECUTION_MS;
-    let hasSlot = false;
-    try {
-      await this.slot(live, deadline, signal); hasSlot = true;
-      requireValue(live.tabs.get(target.id) === target, 'TAB_NOT_IN_SESSION');
-      requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
-      await this.dispatch(live, null, 'close_tab', { tab_id: target.id }, description, deadline, signal);
-      return { tab_id: target.id, closed: true, session_ended: false };
-    } finally { if (hasSlot) this.releaseSlot(live); }
+    requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
+    const result = await this.dispatch(live, null, 'close_tab', { tab_id: target.id }, description,
+      this.now() + waitMs, signal);
+    // Closing the last tab removes the group, so the extension ends the session right after this receipt.
+    const ended = result?.session_ended === true;
+    if (ended) this.endSession(live.session_id, 'SESSION_ENDED', false);
+    return { tab_id: target.id, closed: true, session_ended: ended };
   }
   dispatch(live, target, operation, args, description, deadline, signal) {
     const conn = this.checkAuthority({ live, target, operation });

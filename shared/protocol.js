@@ -34,7 +34,7 @@ export const ARTIFACT_MIME_TYPES = Object.freeze([
 export const ARTIFACT_TEXT_MIME = /^(?:text\/|application\/(?:json|x-ndjson)$)/;
 export const ARTIFACT_ID_PATTERN = /^a[0-9A-Za-z_-]{22}$/;
 /** Lowest extension version that understands each optional capability. */
-export const EXTENSION_FEATURES = Object.freeze({ artifacts: '6.1.0', close_tabs: '6.1.2' });
+export const EXTENSION_FEATURES = Object.freeze({ artifacts: '6.1.0', close_tabs: '6.1.3' });
 export function versionAtLeast(version, minimum) {
   const parts = value => String(value || '0').split('.').map(part => Number.parseInt(part, 10) || 0);
   const [a, b] = [parts(version), parts(minimum)];

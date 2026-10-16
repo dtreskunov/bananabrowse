@@ -151,8 +151,11 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
 
     const tabCount = 'browser.tabs.query({}).then(tabs => tabs.length)';
     const before = await app(tabCount);
-    expect(await agent.call('end_session', { session_id: session.session_id, close_tabs: true }))
-      .toEqual({ session_id: session.session_id, ended: true, tabs_closed: true });
+    const ending = agent.call('end_session', { session_id: session.session_id, close_tabs: true, description });
+    await poll('c.closures.size').toBe(1);
+    expect(await app(tabCount)).toBe(before);
+    await app('c.decideClose([...c.closures.keys()][0], true) || true');
+    expect(await ending).toEqual({ session_id: session.session_id, ended: true, tabs_closed: true });
     await poll('c.sessions.size').toBe(0);
     await poll('browser.tabGroups.query({}).then(groups => groups.length)').toBe(0);
     await poll(tabCount).toBe(before - 1);

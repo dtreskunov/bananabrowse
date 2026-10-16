@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.1.0-beta.4 / extension 6.1.2 (wire v6, DB
+Status: implemented in service 6.1.0-beta.5 / extension 6.1.3 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -146,8 +146,9 @@ A healthy connection is silent: there is no header. The window title is
   otherwise an amber strip, "Offline: can't reach <server>. Agents can't reach
   this browser.", with Retry.
 - **Requests:** pairing proposals, session requests (agent, purpose, starting
-  URLs with origins emphasized, Approve/Decline) and handoffs
-  (instructions, Done/Cancel). Always on top of the list.
+  URLs with origins emphasized, Approve/Decline), handoffs
+  (instructions, Done/Cancel) and close requests (the agent's description and
+  the affected tabs, Close/Keep open). Always on top of the list.
 - **Agents:** one flat list, one row per paired agent with a status of
   **Needs you**, **Working**, **n sessions** or **Idle**. Attached sessions and
   their tabs nest under the agent; clicking a tab focuses it. The heading has
@@ -177,9 +178,9 @@ notifications have no buttons, so all decisions happen in the window.
 | `unpair_browser({browser_id})` | Remove the caller's own pairing (ends its sessions there); `NOT_FOUND` for unknown or foreign IDs |
 | `request_session({browser_id, purpose, urls?, title?, timeout_seconds?})` | Fails at once with `BROWSER_OFFLINE`; waits for Approve/Decline/timeout (default 300 s, max 600 s); returns the session and its tabs |
 | `list_sessions()` | Caller's sessions: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at` |
-| `end_session({session_id, close_tabs?})` | Ungroup; tabs remain. `close_tabs: true` closes tracked tabs and ungroups the rest (online browser, extension 6.1.2+) |
+| `end_session({session_id, close_tabs?, description?, timeout_seconds?})` | Ungroup; tabs remain. `close_tabs: true` (with `description`) asks the user to approve closing the session's tracked tabs and waits; on approval the extension closes them, ungroups the rest and ends the session. Declined: `ACTION_DECLINED`, session continues. Online browser, extension 6.1.3+ |
 | `list_tabs({session_id})` / `create_tab({session_id, url?, description})` | Grouped tabs only; 8-tab cap |
-| `close_tab({tab_id, description})` | Close one session tab (extension 6.1.2+); queued commands on it fail with `TAB_NOT_IN_SESSION`. The last tab ends the session with `close_tabs` and returns `session_ended: true` |
+| `close_tab({tab_id, description, timeout_seconds?})` | Ask the user to close one session tab and wait (extension 6.1.3+); declined: `ACTION_DECLINED`. After closing, queued commands on it fail with `TAB_NOT_IN_SESSION`; closing the last tab ends the session (`session_ended: true`) |
 | `report_progress({session_id, message})` | Activity feed line; ≤500 characters |
 | `request_handoff({tab_id, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
 | `list_artifacts()` | Caller's unexpired artifacts (metadata only) |
@@ -278,6 +279,10 @@ inherit group membership are no longer excluded (see section 5).
 - 8 tabs and 2 concurrent executions per session; one command per tab.
 - DOM-only input, script worlds, output caps, and redacted diagnostics.
 - No focus stealing except on the user's click.
+- Tabs are never closed automatically. Only the extension closes tabs, and only
+  after the user approves a close request in the window; the service has no
+  message that closes tabs (`session.end` only ungroups). Starting tabs of a
+  declined or abandoned request are blank and are the only exception.
 
 ## 10. Extension point: network approval (not built)
 

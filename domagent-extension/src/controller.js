@@ -12,6 +12,8 @@ const SYNC_KEEPALIVE_MS = 30 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TAB_VALUE = 'domagent';
 const READ_OPERATIONS = ['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element', 'get_screenshot'];
+// Tab closing waits for an explicit user approval in the DomAgent window; nothing closes tabs automatically.
+const CLOSE_OPERATIONS = ['close_tab', 'close_session'];
 const MUTATIONS = ['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'];
 
 export function defaultBrowserName(browserName, platform = globalThis.navigator?.userAgentData?.platform ||
@@ -42,7 +44,7 @@ export class Controller {
     this.socket = null; this.generation = 0; this.connection = null; this.lastPing = 0; this.access = null;
     this.reconnectDelay = 1000; this.reconnectTimer = null; this.closing = false;
     this.agents = new Map(); this.sessions = new Map(); this.requests = new Map(); this.pairing = null;
-    this.handoffs = new Map(); this.feed = []; this.settings = { openAtStartup: false };
+    this.handoffs = new Map(); this.closures = new Map(); this.feed = []; this.settings = { openAtStartup: false };
     this.protectedOrigins = []; this.records = []; this.knownTabs = new Map();
     this.lastInventory = ''; this.lastSyncAt = 0; this.flashOn = false; this.refreshing = null;
     this.refreshQueued = false; this.listeners = new Set(); this.endingTasks = new Set();
@@ -115,13 +117,20 @@ export class Controller {
         request_id: task.message.request_id, agent: agentsById.get(session.agent_id) || { name: session.agent_id },
         session_title: session.title, tab_title: tab.title, tabId: tab.tabId,
         instructions: task.message.args.instructions })),
+      closures: [...this.closures.values()].map(({ session, task }) => {
+        const one = task.message.operation === 'close_tab';
+        const tabs = one ? [this.sessionTab(session, task.message.args.tab_id)].filter(Boolean) : [...session.tabs.values()];
+        return { request_id: task.message.request_id, agent: agentsById.get(session.agent_id) || { name: session.agent_id },
+          kind: one ? 'tab' : 'session', session_title: session.title, description: task.message.description,
+          tabs: tabs.map(t => ({ tabId: t.tabId, title: t.title, url: t.url })), excluded: one ? 0 : session.excluded || 0 };
+      }),
       feed: this.feed.slice(-100),
       settings: { ...this.settings },
       pending_count: this.pendingCount(),
     };
   }
   pendingCount() {
-    return this.handoffs.size + this.requests.size + (this.pairing?.proposal ? 1 : 0) +
+    return this.handoffs.size + this.closures.size + this.requests.size + (this.pairing?.proposal ? 1 : 0) +
       [...this.sessions.values()].filter(session => session.state === 'unconfirmed').length;
   }
   async updateBadge() {
@@ -579,19 +588,23 @@ export class Controller {
   }
   dropTab(session, tab, code) {
     session.tabs.delete(tab.tabId);
+    for (const task of [...session.tasks]) {
+      if (task.message.operation === 'close_tab' && task.message.args.tab_id === tab.id && !task.executing) {
+        this.finishTask(session, null, task, { code: 'TAB_NOT_IN_SESSION' });
+      }
+    }
     for (const task of [...tab.queue]) this.finishTask(session, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : code });
     if (this.api.sessions?.removeTabValue) void this.api.sessions.removeTabValue(tab.tabId, TAB_VALUE).catch(() => {});
     const cleanup = this.adapter.release(tab.tabId).catch(error => this.report(error));
     this.endingTasks.add(cleanup); void cleanup.finally(() => this.endingTasks.delete(cleanup));
   }
-  async closeLocal(session, ungroup, closeTabs = false) {
+  async closeLocal(session, ungroup, closeTabIds = []) {
     if (this.sessions.get(session.client_id) === session) this.sessions.delete(session.client_id);
-    // Only tracked tabs are closed; anything else left in the group (e.g. protected sites) is just ungrouped.
-    const tracked = [...session.tabs.keys()];
     for (const tab of [...session.tabs.values()]) this.dropTab(session, tab, 'SESSION_ENDED');
     for (const task of [...session.tasks]) this.finishTask(session, null, task, { code: 'SESSION_ENDED' });
-    // One by one: a batch remove rejects entirely if any tab is already gone.
-    if (closeTabs) await Promise.all(tracked.map(id => this.api.tabs.remove(id).catch(() => {})));
+    // Only user-approved tabs; anything else left in the group is just ungrouped. One by one: a batch
+    // remove rejects entirely if any tab is already gone.
+    await Promise.all(closeTabIds.map(id => this.api.tabs.remove(id).catch(() => {})));
     if (ungroup && session.groupId !== null && session.groupId !== undefined) {
       const tabs = await this.api.tabs.query({ groupId: session.groupId }).catch(() => []);
       if (tabs.length) await this.api.tabs.ungroup(tabs.map(tab => tab.id)).catch(error => this.report(error));
@@ -791,10 +804,9 @@ export class Controller {
   async sessionEnded(message) {
     const session = this.sessions.get(message.client_id);
     if (!session) return;
-    const closeTabs = message.close_tabs === true;
     this.addFeed({ session_id: session.session_id, agent_id: session.agent_id, kind: 'session', status: 'cancelled',
-      description: `Session “${session.title}” ended. ${closeTabs ? 'Its tabs were closed.' : 'Its tabs stay open.'}` });
-    await this.closeLocal(session, true, closeTabs);
+      description: `Session “${session.title}” ended. Its tabs stay open.` });
+    await this.closeLocal(session, true);
     await this.sync(true);
   }
   progress(message) {
@@ -824,23 +836,25 @@ export class Controller {
       validId(message.request_id);
       session = this.findSession(message.session_id);
       if (!session || session.state !== 'attached') fail('SESSION_DETACHED');
-      const create = message.operation === 'create_tab', close = message.operation === 'close_tab';
+      const create = message.operation === 'create_tab', confirm = CLOSE_OPERATIONS.includes(message.operation);
       const human = message.operation === 'request_handoff';
       if (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)) fail('INVALID_ARGUMENT');
       if (!human && !validDescription(message.description)) fail('INVALID_ARGUMENT');
       // Tab lifecycle commands queue on the session, not on a tab.
-      tab = create || close ? null : [...session.tabs.values()].find(t => t.id === message.tab_id);
-      if (!create && !close && !tab) fail('TAB_NOT_IN_SESSION');
+      tab = create || confirm ? null : [...session.tabs.values()].find(t => t.id === message.tab_id);
+      if (!create && !confirm && !tab) fail('TAB_NOT_IN_SESSION');
       if (create) {
         if (Object.keys(message.args).some(key => key !== 'url')) fail('INVALID_ARGUMENT');
         if (message.args.url !== undefined) navigationUrl(String(message.args.url), this.protectedOrigins);
-      } else if (close) {
+      } else if (message.operation === 'close_tab') {
         if (Object.keys(message.args).some(key => key !== 'tab_id')) fail('INVALID_ARGUMENT');
         if (!this.sessionTab(session, message.args.tab_id)) fail('TAB_NOT_IN_SESSION');
+      } else if (message.operation === 'close_session') {
+        if (Object.keys(message.args).length) fail('INVALID_ARGUMENT');
       } else if (!validOperationArgs(message.operation, message.args)) fail('INVALID_ARGUMENT');
       const duration = message.wait_timeout_ms;
       if (!Number.isSafeInteger(duration) || duration <= 0 || duration > HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
-      task = { message, human, deadline: this.now() + duration, documentGeneration: tab?.documentGeneration,
+      task = { message, human, confirm, approved: false, deadline: this.now() + duration, documentGeneration: tab?.documentGeneration,
         executing: false, cancelled: false, connection_id: this.connection.connection_id };
       this.check(session, tab, task);
       const queue = tab?.queue || session.tasks;
@@ -848,7 +862,16 @@ export class Controller {
       queue.push(task);
       this.addFeed({ id: message.request_id, kind: 'command', session_id: session.session_id, agent_id: session.agent_id,
         operation: message.operation, description: human ? message.args.instructions : message.description,
-        title: tab?.title || session.title, status: human ? 'needs_help' : 'queued' });
+        title: tab?.title || session.title, status: human ? 'needs_help' : confirm ? 'needs_approval' : 'queued' });
+      if (confirm) {
+        this.closures.set(message.request_id, { session, task });
+        const agent = this.agents.get(session.agent_id)?.name || 'Your agent';
+        const what = message.operation === 'close_tab'
+          ? `“${this.sessionTab(session, message.args.tab_id).title || 'a tab'}”`
+          : `${session.tabs.size} tab${session.tabs.size === 1 ? '' : 's'} of “${session.title}”`;
+        this.notify(`domagent-close-${message.request_id}`, `${agent} asks to close ${what}`,
+          `${String(message.description).slice(0, 150)} — approve or keep open in the DomAgent window.`);
+      }
       if (human) {
         this.handoffs.set(message.request_id, { session, tab, task });
         this.notify(`domagent-help-${message.request_id}`, `${this.agents.get(session.agent_id)?.name || 'Your agent'} needs your help`,
@@ -858,10 +881,13 @@ export class Controller {
     } catch (error) { this.result(message, { code: errorCode(error) }); }
   }
   drain(session) {
-    if (session.state !== 'attached' || session.running >= SESSION_CONCURRENCY) return;
+    if (session.state !== 'attached') return;
+    const full = session.running >= SESSION_CONCURRENCY;
     for (const tab of [null, ...session.tabs.values()]) {
       const task = (tab?.queue || session.tasks)[0];
       if (!task || task.preparing || task.ready || task.executing || task.human) continue;
+      // Close commands start only after the user approves them, and never wait for a page slot.
+      if (task.confirm ? !task.approved : full) continue;
       task.preparing = true;
       void this.prepare(session, tab, task).catch(error => this.report(error));
     }
@@ -894,6 +920,18 @@ export class Controller {
     task.ready = true;
     this.send({ type: 'command.ready', request_id: requestId });
   }
+  decideClose(requestId, approve) {
+    const entry = this.closures.get(requestId);
+    if (!entry) fail('ACTION_EXPIRED');
+    const { session, task } = entry;
+    this.check(session, null, task);
+    if (!approve) { this.finishTask(session, null, task, { code: 'ACTION_DECLINED' }); return; }
+    this.closures.delete(requestId);
+    this.clearNotification(`domagent-close-${requestId}`);
+    task.approved = true;
+    this.addFeed({ id: requestId, status: 'approved' });
+    this.drain(session); this.changed();
+  }
   findTask(requestId) {
     for (const session of this.sessions.values()) {
       for (const tab of [null, ...session.tabs.values()]) {
@@ -913,7 +951,9 @@ export class Controller {
     if (!found) return;
     const { session, tab, task } = found;
     const queue = tab?.queue || session.tasks;
-    if (queue[0] !== task || !task.ready || task.executing || (!task.human && session.running >= SESSION_CONCURRENCY)) {
+    const unslotted = task.human || task.confirm;
+    if (queue[0] !== task || !task.ready || task.executing || (task.confirm && !task.approved) ||
+        (!unslotted && session.running >= SESSION_CONCURRENCY)) {
       this.finishTask(session, tab, task, { code: 'QUEUE_FULL' }); return;
     }
     if (!Number.isSafeInteger(message.execution_timeout_ms) || message.execution_timeout_ms <= 0 ||
@@ -921,8 +961,8 @@ export class Controller {
     task.deadline = this.now() + message.execution_timeout_ms;
     task.executing = true;
     this.addFeed({ id: task.message.request_id, status: 'running' });
-    if (!task.human) session.running++;
-    let timer;
+    if (!unslotted) session.running++;
+    let timer, after = null;
     try {
       this.check(session, tab, task);
       let operation;
@@ -930,6 +970,7 @@ export class Controller {
       else if (tab) operation = this.adapter.execute(tab, task.message.operation, task.message.args,
         after => this.check(session, tab, task, after), task.preview);
       else if (task.message.operation === 'close_tab') operation = this.closeTab(session, task);
+      else if (task.message.operation === 'close_session') operation = this.closeSession(session, task);
       else operation = this.createTab(session, task);
       const timeout = new Promise((_, reject) => {
         task.abort = () => reject(Object.assign(new Error('OUTCOME_UNKNOWN'), { code: 'OUTCOME_UNKNOWN' }));
@@ -939,6 +980,7 @@ export class Controller {
       this.check(session, tab, task, true);
       if (tab && task.message.operation === 'navigate') await this.sync();
       this.finishTask(session, tab, task, null, boundedResult(value));
+      after = task.after;
     } catch (error) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') { tab.pageState = 'unavailable'; void this.sync(); }
       this.finishTask(session, tab, task, { code: error.code === 'PAGE_UNAVAILABLE' ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error),
@@ -947,18 +989,36 @@ export class Controller {
         ...diagnosticDetails(error, { layer: 'extension', phase: 'execution' }) });
     } finally {
       clearTimeout(timer); task.abort = null;
-      if (!task.human) session.running--;
+      if (!unslotted) session.running--;
       this.drain(session); this.changed();
     }
+    // Runs after the receipt so the closing command is not itself ended with the session.
+    if (after) await after().catch(error => this.report(error));
   }
   sessionTab(session, id) { return [...session.tabs.values()].find(tab => tab.id === id) || null; }
   async closeTab(session, task) {
     const tab = this.sessionTab(session, task.message.args.tab_id);
     if (!tab) fail('TAB_NOT_IN_SESSION');
+    // The last tab takes the group with it, so the approved close ends the session.
+    if (session.tabs.size === 1 && !session.creating) {
+      task.after = () => this.endApprovedClose(session, [tab.tabId]);
+      return { tab_id: tab.id, session_ended: true };
+    }
     await this.api.tabs.remove(tab.tabId);
     if (session.tabs.get(tab.tabId) === tab) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
     await this.sync(true);
-    return { tab_id: tab.id };
+    return { tab_id: tab.id, session_ended: false };
+  }
+  closeSession(session, task) {
+    const tabIds = [...session.tabs.keys()];
+    task.after = () => this.endApprovedClose(session, tabIds);
+    return { tabs_closed: tabIds.length };
+  }
+  async endApprovedClose(session, tabIds) {
+    this.addFeed({ session_id: session.session_id, agent_id: session.agent_id, kind: 'session', status: 'cancelled',
+      description: `Session “${session.title}” ended. You approved closing its tabs.` });
+    await this.closeLocal(session, true, tabIds);
+    await this.sync(true);
   }
   async createTab(session, task) {
     if (session.tabs.size + session.creating >= SESSION_TAB_LIMIT) fail('TAB_LIMIT_REACHED');
@@ -1008,6 +1068,7 @@ export class Controller {
     if (index >= 0) queue.splice(index, 1);
     this.result(task.message, error, value);
     if (this.handoffs.delete(task.message.request_id)) this.clearNotification(`domagent-help-${task.message.request_id}`);
+    if (this.closures.delete(task.message.request_id)) this.clearNotification(`domagent-close-${task.message.request_id}`);
     if (tab && task.preview) void this.adapter.releaseAction(tab, task.preview).catch(() => {});
     this.drain(session); this.changed();
   }

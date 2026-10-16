@@ -91,8 +91,16 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
       await chrome.tabs.group({ groupId: id, tabIds: [tab.id] });
     }, { id: group.id, url: `${service.pageUrl}login` });
     await expect.poll(async () => (await agent.call('list_tabs', { session_id: session.session_id })).length).toBe(3);
-    expect(await agent.call('close_tab', { tab_id: created.tab_id, description }))
-      .toEqual({ tab_id: created.tab_id, closed: true, session_ended: false });
+    // Closing waits for the user: "Keep open" leaves the tab; "Close tab" closes it.
+    const keep = agent.call('close_tab', { tab_id: created.tab_id, description }).catch(error => error);
+    await expect(app.getByRole('heading', { name: 'Atlas asks to close a tab' })).toBeVisible();
+    await app.getByRole('button', { name: 'Keep open' }).click();
+    expect(await keep).toMatchObject({ code: 'ACTION_DECLINED' });
+    expect((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id)).toContain(created.tab_id);
+    const closing = agent.call('close_tab', { tab_id: created.tab_id, description });
+    await expect(app.getByRole('heading', { name: 'Atlas asks to close a tab' })).toBeVisible();
+    await app.getByRole('button', { name: 'Close tab' }).click();
+    expect(await closing).toEqual({ tab_id: created.tab_id, closed: true, session_ended: false });
     expect((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id))
       .not.toContain(created.tab_id);
 

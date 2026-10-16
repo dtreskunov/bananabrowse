@@ -71,3 +71,49 @@ test('a pending approval is resolved against the server after a reconnect', asyn
   assert.equal(controller.sessions.has(A), false);
   assert.deepEqual(removed, [41]);
 });
+
+test('tabs close only after the user approves in the window; the service can never close them', async () => {
+  const { controller, sent } = fixture({ tabs: [{ id: 1, groupId: 5 }, { id: 2, groupId: 5 }] });
+  const removed = [], notified = [];
+  controller.api.tabs.remove = async id => { removed.push(id); };
+  controller.api.notifications = { async create(id, options) { notified.push({ id, ...options }); }, async clear() {} };
+  const tab = (tabId, id) => ({ tabId, id, title: `Tab ${id}`, url: `https://a.example/${id}`, queue: [] });
+  const session = { client_id: A, session_id: 's1', agent_id: 'atlas', title: 'Flights', state: 'attached', groupId: 5,
+    tabs: new Map([[1, tab(1, 't1')], [2, tab(2, 't2')]]), tasks: [], running: 0, creating: 0 };
+  controller.sessions.set(A, session);
+  const description = 'Close the scratch tab I opened to compare fares; it is no longer needed.';
+  const command = (request_id, operation, args) => ({ type: 'command', request_id, session_id: 's1', tab_id: null,
+    operation, args, description, wait_timeout_ms: 60_000 });
+  const R1 = '22222222-2222-4222-8222-222222222222', R2 = '33333333-3333-4333-8333-333333333333';
+
+  controller.enqueue(command(R1, 'close_tab', { tab_id: 't1' }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(removed, []);
+  assert.equal(sent.some(m => m.type === 'command.ready'), false, 'not ready before the user decides');
+  assert.equal(notified.length, 1);
+  assert.match(notified[0].title, /asks to close “Tab t1”/);
+  const [prompt] = controller.snapshot().closures;
+  assert.deepEqual([prompt.kind, prompt.description, prompt.tabs.map(t => t.tabId)], ['tab', description, [1]]);
+  assert.equal(controller.pendingCount(), 1);
+
+  // A legacy close order from the service only ungroups.
+  await controller.sessionEnded({ client_id: 'other', close_tabs: true });
+  // "Keep open" declines; nothing closes.
+  controller.decideClose(R1, false);
+  assert.deepEqual(sent.at(-1), { type: 'result', request_id: R1, error: { code: 'ACTION_DECLINED' } });
+  assert.equal(controller.snapshot().closures.length, 0);
+
+  controller.enqueue(command(R2, 'close_tab', { tab_id: 't1' }));
+  controller.decideClose(R2, true);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(sent.at(-1), { type: 'command.ready', request_id: R2 });
+  assert.deepEqual(removed, []);
+  await controller.executeReady({ request_id: R2, execution_timeout_ms: 10_000 });
+  assert.deepEqual(removed, [1]);
+  assert.deepEqual(sent.at(-1), { type: 'result', request_id: R2, result: { tab_id: 't1', session_ended: false } });
+  assert.equal(controller.sessions.get(A), session);
+
+  await controller.sessionEnded({ client_id: A, close_tabs: true });
+  assert.deepEqual(removed, [1], 'session.end never closes tabs');
+  assert.equal(controller.sessions.has(A), false);
+});

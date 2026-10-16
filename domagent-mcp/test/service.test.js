@@ -218,47 +218,73 @@ test('create_tab publishes the new tab through inventory before returning its ID
   extension.close();
 });
 
-test('closing tabs needs extension 6.1.2; the last tab or close_tabs ends the session and closes its tabs', async t => {
+test('closing tabs waits for the user: declines keep tabs, approved closes end the session, old extensions are refused', async t => {
   const fixture = await start(); t.after(() => fixture.close());
-  const old = await paired(fixture);
+  // Extension 6.1.2 closed tabs without asking the user, so it is refused.
+  const old = await paired(fixture, { extensionVersion: '6.1.2' });
   let pending = old.agent.call('request_session', { browser_id: old.extension.browser_id, purpose: 'Old extension' });
   await old.extension.approveNext([page(91)]);
   let session = await pending;
-  const [oldTab] = session.tabs;
   const tooOld = error => error.code === 'CAPABILITY_UNAVAILABLE' &&
-    error.details.required_extension_version === '6.1.2' && error.details.dispatch_status === 'not_dispatched';
-  await assert.rejects(old.agent.call('close_tab', { tab_id: oldTab.tab_id, description: DESCRIPTION }), tooOld);
-  await assert.rejects(old.agent.call('end_session', { session_id: session.session_id, close_tabs: true }), tooOld);
+    error.details.required_extension_version === '6.1.3' && error.details.dispatch_status === 'not_dispatched';
+  await assert.rejects(old.agent.call('close_tab', { tab_id: session.tabs[0].tab_id, description: DESCRIPTION }), tooOld);
+  await assert.rejects(old.agent.call('end_session', { session_id: session.session_id, close_tabs: true,
+    description: DESCRIPTION }), tooOld);
   assert.equal((await old.agent.call('list_sessions')).length, 1);
   old.extension.close();
 
-  const { extension, agent } = await paired(fixture, { extensionVersion: '6.1.2' });
+  const { extension, agent } = await paired(fixture, { extensionVersion: '6.1.3' });
   pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Close tabs' });
   const { group } = await extension.approveNext([page(92), page(93)]);
   session = await pending;
   const [first, second] = session.tabs.map(tab => tab.tab_id);
+  const listTabs = async () => (await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id);
+
+  // The user keeps the tab: nothing is closed and the session continues.
+  let seen;
+  extension.handlers.command = command => {
+    seen = command;
+    extension.send({ type: 'result', request_id: command.request_id, error: { code: 'ACTION_DECLINED' } });
+  };
+  await assert.rejects(agent.call('close_tab', { tab_id: first, description: DESCRIPTION, timeout_seconds: 120 }),
+    error => error.code === 'ACTION_DECLINED');
+  assert.deepEqual([seen.operation, seen.tab_id, seen.args, seen.description], ['close_tab', null, { tab_id: first }, DESCRIPTION]);
+  assert.ok(seen.wait_timeout_ms > 60_000 && seen.wait_timeout_ms <= 120_000, 'waits for the person, not a page slot');
+  assert.deepEqual(await listTabs(), [first, second]);
+  await assert.rejects(agent.call('end_session', { session_id: session.session_id, close_tabs: true }),
+    error => error.code === 'INVALID_ARGUMENTS' && error.details.argument_errors.some(e => e.field === 'description'));
+  await assert.rejects(agent.call('end_session', { session_id: session.session_id, close_tabs: true, description: DESCRIPTION }),
+    error => error.code === 'ACTION_DECLINED');
+  assert.equal(seen.operation, 'close_session');
+  assert.deepEqual(await listTabs(), [first, second]);
+
+  // Approved: the extension closes the tab, then reports.
   extension.serve(async command => {
-    assert.deepEqual([command.operation, command.tab_id, command.args], ['close_tab', null, { tab_id: first }]);
     group.tabs = group.tabs.filter(tab => tab.id !== command.args.tab_id);
     await extension.sync();
-    return { tab_id: command.args.tab_id };
+    return { tab_id: command.args.tab_id, session_ended: false };
   });
   assert.deepEqual(await agent.call('close_tab', { tab_id: first, description: DESCRIPTION }),
     { tab_id: first, closed: true, session_ended: false });
   await assert.rejects(agent.call('get_text', { tab_id: first, description: DESCRIPTION }), /TAB_NOT_IN_SESSION/);
+  // The last tab: the extension ends the session itself after the receipt; the hub never sends a close order.
+  extension.serve(command => ({ tab_id: command.args.tab_id, session_ended: true }));
   assert.deepEqual(await agent.call('close_tab', { tab_id: second, description: DESCRIPTION }),
     { tab_id: second, closed: true, session_ended: true });
-  assert.equal((await extension.next('session.end', m => m.session_id === session.session_id)).close_tabs, true);
-  extension.groups.clear();
+  assert.equal((await agent.call('list_sessions')).some(row => row.session_id === session.session_id), false);
+  extension.groups.clear(); await extension.sync();
 
   pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'End and close' });
   await extension.approveNext([page(94)]);
   session = await pending;
-  assert.deepEqual(await agent.call('end_session', { session_id: session.session_id, close_tabs: true }),
+  extension.serve(command => {
+    assert.deepEqual([command.operation, command.args], ['close_session', {}]);
+    return { tabs_closed: 1 };
+  });
+  assert.deepEqual(await agent.call('end_session', { session_id: session.session_id, close_tabs: true, description: DESCRIPTION }),
     { session_id: session.session_id, ended: true, tabs_closed: true });
-  assert.equal((await extension.next('session.end', m => m.session_id === session.session_id)).close_tabs, true);
-  const open = (await agent.call('list_sessions')).map(row => row.session_id);
-  assert.equal(open.includes(session.session_id), false);
+  assert.equal((await agent.call('list_sessions')).some(row => row.session_id === session.session_id), false);
+  assert.equal(extension.messages.some(m => m.type === 'session.end'), false);
   extension.close();
 });
 

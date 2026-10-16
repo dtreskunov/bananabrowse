@@ -1,7 +1,7 @@
 const net = require('node:net');
 const { randomUUID } = require('node:crypto');
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class NativeRdp {
   constructor(socket) {
@@ -10,8 +10,8 @@ class NativeRdp {
     this.events = [];
     this.pending = null;
     this.greeting = this.waitReply('root');
-    socket.on('data', data => this.receive(data));
-    socket.on('error', error => this.pending?.reject(error));
+    socket.on('data', (data) => this.receive(data));
+    socket.on('error', (error) => this.pending?.reject(error));
     socket.on('close', () => this.pending?.reject(new Error('Native Firefox RDP closed')));
   }
 
@@ -24,8 +24,16 @@ class NativeRdp {
       }, 5000);
       this.pending = {
         actor,
-        resolve: value => { clearTimeout(timer); this.pending = null; resolve(value); },
-        reject: error => { clearTimeout(timer); this.pending = null; reject(error); },
+        resolve: (value) => {
+          clearTimeout(timer);
+          this.pending = null;
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          this.pending = null;
+          reject(error);
+        },
       };
     });
   }
@@ -75,7 +83,7 @@ class NativeRdp {
     const { resultID } = await this.request(consoleActor, 'evaluateJSAsync', {
       text: expression,
     });
-    const result = await this.event(packet => packet.type === 'evaluationResult' && packet.resultID === resultID);
+    const result = await this.event((packet) => packet.type === 'evaluationResult' && packet.resultID === resultID);
     if (result.hasException) {
       throw new Error(`Native Firefox evaluation failed: ${result.exceptionMessage}`);
     }
@@ -97,14 +105,17 @@ class NativeRdp {
     // RDP's native console does not enable top-level await. Keep async results
     // in an ephemeral, unique slot of this actual inspected document instead.
     const key = JSON.stringify(`__domagent_rdp_${randomUUID()}`);
-    await this.evaluateRaw(consoleActor, `(() => {
+    await this.evaluateRaw(
+      consoleActor,
+      `(() => {
       globalThis[${key}] = { state: "pending" };
       Promise.resolve().then(() => (${expression})).then(
         value => { globalThis[${key}] = { state: "done", json: JSON.stringify(value) }; },
         error => { globalThis[${key}] = { state: "error", error: String(error) }; }
       );
       return true;
-    })()`);
+    })()`,
+    );
     try {
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
@@ -131,7 +142,7 @@ async function openNativeRdp(port) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const socket = net.connect(port, '127.0.0.1');
-    const connected = await new Promise(resolve => {
+    const connected = await new Promise((resolve) => {
       socket.once('connect', () => resolve(true));
       socket.once('error', () => resolve(false));
     });

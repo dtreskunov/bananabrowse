@@ -5,7 +5,9 @@ import { compileScriptSource, prepareEvaluateExpression, stackLocation } from '.
 
 test('browser-compiled source preserves expression, statement and async values without page eval', async () => {
   for (const [script, expected] of [
-    ['1 + 1', 2], ['const value = 40; value + 2', 42], ['Promise.resolve(42)', 42],
+    ['1 + 1', 2],
+    ['const value = 40; value + 2', 42],
+    ['Promise.resolve(42)', 42],
     ['(() => ({ value: 42 }))()', { value: 42 }],
   ]) {
     const compiled = compileScriptSource(script);
@@ -21,8 +23,10 @@ test('browser-compiled source preserves expression, statement and async values w
 
 test('top-level await and return run in an async wrapper that preserves script lines', async () => {
   for (const [script, expected] of [
-    ['return 42', 42], ['const r = await Promise.resolve(41);\nr + 1', 42],
-    ['await null; return { a: 1 }', { a: 1 }], ['"use strict";\nconst v = await 5; v', 5],
+    ['return 42', 42],
+    ['const r = await Promise.resolve(41);\nr + 1', 42],
+    ['await null; return { a: 1 }', { a: 1 }],
+    ['"use strict";\nconst v = await 5; v', 5],
     ['await 0;\nconst x = 1;\n// trailing comment', null],
   ]) {
     const compiled = compileScriptSource(script);
@@ -43,13 +47,19 @@ test('top-level await and return run in an async wrapper that preserves script l
 });
 
 test('syntax errors carry 1-based line, column and the offending line', () => {
-  assert.throws(() => compileScriptSource('const a = 1;\nconst b = ;\n'), error =>
-    error.name === 'SyntaxError' && error.line === 2 && error.column === 11 && error.snippet === 'const b = ;');
+  assert.throws(
+    () => compileScriptSource('const a = 1;\nconst b = ;\n'),
+    (error) =>
+      error.name === 'SyntaxError' && error.line === 2 && error.column === 11 && error.snippet === 'const b = ;',
+  );
   assert.equal(prepareEvaluateExpression('const = ;').async, false);
 });
 
 test('native exception details are serialized before browser cloning, including rejected final promises', async () => {
-  for (const script of ['throw new Error("Synchronous failure")', 'Promise.reject(new Error("Asynchronous failure"))']) {
+  for (const script of [
+    'throw new Error("Synchronous failure")',
+    'Promise.reject(new Error("Asynchronous failure"))',
+  ]) {
     const compiled = compileScriptSource(script);
     const result = await runInNewContext(compiled.code);
     assert.equal(result.__domagent_script_failure, compiled.marker);

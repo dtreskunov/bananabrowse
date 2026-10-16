@@ -1,1 +1,8 @@
-.center { display: grid; place-content: center; gap: 10px; height: 100%; padding: 24px; text-align: center; }
+.center {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}

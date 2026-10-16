@@ -15,20 +15,30 @@ export function requireValue(condition: unknown, code: string, status = 400): as
 }
 
 export function requireArguments(argumentErrors: ArgumentError[]): void {
-  if (argumentErrors.length) throw Object.assign(new Fault('INVALID_ARGUMENTS'), {
-    phase: 'validation', dispatch_status: 'not_dispatched', argument_errors: argumentErrors,
-  });
+  if (argumentErrors.length)
+    throw Object.assign(new Fault('INVALID_ARGUMENTS'), {
+      phase: 'validation',
+      dispatch_status: 'not_dispatched',
+      argument_errors: argumentErrors,
+    });
 }
 
 export function validationDetails(error: unknown): Wire {
   const e = error as Wire | null | undefined;
-  if (e?.code !== 'INVALID_ARGUMENTS' || e.phase !== 'validation' ||
-      e.dispatch_status !== 'not_dispatched' || !Array.isArray(e.argument_errors)) return {};
+  if (
+    e?.code !== 'INVALID_ARGUMENTS' ||
+    e.phase !== 'validation' ||
+    e.dispatch_status !== 'not_dispatched' ||
+    !Array.isArray(e.argument_errors)
+  )
+    return {};
   return { phase: 'validation', dispatch_status: 'not_dispatched', argument_errors: e.argument_errors };
 }
 
 export function dispatchDetails(error: unknown): Wire {
-  return (error as Wire | null | undefined)?.dispatch_status === 'not_dispatched' ? { dispatch_status: 'not_dispatched' } : {};
+  return (error as Wire | null | undefined)?.dispatch_status === 'not_dispatched'
+    ? { dispatch_status: 'not_dispatched' }
+    : {};
 }
 
 export function failureCode(error: unknown): string {
@@ -36,8 +46,15 @@ export function failureCode(error: unknown): string {
 }
 
 const FIELDS = new Set([
-  'browser_id', 'agent_id', 'session_id', 'tab_id', 'request_id',
-  'operation', 'code', 'duration_ms', 'close_code',
+  'browser_id',
+  'agent_id',
+  'session_id',
+  'tab_id',
+  'request_id',
+  'operation',
+  'code',
+  'duration_ms',
+  'close_code',
 ]);
 
 export function audit(event: string, fields: Wire = {}): void {

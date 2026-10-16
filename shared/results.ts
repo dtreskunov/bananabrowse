@@ -1,5 +1,10 @@
 import {
-  DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, DEFAULT_TEXT_CHARS, DEFAULT_ELEMENTS, MAX_TEXT_CHARS, MAX_ELEMENTS,
+  DEFAULT_OUTPUT_BYTES,
+  MAX_OUTPUT_BYTES,
+  DEFAULT_TEXT_CHARS,
+  DEFAULT_ELEMENTS,
+  MAX_TEXT_CHARS,
+  MAX_ELEMENTS,
 } from './protocol.js';
 import type { Wire } from './protocol.js';
 
@@ -32,15 +37,22 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
   const hasElements = ['get_interactive_elements', 'get_page_snapshot'].includes(operation);
   const textLimit = args.max_text_chars ?? DEFAULT_TEXT_CHARS;
   const elementLimit = args.max_elements ?? DEFAULT_ELEMENTS;
-  if ((hasText && (!Number.isSafeInteger(textLimit) || textLimit < 0 || textLimit > MAX_TEXT_CHARS)) ||
-      (hasElements && (!Number.isSafeInteger(elementLimit) || elementLimit < 1 || elementLimit > MAX_ELEMENTS))) {
+  if (
+    (hasText && (!Number.isSafeInteger(textLimit) || textLimit < 0 || textLimit > MAX_TEXT_CHARS)) ||
+    (hasElements && (!Number.isSafeInteger(elementLimit) || elementLimit < 1 || elementLimit > MAX_ELEMENTS))
+  ) {
     failure('INVALID_ARGUMENT');
   }
   if (hasText || hasElements) {
     const input = value as Wire;
-    if (!input || typeof input !== 'object' || Array.isArray(input) ||
-        (hasText && typeof input.text !== 'string') ||
-        (hasElements && !Array.isArray(input.elements))) failure('INVALID_RESULT');
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      (hasText && typeof input.text !== 'string') ||
+      (hasElements && !Array.isArray(input.elements))
+    )
+      failure('INVALID_RESULT');
     const out: Wire = { ...input, truncated: input.truncated === true };
     result = out;
     if (hasText) {
@@ -60,7 +72,8 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
     }
     if (resultBytes(out) > limit && hasText && out.text.length) {
       const original = out.text;
-      let low = 0, high = original.length;
+      let low = 0,
+        high = original.length;
       out.text_truncated = out.truncated = true;
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);

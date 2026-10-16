@@ -13,8 +13,11 @@ function snippetAt(script: unknown, line: number): string | undefined {
 export function locateScriptError<T extends object>(error: T, script: unknown, line: any, column?: any): T {
   if (!Number.isSafeInteger(line) || line < 1) return error;
   const snippet = snippetAt(script, line);
-  return Object.assign(error, { line, ...(Number.isSafeInteger(column) && column > 0 ? { column } : {}),
-    ...(snippet ? { snippet } : {}) });
+  return Object.assign(error, {
+    line,
+    ...(Number.isSafeInteger(column) && column > 0 ? { column } : {}),
+    ...(snippet ? { snippet } : {}),
+  });
 }
 
 /**
@@ -52,8 +55,13 @@ function asyncBody(script: string, program: Program): string {
   const last = program.body.at(-1);
   // No newline after the opening brace keeps script line numbers unchanged.
   if (last?.type === 'ExpressionStatement') {
-    return '(async () => {' + script.slice(0, last.start) +
-      `return (${script.slice(last.expression.start, last.expression.end)});` + script.slice(last.end) + '\n})()';
+    return (
+      '(async () => {' +
+      script.slice(0, last.start) +
+      `return (${script.slice(last.expression.start, last.expression.end)});` +
+      script.slice(last.end) +
+      '\n})()'
+    );
   }
   return `(async () => {${script}\n})()`;
 }
@@ -62,15 +70,24 @@ function asyncBody(script: string, program: Program): string {
 export function prepareEvaluateExpression(script: string): { expression: string; marker: string; async: boolean } {
   const marker = crypto.randomUUID();
   let parsed: { program: Program; async: boolean } | null = null;
-  try { parsed = parseScript(script); } catch { parsed = null; }
+  try {
+    parsed = parseScript(script);
+  } catch {
+    parsed = null;
+  }
   // When acorn rejects the source, let V8 report its own syntax error.
   const body = parsed?.async ? asyncBody(script, parsed.program) : script;
   return { expression: `${body}\n//# sourceURL=domagent-script-${marker}.js`, marker, async: !!parsed?.async };
 }
 
-export function compileScriptSource(script: string): { code: string; marker: string; async: boolean; wrapper_line_offset: number } {
+export function compileScriptSource(script: string): {
+  code: string;
+  marker: string;
+  async: boolean;
+  wrapper_line_offset: number;
+} {
   const { program, async } = parseScript(script);
-  const strict = program.body.some(statement => (statement as { directive?: string }).directive === 'use strict');
+  const strict = program.body.some((statement) => (statement as { directive?: string }).directive === 'use strict');
   const marker = crypto.randomUUID();
   const prefix = strict ? '"use strict";\n' : '';
   const capture = `(function capture(error, depth) {
@@ -108,7 +125,9 @@ export function compileScriptSource(script: string): { code: string; marker: str
       }, error => ${capture}(error, 0));`;
   if (async) body = settle(asyncBody(script, program));
   else if (last?.type === 'ExpressionStatement') {
-    body = script.slice(0, last.start) + settle(script.slice(last.expression.start, last.expression.end)) +
+    body =
+      script.slice(0, last.start) +
+      settle(script.slice(last.expression.start, last.expression.end)) +
       script.slice(last.end);
   }
   const code = `${prefix}try {\n${body}\n} catch (__domagent_exception) {

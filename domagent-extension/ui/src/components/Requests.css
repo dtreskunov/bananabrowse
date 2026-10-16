@@ -1,4 +1,22 @@
-.requests { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
-.urls { list-style: none; padding: 0; display: grid; gap: 2px; overflow-wrap: anywhere; grid-template-columns: minmax(0, 1fr); }
-.instructions { white-space: pre-wrap; overflow-wrap: anywhere; }
-.choice { display: flex; align-items: center; gap: 8px; }
+.requests {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.urls {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+  grid-template-columns: minmax(0, 1fr);
+}
+.instructions {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

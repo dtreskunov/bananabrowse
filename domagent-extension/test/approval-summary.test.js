@@ -8,11 +8,17 @@ test('operation-derived summaries remain informative and redact values regardles
   const target = { role: 'textbox', name: 'Nickname', state: 'ready' };
   const summary = actionSummary('type_text', args, page, target);
   assert(summary.includes('Operation: type_text'));
-  assert(summary.some(line => line.includes('#account')));
-  assert(summary.some(line => line.includes('Nickname')));
+  assert(summary.some((line) => line.includes('#account')));
+  assert(summary.some((line) => line.includes('Nickname')));
   assert.equal(summary.join(' ').includes('private-entry'), false);
-  assert(summary.some(line => line.includes('value hidden')));
-  assert(actionSummary('evaluate_script', { script: 'private script' }).some(line => line.includes('May read or change')));
+  assert(summary.some((line) => line.includes('value hidden')));
+  assert(
+    actionSummary('evaluate_script', { script: 'private script' }).some((line) => line.includes('May read or change')),
+  );
   assert(!actionSummary('evaluate_script', { script: 'private script' }).join(' ').includes('private script'));
-  assert(actionSummary('navigate', { url: 'https://site.example/checkout' }).includes('Destination: https://site.example/checkout'));
+  assert(
+    actionSummary('navigate', { url: 'https://site.example/checkout' }).includes(
+      'Destination: https://site.example/checkout',
+    ),
+  );
 });

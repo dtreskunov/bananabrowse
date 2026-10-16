@@ -15,7 +15,10 @@ function check(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (['node_modules', 'dist', 'test-results', 'playwright-report'].includes(entry.name)) continue;
     const path = resolve(directory, entry.name);
-    if (entry.isDirectory()) { check(path); continue; }
+    if (entry.isDirectory()) {
+      check(path);
+      continue;
+    }
     if (entry.isFile() && /\.(js|mjs|cjs)$/.test(entry.name)) run(['--check', path]);
   }
 }

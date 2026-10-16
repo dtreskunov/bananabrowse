@@ -1,41 +1,107 @@
-export interface Agent { id: string; name: string; url: string | null; color?: string }
-export interface TabView { tabId: number; id: string | null; title: string; url: string; page_state: string; working: boolean; help: boolean }
-export interface Candidate { groupId: number; title: string; tab_count: number; matching: number }
-export interface SessionView {
-  client_id: string; session_id: string | null; agent: Agent; title: string; purpose: string;
-  state: 'attached' | 'unconfirmed' | 'pending'; candidates: Candidate[]; tabs: TabView[]; excluded: number;
+export interface Agent {
+  id: string;
+  name: string;
+  url: string | null;
+  color?: string;
 }
-export interface RequestView { request_id: string; agent: Agent; purpose: string; urls: string[]; title: string; expires_at: number }
+export interface TabView {
+  tabId: number;
+  id: string | null;
+  title: string;
+  url: string;
+  page_state: string;
+  working: boolean;
+  help: boolean;
+}
+export interface Candidate {
+  groupId: number;
+  title: string;
+  tab_count: number;
+  matching: number;
+}
+export interface SessionView {
+  client_id: string;
+  session_id: string | null;
+  agent: Agent;
+  title: string;
+  purpose: string;
+  state: 'attached' | 'unconfirmed' | 'pending';
+  candidates: Candidate[];
+  tabs: TabView[];
+  excluded: number;
+}
+export interface RequestView {
+  request_id: string;
+  agent: Agent;
+  purpose: string;
+  urls: string[];
+  title: string;
+  expires_at: number;
+}
 export interface HandoffView {
-  request_id: string; agent: Agent; session_title: string; tab_title: string; tabId: number;
+  request_id: string;
+  agent: Agent;
+  session_title: string;
+  tab_title: string;
+  tabId: number;
   instructions: string;
 }
 export interface ClosureView {
-  request_id: string; agent: Agent; kind: 'tab' | 'session'; session_title: string; description: string;
-  tabs: { tabId: number; title: string; url: string }[]; excluded: number;
+  request_id: string;
+  agent: Agent;
+  kind: 'tab' | 'session';
+  session_title: string;
+  description: string;
+  tabs: { tabId: number; title: string; url: string }[];
+  excluded: number;
 }
 export interface FeedEntry {
-  id: string; time: number; kind?: string; agent_id?: string; session_id?: string; title?: string | null;
-  operation?: string; description: string; status: string; code?: string;
+  id: string;
+  time: number;
+  kind?: string;
+  agent_id?: string;
+  session_id?: string;
+  title?: string | null;
+  operation?: string;
+  description: string;
+  status: string;
+  code?: string;
 }
 export interface Snapshot {
   phase: 'loading' | 'setup' | 'connecting' | 'online' | 'offline';
-  error: string | null; browser: 'chrome' | 'firefox';
+  error: string | null;
+  browser: 'chrome' | 'firefox';
   identity: { origin: string; name: string; browser_id: string } | null;
   last_setup: { origin: string; name: string } | null;
-  agents: Agent[]; sessions: SessionView[]; requests: RequestView[];
-  pairing: { code: string; state: string; expires_at: number | null; proposal: { request_id: string; agent: Agent } | null } | null;
-  handoffs: HandoffView[]; closures: ClosureView[]; feed: FeedEntry[]; settings: { openAtStartup: boolean }; pending_count: number;
+  agents: Agent[];
+  sessions: SessionView[];
+  requests: RequestView[];
+  pairing: {
+    code: string;
+    state: string;
+    expires_at: number | null;
+    proposal: { request_id: string; agent: Agent } | null;
+  } | null;
+  handoffs: HandoffView[];
+  closures: ClosureView[];
+  feed: FeedEntry[];
+  settings: { openAtStartup: boolean };
+  pending_count: number;
 }
 
 const CONNECTION_ERRORS = ['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'];
 /** Connection is silent when healthy; only abnormal states are surfaced. */
-export function connectionNotice(snapshot: Pick<Snapshot, 'phase' | 'error'>):
-  { kind: 'connecting' } | { kind: 'offline'; code: string | null } | null {
+export function connectionNotice(
+  snapshot: Pick<Snapshot, 'phase' | 'error'>,
+): { kind: 'connecting' } | { kind: 'offline'; code: string | null } | null {
   if (snapshot.phase === 'online') return null;
-  if ((snapshot.phase === 'connecting' || snapshot.phase === 'loading') && !snapshot.error) return { kind: 'connecting' };
+  if ((snapshot.phase === 'connecting' || snapshot.phase === 'loading') && !snapshot.error)
+    return { kind: 'connecting' };
   // Only connection-specific causes replace the default text; unrelated errors never masquerade as connectivity.
-  return { kind: 'offline', code: snapshot.error && CONNECTION_ERRORS.includes(snapshot.error) ? snapshot.error : null };
+  return {
+    kind: 'offline',
+    code: snapshot.error && CONNECTION_ERRORS.includes(snapshot.error) ? snapshot.error : null,
+  };
 }
 
 export function windowTitle(snapshot: Pick<Snapshot, 'phase' | 'error' | 'pending_count'>): string {
@@ -43,21 +109,31 @@ export function windowTitle(snapshot: Pick<Snapshot, 'phase' | 'error' | 'pendin
   return snapshot.pending_count ? `DomAgent (${snapshot.pending_count})` : 'DomAgent';
 }
 
-export interface AgentRow { agent: Agent; sessions: SessionView[]; status: string; tone: 'help' | 'busy' | 'quiet' }
+export interface AgentRow {
+  agent: Agent;
+  sessions: SessionView[];
+  status: string;
+  tone: 'help' | 'busy' | 'quiet';
+}
 /** One row per agent (paired agents first, in order), with its attached sessions and a one-word status. */
 export function agentRows(agents: Agent[], sessions: SessionView[]): AgentRow[] {
   const rows = new Map<string, AgentRow>();
   for (const agent of agents) rows.set(agent.id, { agent, sessions: [], status: '', tone: 'quiet' });
   for (const session of sessions) {
     if (session.state !== 'attached') continue;
-    const row = rows.get(session.agent.id) || { agent: session.agent, sessions: [], status: '', tone: 'quiet' as const };
+    const row = rows.get(session.agent.id) || {
+      agent: session.agent,
+      sessions: [],
+      status: '',
+      tone: 'quiet' as const,
+    };
     row.sessions.push(session);
     rows.set(session.agent.id, row);
   }
   for (const row of rows.values()) {
-    const tabs = row.sessions.flatMap(session => session.tabs);
-    if (tabs.some(tab => tab.help)) Object.assign(row, { status: 'Needs you', tone: 'help' });
-    else if (tabs.some(tab => tab.working)) Object.assign(row, { status: 'Working', tone: 'busy' });
+    const tabs = row.sessions.flatMap((session) => session.tabs);
+    if (tabs.some((tab) => tab.help)) Object.assign(row, { status: 'Needs you', tone: 'help' });
+    else if (tabs.some((tab) => tab.working)) Object.assign(row, { status: 'Working', tone: 'busy' });
     else if (row.sessions.length) row.status = `${row.sessions.length} session${row.sessions.length === 1 ? '' : 's'}`;
     else row.status = 'Idle';
   }
@@ -68,12 +144,18 @@ export function splitUrl(value: string): { origin: string; rest: string } {
   try {
     const url = new URL(value);
     return { origin: url.host, rest: `${url.pathname === '/' ? '' : url.pathname}${url.search}` };
-  } catch { return { origin: value, rest: '' }; }
+  } catch {
+    return { origin: value, rest: '' };
+  }
 }
 
 export function hostOf(value: string | null | undefined): string {
   if (!value) return '';
-  try { return new URL(value).host; } catch { return value; }
+  try {
+    return new URL(value).host;
+  } catch {
+    return value;
+  }
 }
 
 export function countdown(expiresAt: number | null, now: number): string {
@@ -101,10 +183,21 @@ export function sessionSummary(session: SessionView): string {
 }
 
 const STATUS_TEXT: Record<string, string> = {
-  queued: 'Queued', ready: 'Starting', running: 'Running', complete: 'Done', failed: 'Failed',
-  cancelled: 'Stopped', uncertain: 'Unconfirmed', needs_help: 'Needs you', needs_approval: 'Needs approval', approved: 'Started', info: '',
+  queued: 'Queued',
+  ready: 'Starting',
+  running: 'Running',
+  complete: 'Done',
+  failed: 'Failed',
+  cancelled: 'Stopped',
+  uncertain: 'Unconfirmed',
+  needs_help: 'Needs you',
+  needs_approval: 'Needs approval',
+  approved: 'Started',
+  info: '',
 };
-export function feedStatus(status: string): string { return STATUS_TEXT[status] ?? status; }
+export function feedStatus(status: string): string {
+  return STATUS_TEXT[status] ?? status;
+}
 
 export function failureMessage(code: string): string {
   const messages: Record<string, string> = {
@@ -126,19 +219,32 @@ export function failureMessage(code: string): string {
     INVALID_ARGUMENT: 'Check the value you entered.',
     RATE_LIMITED: 'Too many attempts. Wait a minute and try again.',
     KEY_ALREADY_REGISTERED: 'This browser is already registered. Reload the window.',
-    SCRIPT_EXECUTION_UNAVAILABLE: 'Page scripts are unavailable. Enable them in Settings (Firefox) or allow user scripts (Chrome).',
+    SCRIPT_EXECUTION_UNAVAILABLE:
+      'Page scripts are unavailable. Enable them in Settings (Firefox) or allow user scripts (Chrome).',
   };
   return messages[code] || `Something went wrong (${code}).`;
 }
 
 export function operationLabel(operation: string | undefined): string {
   const names: Record<string, string> = {
-    get_text: 'Reading text', get_page_snapshot: 'Reading the page', inspect_element: 'Checking an element',
-    navigate: 'Opening a page', wait_for_page: 'Waiting for the page', type_text: 'Typing',
-    click: 'Clicking', select_option: 'Choosing an option', set_checked: 'Toggling a checkbox',
-    evaluate_script: 'Running a script', create_tab: 'Opening a tab', close_tab: 'Closing a tab', request_handoff: 'Asked for your help',
-    get_screenshot: 'Taking a screenshot', get_interactive_elements: 'Listing controls', press_key: 'Pressing a key',
-    scroll: 'Scrolling', clear_overlays: 'Clearing overlays',
+    get_text: 'Reading text',
+    get_page_snapshot: 'Reading the page',
+    inspect_element: 'Checking an element',
+    navigate: 'Opening a page',
+    wait_for_page: 'Waiting for the page',
+    type_text: 'Typing',
+    click: 'Clicking',
+    select_option: 'Choosing an option',
+    set_checked: 'Toggling a checkbox',
+    evaluate_script: 'Running a script',
+    create_tab: 'Opening a tab',
+    close_tab: 'Closing a tab',
+    request_handoff: 'Asked for your help',
+    get_screenshot: 'Taking a screenshot',
+    get_interactive_elements: 'Listing controls',
+    press_key: 'Pressing a key',
+    scroll: 'Scrolling',
+    clear_overlays: 'Clearing overlays',
   };
   return operation ? names[operation] || operation.replaceAll('_', ' ') : '';
 }

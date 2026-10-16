@@ -3,11 +3,35 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
-  VERSION, OPERATIONS, HEARTBEAT_MS, LIVENESS_MS, EXECUTION_MS, PAIRING_CODE_MS,
-  SESSION_TAB_LIMIT, SESSION_CONCURRENCY, ACCESS_TOKEN_MS, connectPayload, verify, navigationUrl,
-  OPERATION_SCHEMAS, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA, TAB_ID_SCHEMA, schemaArgumentErrors,
-  inspectionErrorDetails, waitErrorDetails, validBrowserInfo, normalizePairingCode, validName,
-  validShortId, agentColor, errorDetails, EXTENSION_FEATURES, versionAtLeast, MAX_MESSAGE_BYTES, type Wire,
+  VERSION,
+  OPERATIONS,
+  HEARTBEAT_MS,
+  LIVENESS_MS,
+  EXECUTION_MS,
+  PAIRING_CODE_MS,
+  SESSION_TAB_LIMIT,
+  SESSION_CONCURRENCY,
+  ACCESS_TOKEN_MS,
+  connectPayload,
+  verify,
+  navigationUrl,
+  OPERATION_SCHEMAS,
+  HANDOFF_SCHEMA,
+  DESCRIPTION_SCHEMA,
+  TAB_ID_SCHEMA,
+  schemaArgumentErrors,
+  inspectionErrorDetails,
+  waitErrorDetails,
+  validBrowserInfo,
+  normalizePairingCode,
+  validName,
+  validShortId,
+  agentColor,
+  errorDetails,
+  EXTENSION_FEATURES,
+  versionAtLeast,
+  MAX_MESSAGE_BYTES,
+  type Wire,
 } from '../shared/protocol.js';
 import { ArtifactStore } from './artifacts.js';
 import { token, hash, cleanText, type Store, type SessionRow } from './store.js';
@@ -18,53 +42,162 @@ import { Fault, requireValue, requireArguments, dispatchDetails, failureCode, au
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PAGE_STATES = new Set(['ready', 'loading', 'navigation_only', 'unavailable']);
-const RESULT_ERRORS = new Set(['HANDOFF_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'TARGET_STALE', 'NOT_AUTHORIZED',
-  'INVALID_ARGUMENTS', 'OPERATION_FAILED', 'OUTCOME_UNKNOWN', 'COMMAND_EXPIRED', 'COMMAND_CANCELLED', 'ACTION_DECLINED',
-  'INVALID_MESSAGE', 'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE', 'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE',
-  'ELEMENT_DISABLED', 'ELEMENT_READONLY', 'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE',
-  'OPTION_NOT_FOUND', 'WAIT_TIMEOUT', 'RESULT_TOO_LARGE', 'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR',
-  'SCRIPT_RUNTIME_ERROR', 'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE', 'SESSION_ENDED',
-  'SESSION_DETACHED', 'TAB_NOT_IN_SESSION', 'DOCUMENT_NOT_CONTROLLABLE', 'TAB_LIMIT_REACHED',
-  'NOTIFICATION_UNAVAILABLE', 'INPUT_REJECTED', 'INPUT_NOT_APPLIED', 'PERMISSION_REQUIRED']);
+const RESULT_ERRORS = new Set([
+  'HANDOFF_REQUIRED',
+  'CAPABILITY_UNAVAILABLE',
+  'TARGET_STALE',
+  'NOT_AUTHORIZED',
+  'INVALID_ARGUMENTS',
+  'OPERATION_FAILED',
+  'OUTCOME_UNKNOWN',
+  'COMMAND_EXPIRED',
+  'COMMAND_CANCELLED',
+  'ACTION_DECLINED',
+  'INVALID_MESSAGE',
+  'ELEMENT_NOT_FOUND',
+  'INVALID_SELECTOR',
+  'PAGE_UNAVAILABLE',
+  'ELEMENT_AMBIGUOUS',
+  'ELEMENT_STALE',
+  'ELEMENT_DISABLED',
+  'ELEMENT_READONLY',
+  'ELEMENT_NOT_VISIBLE',
+  'ELEMENT_OBSCURED',
+  'ELEMENT_NOT_EDITABLE',
+  'OPTION_NOT_FOUND',
+  'WAIT_TIMEOUT',
+  'RESULT_TOO_LARGE',
+  'SCRIPT_POLICY_BLOCKED',
+  'SCRIPT_SYNTAX_ERROR',
+  'SCRIPT_RUNTIME_ERROR',
+  'SCRIPT_SERIALIZATION_ERROR',
+  'SCRIPT_EXECUTION_UNAVAILABLE',
+  'SESSION_ENDED',
+  'SESSION_DETACHED',
+  'TAB_NOT_IN_SESSION',
+  'DOCUMENT_NOT_CONTROLLABLE',
+  'TAB_LIMIT_REACHED',
+  'NOTIFICATION_UNAVAILABLE',
+  'INPUT_REJECTED',
+  'INPUT_NOT_APPLIED',
+  'PERMISSION_REQUIRED',
+]);
 const MAX_PENDING_PER_BROWSER = 8;
 
 type Finish<T = unknown> = (error?: unknown, value?: T) => void;
-interface Challenge { origin: string; nonce: string; browser_id: string; connection_id: string }
+interface Challenge {
+  origin: string;
+  nonce: string;
+  browser_id: string;
+  connection_id: string;
+}
 export interface Conn {
-  ws: WebSocket; origin: string | undefined; connection_id: string; lastSeen: number; lastPing: number;
-  authenticated: boolean; browser_id: string | null; challenge: Challenge | null; processing: Promise<void>;
-  queued: number; graceful: boolean; agentsSignature: string; lastType?: string | null; browser_info?: Wire | null;
+  ws: WebSocket;
+  origin: string | undefined;
+  connection_id: string;
+  lastSeen: number;
+  lastPing: number;
+  authenticated: boolean;
+  browser_id: string | null;
+  challenge: Challenge | null;
+  processing: Promise<void>;
+  queued: number;
+  graceful: boolean;
+  agentsSignature: string;
+  lastType?: string | null;
+  browser_info?: Wire | null;
   closed?: boolean;
 }
-interface Slot { cancel: Finish; release: () => void }
+interface Slot {
+  cancel: Finish;
+  release: () => void;
+}
 export interface Live {
-  session_id: string; agent_id: string; browser_id: string; conn: Conn; state: string; client_id?: string;
-  tabs: Map<string, Target>; running: number; creating: number; slots: Set<Slot>; firstSync: boolean;
+  session_id: string;
+  agent_id: string;
+  browser_id: string;
+  conn: Conn;
+  state: string;
+  client_id?: string;
+  tabs: Map<string, Target>;
+  running: number;
+  creating: number;
+  slots: Set<Slot>;
+  firstSync: boolean;
 }
 export interface Target {
-  id: string; session_id: string; live: Live; tail: Promise<unknown>; queued: number; execution_state: string;
-  queuedControllers: Set<AbortController>; key: number; title: string; url: string; page_state: string;
+  id: string;
+  session_id: string;
+  live: Live;
+  tail: Promise<unknown>;
+  queued: number;
+  execution_state: string;
+  queuedControllers: Set<AbortController>;
+  key: number;
+  title: string;
+  url: string;
+  page_state: string;
   capabilities: string[];
 }
-interface Authority { live: Live; target: Target | null; operation: string; connection_id?: string }
+interface Authority {
+  live: Live;
+  target: Target | null;
+  operation: string;
+  connection_id?: string;
+}
 interface Call extends Authority {
-  connection_id: string; conn: Conn; phase: string; deadline: number; before: Set<string>;
-  resolve: (value: unknown) => void; reject: (error: unknown) => void; cancel: (code: string) => void; execute: () => void;
+  connection_id: string;
+  conn: Conn;
+  phase: string;
+  deadline: number;
+  before: Set<string>;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+  cancel: (code: string) => void;
+  execute: () => void;
 }
-interface Proposal { request_id: string; agent_id: string; waiters: Set<Finish> }
-interface CodeEntry { browser_id: string; connection_id: string; expires: number; proposal: Proposal | null }
+interface Proposal {
+  request_id: string;
+  agent_id: string;
+  waiters: Set<Finish>;
+}
+interface CodeEntry {
+  browser_id: string;
+  connection_id: string;
+  expires: number;
+  proposal: Proposal | null;
+}
 interface SessionRequest {
-  id: string; agent_id: string; browser_id: string; conn: Conn; purpose: string; title: string;
-  session_id: string | null; check: (() => void) | null; finish?: Finish | null;
+  id: string;
+  agent_id: string;
+  browser_id: string;
+  conn: Conn;
+  purpose: string;
+  title: string;
+  session_id: string | null;
+  check: (() => void) | null;
+  finish?: Finish | null;
 }
-export interface AgentInfo { id: string; name: string; url: string | null; color: string }
+export interface AgentInfo {
+  id: string;
+  name: string;
+  url: string | null;
+  color: string;
+}
 
-function waitFor<T = unknown>(deadline: number, signal: AbortSignal | null | undefined,
-  register: (finish: Finish<T>) => (() => unknown) | void, now: () => number): Promise<T> {
+function waitFor<T = unknown>(
+  deadline: number,
+  signal: AbortSignal | null | undefined,
+  register: (finish: Finish<T>) => (() => unknown) | void,
+  now: () => number,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let done = false;
     const finish: Finish<T> = (error, value) => {
-      if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       cleanup?.();
       if (error) reject(error);
       else resolve(value as T);
@@ -80,8 +213,10 @@ function waitFor<T = unknown>(deadline: number, signal: AbortSignal | null | und
 function requireExtension(conn: Conn | null | undefined, feature: keyof typeof EXTENSION_FEATURES): void {
   const required = EXTENSION_FEATURES[feature];
   if (versionAtLeast(conn?.browser_info?.extension_version, required)) return;
-  throw Object.assign(new Fault('CAPABILITY_UNAVAILABLE'), { dispatch_status: 'not_dispatched',
-    required_extension_version: required });
+  throw Object.assign(new Fault('CAPABILITY_UNAVAILABLE'), {
+    dispatch_status: 'not_dispatched',
+    required_extension_version: required,
+  });
 }
 
 export class Hub {
@@ -104,14 +239,21 @@ export class Hub {
   wss: WebSocketServer;
   timer: NodeJS.Timeout;
   constructor(store: Store, config: Config) {
-    this.store = store; this.config = config; this.now = config.now || Date.now;
+    this.store = store;
+    this.config = config;
+    this.now = config.now || Date.now;
     this.agents = config.agents || new Map();
     store.pruneAgents([...this.agents.keys()]);
     this.artifacts = new ArtifactStore({ directory: config.artifacts ?? null, now: this.now });
     this.artifacts.prune([...this.agents.keys()]);
-    this.connections = new Map(); this.sockets = new Set();
-    this.live = new Map(); this.calls = new Map(); this.tombstones = new Map();
-    this.tokens = new Map(); this.codes = new Map(); this.sessionRequests = new Map();
+    this.connections = new Map();
+    this.sockets = new Set();
+    this.live = new Map();
+    this.calls = new Map();
+    this.tombstones = new Map();
+    this.tokens = new Map();
+    this.codes = new Map();
+    this.sessionRequests = new Map();
     this.codeKey = config.pairingSecret || randomBytes(32).toString('base64url');
     this.rates = new RateLimiter(this.now);
     this.lastStoreSweep = 0;
@@ -128,63 +270,115 @@ export class Hub {
   issueAccessToken(browserId: string): { access_token: string; expires_at: number } {
     for (const [key, row] of this.tokens) if (row.expires <= this.now()) this.tokens.delete(key);
     requireValue(this.tokens.size < 20_000, 'RATE_LIMITED', 429);
-    const value = token(), expires = this.now() + ACCESS_TOKEN_MS;
+    const value = token(),
+      expires = this.now() + ACCESS_TOKEN_MS;
     this.tokens.set(hash(value), { browser_id: browserId, expires });
     return { access_token: value, expires_at: expires };
   }
 
   upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    if (req.url !== '/extension' || this.sockets.size >= 512 ||
-      !/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(req.headers.origin || '')) {
-      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
+    if (
+      req.url !== '/extension' ||
+      this.sockets.size >= 512 ||
+      !/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(req.headers.origin || '')
+    ) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      return;
     }
-    this.wss.handleUpgrade(req, socket, head, ws => this.wss.emit('connection', ws, req));
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
   }
   connected(ws: WebSocket, req: IncomingMessage): void {
     this.sockets.add(ws);
-    const conn: Conn = { ws, origin: req.headers.origin, connection_id: randomUUID(), lastSeen: this.now(),
-      lastPing: this.now(), authenticated: false, browser_id: null, challenge: null,
-      processing: Promise.resolve(), queued: 0, graceful: false, agentsSignature: '' };
-    const timeout = setTimeout(() => { if (!conn.authenticated) ws.close(1008, 'AUTH_TIMEOUT'); }, 10_000);
-    ws.on('message', raw => {
-      if ((!conn.authenticated && (raw as Buffer).length > 8192) || ++conn.queued > 64) { ws.close(1008, 'MESSAGE_LIMIT'); return; }
-      conn.processing = conn.processing.then(async () => {
-        let message: unknown;
-        try { message = JSON.parse(raw.toString()); } catch { throw new Fault('INVALID_MESSAGE'); }
-        requireValue(message && typeof message === 'object' && !Array.isArray(message), 'INVALID_MESSAGE');
-        await this.message(conn, message as Wire);
-      }).catch(error => {
-        const code = failureCode(error);
-        audit('ws_failure', { browser_id: conn.browser_id, code });
-        this.send(conn, { type: 'error', code, ...(conn.lastType ? { in_reply_to: conn.lastType } : {}) });
-        if (!conn.authenticated || code === 'NOT_AUTHORIZED') { this.disconnected(conn, code); ws.close(1008, code); }
-      }).finally(() => { conn.queued--; });
+    const conn: Conn = {
+      ws,
+      origin: req.headers.origin,
+      connection_id: randomUUID(),
+      lastSeen: this.now(),
+      lastPing: this.now(),
+      authenticated: false,
+      browser_id: null,
+      challenge: null,
+      processing: Promise.resolve(),
+      queued: 0,
+      graceful: false,
+      agentsSignature: '',
+    };
+    const timeout = setTimeout(() => {
+      if (!conn.authenticated) ws.close(1008, 'AUTH_TIMEOUT');
+    }, 10_000);
+    ws.on('message', (raw) => {
+      if ((!conn.authenticated && (raw as Buffer).length > 8192) || ++conn.queued > 64) {
+        ws.close(1008, 'MESSAGE_LIMIT');
+        return;
+      }
+      conn.processing = conn.processing
+        .then(async () => {
+          let message: unknown;
+          try {
+            message = JSON.parse(raw.toString());
+          } catch {
+            throw new Fault('INVALID_MESSAGE');
+          }
+          requireValue(message && typeof message === 'object' && !Array.isArray(message), 'INVALID_MESSAGE');
+          await this.message(conn, message as Wire);
+        })
+        .catch((error) => {
+          const code = failureCode(error);
+          audit('ws_failure', { browser_id: conn.browser_id, code });
+          this.send(conn, { type: 'error', code, ...(conn.lastType ? { in_reply_to: conn.lastType } : {}) });
+          if (!conn.authenticated || code === 'NOT_AUTHORIZED') {
+            this.disconnected(conn, code);
+            ws.close(1008, code);
+          }
+        })
+        .finally(() => {
+          conn.queued--;
+        });
     });
     // Let already-received frames (typically a final `bye`) finish before tearing the connection down.
     ws.on('close', () => {
-      clearTimeout(timeout); this.sockets.delete(ws);
+      clearTimeout(timeout);
+      this.sockets.delete(ws);
       void conn.processing.finally(() => this.disconnected(conn));
     });
-    ws.on('error', () => { audit('ws_failure', { code: 'CONNECTION_ERROR' }); this.disconnected(conn); ws.terminate(); });
+    ws.on('error', () => {
+      audit('ws_failure', { code: 'CONNECTION_ERROR' });
+      this.disconnected(conn);
+      ws.terminate();
+    });
   }
   send(conn: Conn | null | undefined, message: Wire): boolean {
     if (!conn || conn.ws.readyState !== 1) return false;
-    conn.ws.send(JSON.stringify(message)); return true;
+    conn.ws.send(JSON.stringify(message));
+    return true;
   }
   current(conn: Conn | null | undefined): boolean {
-    return Boolean(conn?.authenticated && this.connections.get(conn.browser_id!) === conn &&
-      conn.ws.readyState === 1 && this.store.browser(conn.browser_id!));
+    return Boolean(
+      conn?.authenticated &&
+      this.connections.get(conn.browser_id!) === conn &&
+      conn.ws.readyState === 1 &&
+      this.store.browser(conn.browser_id!),
+    );
   }
   online(browserId: string): Conn | null | undefined {
     const conn = this.connections.get(browserId);
     return this.current(conn) ? conn : null;
   }
   agentsFor(browserId: string): (AgentInfo | undefined)[] {
-    return this.store.agentsForBrowser(browserId).map(row => this.agent(row.agent_id)).filter(Boolean);
+    return this.store
+      .agentsForBrowser(browserId)
+      .map((row) => this.agent(row.agent_id))
+      .filter(Boolean);
   }
   sessionsFor(browserId: string): Wire[] {
-    return this.store.sessionsForBrowser(browserId).map(row => ({ session_id: row.id, group_id: row.group_id,
-      client_id: row.group_client_id, agent_id: row.agent_id, title: row.title, purpose: row.purpose }));
+    return this.store.sessionsForBrowser(browserId).map((row) => ({
+      session_id: row.id,
+      group_id: row.group_id,
+      client_id: row.group_client_id,
+      agent_id: row.agent_id,
+      title: row.title,
+      purpose: row.purpose,
+    }));
   }
   pushAgents(conn: Conn): void {
     const agents = this.agentsFor(conn.browser_id!);
@@ -205,48 +399,77 @@ export class Hub {
         const browser = this.store.browser(issued.browser_id);
         requireValue(browser && browser.extension_origin === conn.origin, 'NOT_AUTHORIZED', 401);
         conn.browser_info = m.browser_info || null;
-        conn.challenge = { origin: this.config.origin, nonce: token(), browser_id: browser.id,
-          connection_id: conn.connection_id };
+        conn.challenge = {
+          origin: this.config.origin,
+          nonce: token(),
+          browser_id: browser.id,
+          connection_id: conn.connection_id,
+        };
         this.send(conn, { type: 'challenge', nonce: conn.challenge.nonce, connection_id: conn.connection_id });
         return;
       }
       requireValue(m.type === 'proof' && conn.challenge, 'NOT_AUTHORIZED', 401);
-      const challenge = conn.challenge; conn.challenge = null;
+      const challenge = conn.challenge;
+      conn.challenge = null;
       const browser = this.store.browser(challenge.browser_id);
       requireValue(browser, 'NOT_AUTHORIZED', 401);
       let verified = false;
-      try { verified = await verify(JSON.parse(browser.public_key), connectPayload(challenge), m.signature); }
-      catch { throw new Fault('NOT_AUTHORIZED', 401); }
+      try {
+        verified = await verify(JSON.parse(browser.public_key), connectPayload(challenge), m.signature);
+      } catch {
+        throw new Fault('NOT_AUTHORIZED', 401);
+      }
       requireValue(verified && conn.ws.readyState === 1 && this.store.browser(browser.id), 'NOT_AUTHORIZED', 401);
       const old = this.connections.get(browser.id);
-      if (old) { this.disconnected(old, 'REPLACED'); old.ws.close(1000, 'REPLACED'); }
-      conn.authenticated = true; conn.browser_id = browser.id; conn.lastSeen = this.now();
+      if (old) {
+        this.disconnected(old, 'REPLACED');
+        old.ws.close(1000, 'REPLACED');
+      }
+      conn.authenticated = true;
+      conn.browser_id = browser.id;
+      conn.lastSeen = this.now();
       this.connections.set(browser.id, conn);
       this.store.touchBrowser(browser.id);
       conn.agentsSignature = JSON.stringify(this.agentsFor(browser.id));
-      this.send(conn, { type: 'welcome', browser_id: browser.id, name: browser.name, connection_id: conn.connection_id,
-        protected_origins: this.config.protectedOrigins, agents: JSON.parse(conn.agentsSignature),
-        sessions: this.sessionsFor(browser.id) });
+      this.send(conn, {
+        type: 'welcome',
+        browser_id: browser.id,
+        name: browser.name,
+        connection_id: conn.connection_id,
+        protected_origins: this.config.protectedOrigins,
+        agents: JSON.parse(conn.agentsSignature),
+        sessions: this.sessionsFor(browser.id),
+      });
       audit('browser_connected', { browser_id: browser.id });
       return;
     }
-    if (m.type === 'bye') { conn.graceful = true; return; }
+    if (m.type === 'bye') {
+      conn.graceful = true;
+      return;
+    }
     if (conn.ws.readyState !== 1) return;
     requireValue(this.current(conn), 'NOT_AUTHORIZED', 401);
     conn.lastSeen = this.now();
     switch (m.type) {
-      case 'pong': return;
-      case 'sync': return this.sync(conn, m);
-      case 'pairing.code': return this.registerCode(conn, m);
-      case 'pairing.cancel': this.dropCodes(conn.browser_id, 'PAIRING_UNAVAILABLE'); return;
-      case 'pairing.decision': return this.pairingDecision(conn, m);
+      case 'pong':
+        return;
+      case 'sync':
+        return this.sync(conn, m);
+      case 'pairing.code':
+        return this.registerCode(conn, m);
+      case 'pairing.cancel':
+        this.dropCodes(conn.browser_id, 'PAIRING_UNAVAILABLE');
+        return;
+      case 'pairing.decision':
+        return this.pairingDecision(conn, m);
       case 'pairing.revoke': {
         requireValue(typeof m.agent_id === 'string', 'INVALID_MESSAGE');
         this.store.unpair(m.agent_id, conn.browser_id!);
         this.reconcile();
         return;
       }
-      case 'session.decision': return this.sessionDecision(conn, m);
+      case 'session.decision':
+        return this.sessionDecision(conn, m);
       case 'browser.rename': {
         requireValue(validName(m.name), 'INVALID_MESSAGE');
         this.store.renameBrowser(conn.browser_id!, m.name);
@@ -260,21 +483,33 @@ export class Hub {
         this.reconcile();
         return;
       }
-      case 'command.ready': return this.commandReady(conn, m);
-      case 'result': return this.commandResult(conn, m);
-      default: throw new Fault('INVALID_MESSAGE');
+      case 'command.ready':
+        return this.commandReady(conn, m);
+      case 'result':
+        return this.commandResult(conn, m);
+      default:
+        throw new Fault('INVALID_MESSAGE');
     }
   }
 
   // ---------- inventory ----------
   sync(conn: Conn, m: Wire): void {
     requireValue(Array.isArray(m.groups) && m.groups.length <= 64, 'INVALID_MESSAGE');
-    const rows = new Map(this.store.sessionsForBrowser(conn.browser_id!).map(row => [row.group_client_id, row]));
-    const seen = new Set<string>(), assignments: Wire[] = [], unknown: string[] = [];
+    const rows = new Map(this.store.sessionsForBrowser(conn.browser_id!).map((row) => [row.group_client_id, row]));
+    const seen = new Set<string>(),
+      assignments: Wire[] = [],
+      unknown: string[] = [];
     for (const group of m.groups) {
-      requireValue(group && UUID.test(group.client_id || '') && ['attached', 'unconfirmed'].includes(group.state) &&
-        typeof group.title === 'string' && Array.isArray(group.tabs) && group.tabs.length <= SESSION_TAB_LIMIT &&
-        (group.request_id === undefined || UUID.test(group.request_id)), 'INVALID_MESSAGE');
+      requireValue(
+        group &&
+          UUID.test(group.client_id || '') &&
+          ['attached', 'unconfirmed'].includes(group.state) &&
+          typeof group.title === 'string' &&
+          Array.isArray(group.tabs) &&
+          group.tabs.length <= SESSION_TAB_LIMIT &&
+          (group.request_id === undefined || UUID.test(group.request_id)),
+        'INVALID_MESSAGE',
+      );
       const row = rows.get(group.client_id);
       if (!row) {
         // Approved-but-uncommitted groups are announced before their session exists.
@@ -289,35 +524,68 @@ export class Hub {
       this.store.keepSession(row.id, group.title || this.agent(row.agent_id)?.name || 'DomAgent');
       let live: Live | undefined = this.live.get(row.id);
       if (!live) {
-        live = { session_id: row.id, agent_id: row.agent_id, browser_id: row.browser_id, conn, state: group.state,
-          tabs: new Map(), running: 0, creating: 0, slots: new Set(), firstSync: false };
+        live = {
+          session_id: row.id,
+          agent_id: row.agent_id,
+          browser_id: row.browser_id,
+          conn,
+          state: group.state,
+          tabs: new Map(),
+          running: 0,
+          creating: 0,
+          slots: new Set(),
+          firstSync: false,
+        };
         this.live.set(row.id, live);
       }
-      live.conn = conn; live.state = group.state; live.client_id = row.group_client_id;
-      if (group.state === 'unconfirmed') { this.invalidate(live, 'SESSION_DETACHED'); continue; }
-      const stored = new Map(this.store.tabsForSession(row.id).map(tab => [tab.id, tab]));
-      const next = new Map<string, Target>(), keys = new Set<number>();
+      live.conn = conn;
+      live.state = group.state;
+      live.client_id = row.group_client_id;
+      if (group.state === 'unconfirmed') {
+        this.invalidate(live, 'SESSION_DETACHED');
+        continue;
+      }
+      const stored = new Map(this.store.tabsForSession(row.id).map((tab) => [tab.id, tab]));
+      const next = new Map<string, Target>(),
+        keys = new Set<number>();
       for (const tab of group.tabs) {
-        requireValue(tab && Number.isSafeInteger(tab.key) && tab.key >= 0 && !keys.has(tab.key) &&
-          typeof tab.title === 'string' && typeof tab.url === 'string' && tab.url.length <= 8192 &&
-          PAGE_STATES.has(tab.page_state) && Array.isArray(tab.capabilities) &&
-          tab.capabilities.every((op: string) => OPERATIONS.includes(op)) &&
-          (tab.id === undefined || tab.id === null || typeof tab.id === 'string'), 'INVALID_MESSAGE');
+        requireValue(
+          tab &&
+            Number.isSafeInteger(tab.key) &&
+            tab.key >= 0 &&
+            !keys.has(tab.key) &&
+            typeof tab.title === 'string' &&
+            typeof tab.url === 'string' &&
+            tab.url.length <= 8192 &&
+            PAGE_STATES.has(tab.page_state) &&
+            Array.isArray(tab.capabilities) &&
+            tab.capabilities.every((op: string) => OPERATIONS.includes(op)) &&
+            (tab.id === undefined || tab.id === null || typeof tab.id === 'string'),
+          'INVALID_MESSAGE',
+        );
         keys.add(tab.key);
         let ordinary = false;
-        try { navigationUrl(tab.url, this.config.protectedOrigins); ordinary = true; }
-        catch {
+        try {
+          navigationUrl(tab.url, this.config.protectedOrigins);
+          ordinary = true;
+        } catch {
           let origin: string | null = null;
-          try { origin = new URL(tab.url).origin; } catch { /* non-URL documents are navigation-only */ }
+          try {
+            origin = new URL(tab.url).origin;
+          } catch {
+            /* non-URL documents are navigation-only */
+          }
           if (origin && this.config.protectedOrigins.includes(origin)) continue;
         }
-        const capabilities = ordinary && !['navigation_only', 'unavailable'].includes(tab.page_state)
-          ? [...new Set(tab.capabilities)] : ['navigate'];
+        const capabilities =
+          ordinary && !['navigation_only', 'unavailable'].includes(tab.page_state)
+            ? [...new Set(tab.capabilities)]
+            : ['navigate'];
         const page_state = ordinary ? tab.page_state : 'navigation_only';
         let id: string | null = typeof tab.id === 'string' && stored.has(tab.id) && !next.has(tab.id) ? tab.id : null;
         if (!id) {
           // A sync can race ahead of the previous acknowledgement; the same browser tab keeps its ID.
-          const known = [...live.tabs.values()].find(target => target.key === tab.key && !next.has(target.id));
+          const known = [...live.tabs.values()].find((target) => target.key === tab.key && !next.has(target.id));
           if (known && stored.has(known.id)) {
             id = known.id;
             assignments.push({ client_id: group.client_id, key: tab.key, id });
@@ -329,13 +597,30 @@ export class Hub {
           assignments.push({ client_id: group.client_id, key: tab.key, id });
         }
         let target = live.tabs.get(id);
-        if (!target) target = { id, session_id: row.id, live, tail: Promise.resolve(), queued: 0,
-          execution_state: 'idle', queuedControllers: new Set() } as unknown as Target;
-        Object.assign(target, { key: tab.key, title: cleanText(tab.title, 160), url: cleanText(tab.url, 2048),
-          page_state, capabilities });
+        if (!target)
+          target = {
+            id,
+            session_id: row.id,
+            live,
+            tail: Promise.resolve(),
+            queued: 0,
+            execution_state: 'idle',
+            queuedControllers: new Set(),
+          } as unknown as Target;
+        Object.assign(target, {
+          key: tab.key,
+          title: cleanText(tab.title, 160),
+          url: cleanText(tab.url, 2048),
+          page_state,
+          capabilities,
+        });
         for (const call of this.calls.values()) {
-          if (call.target === target && !['request_handoff', 'navigate'].includes(call.operation) &&
-            !capabilities.includes(call.operation)) call.cancel('DOCUMENT_NOT_CONTROLLABLE');
+          if (
+            call.target === target &&
+            !['request_handoff', 'navigate'].includes(call.operation) &&
+            !capabilities.includes(call.operation)
+          )
+            call.cancel('DOCUMENT_NOT_CONTROLLABLE');
         }
         next.set(id, target);
       }
@@ -364,17 +649,27 @@ export class Hub {
     for (const slot of [...live.slots]) slot.cancel(new Fault(reason));
   }
   endSession(id: string, reason = 'SESSION_ENDED', notify = true): void {
-    const row = this.store.session(id), live = this.live.get(id);
-    const browserId = row?.browser_id || live?.browser_id, clientId = row?.group_client_id || live?.client_id;
-    if (live) { this.invalidate(live, reason); this.live.delete(id); }
+    const row = this.store.session(id),
+      live = this.live.get(id);
+    const browserId = row?.browser_id || live?.browser_id,
+      clientId = row?.group_client_id || live?.client_id;
+    if (live) {
+      this.invalidate(live, reason);
+      this.live.delete(id);
+    }
     if (row) this.store.deleteSession(id);
-    if (notify && clientId) this.send(this.online(browserId!), { type: 'session.end', session_id: id, client_id: clientId });
+    if (notify && clientId)
+      this.send(this.online(browserId!), { type: 'session.end', session_id: id, client_id: clientId });
   }
 
   // ---------- pairing ----------
   codeHash(code: unknown): string {
     let normalized: string;
-    try { normalized = normalizePairingCode(code); } catch { throw new Fault('PAIRING_UNAVAILABLE', 404); }
+    try {
+      normalized = normalizePairingCode(code);
+    } catch {
+      throw new Fault('PAIRING_UNAVAILABLE', 404);
+    }
     return createHmac('sha256', this.codeKey).update('domagent.v6.pairing-code\0').update(normalized).digest('hex');
   }
   dropCodes(browserId: string | null, reason: string): void {
@@ -413,8 +708,10 @@ export class Hub {
     }
   }
   async pairBrowser(agentId: string, code: unknown, timeoutMs: number, signal?: AbortSignal): Promise<Wire> {
-    this.rates.take(`pair:${agentId}`, 20); this.rates.take('pair:global', 200);
-    const key = this.codeHash(code), entry = this.codes.get(key);
+    this.rates.take(`pair:${agentId}`, 20);
+    this.rates.take('pair:global', 200);
+    const key = this.codeHash(code),
+      entry = this.codes.get(key);
     requireValue(entry && entry.expires > this.now(), 'PAIRING_UNAVAILABLE', 404);
     if (this.store.paired(agentId, entry.browser_id)) {
       const browser = this.store.browser(entry.browser_id)!;
@@ -425,15 +722,24 @@ export class Hub {
     requireValue(!entry.proposal || entry.proposal.agent_id === agentId, 'PAIRING_UNAVAILABLE', 404);
     if (!entry.proposal) {
       entry.proposal = { request_id: randomUUID(), agent_id: agentId, waiters: new Set() };
-      this.send(conn, { type: 'pairing.proposal', request_id: entry.proposal.request_id, agent: this.agent(agentId),
-        expires_at: entry.expires });
+      this.send(conn, {
+        type: 'pairing.proposal',
+        request_id: entry.proposal.request_id,
+        agent: this.agent(agentId),
+        expires_at: entry.expires,
+      });
     }
     const proposal = entry.proposal;
     const deadline = Math.min(this.now() + timeoutMs, entry.expires);
-    return waitFor<Wire>(deadline, signal, finish => {
-      proposal.waiters.add(finish as Finish);
-      return () => proposal.waiters.delete(finish as Finish);
-    }, this.now);
+    return waitFor<Wire>(
+      deadline,
+      signal,
+      (finish) => {
+        proposal.waiters.add(finish as Finish);
+        return () => proposal.waiters.delete(finish as Finish);
+      },
+      this.now,
+    );
   }
 
   // ---------- sessions ----------
@@ -451,25 +757,45 @@ export class Hub {
     return { row, conn, live };
   }
   sessionState(row: SessionRow): string {
-    const conn = this.online(row.browser_id), live = this.live.get(row.id);
+    const conn = this.online(row.browser_id),
+      live = this.live.get(row.id);
     return conn && live?.conn === conn && live.state === 'attached' ? 'attached' : 'detached';
   }
   publicSession(row: SessionRow): Wire {
     const live = this.live.get(row.id);
     const state = this.sessionState(row);
-    return { session_id: row.id, browser_id: row.browser_id, tab_group_id: row.group_id, title: row.title,
-      purpose: row.purpose, state, expires_at: row.expires_at,
-      tab_count: state === 'attached' ? live!.tabs.size : 0 };
+    return {
+      session_id: row.id,
+      browser_id: row.browser_id,
+      tab_group_id: row.group_id,
+      title: row.title,
+      purpose: row.purpose,
+      state,
+      expires_at: row.expires_at,
+      tab_count: state === 'attached' ? live!.tabs.size : 0,
+    };
   }
   publicTab(target: Target): Wire {
-    return { tab_id: target.id, title: target.title, url: target.url, page_state: target.page_state,
-      capabilities: [...target.capabilities], execution_state: target.execution_state };
+    return {
+      tab_id: target.id,
+      title: target.title,
+      url: target.url,
+      page_state: target.page_state,
+      capabilities: [...target.capabilities],
+      execution_state: target.execution_state,
+    };
   }
   listBrowsers(agentId: string): Wire[] {
-    return this.store.browsersForAgent(agentId).map(row => {
+    return this.store.browsersForAgent(agentId).map((row) => {
       const conn = this.online(row.id);
-      return { browser_id: row.id, name: row.name, online: Boolean(conn), browser_info: conn?.browser_info || null,
-        last_seen: new Date(conn ? this.now() : row.last_seen).toISOString(), paired_at: new Date(row.paired_at).toISOString() };
+      return {
+        browser_id: row.id,
+        name: row.name,
+        online: Boolean(conn),
+        browser_info: conn?.browser_info || null,
+        last_seen: new Date(conn ? this.now() : row.last_seen).toISOString(),
+        paired_at: new Date(row.paired_at).toISOString(),
+      };
     });
   }
   unpairBrowser(agentId: string, browserId: string): Wire {
@@ -479,12 +805,14 @@ export class Hub {
     return { browser_id: browserId, unpaired: true };
   }
   listSessions(agentId: string): Wire[] {
-    return this.store.sessionsForAgent(agentId).filter(row => this.store.paired(agentId, row.browser_id))
-      .map(row => this.publicSession(row));
+    return this.store
+      .sessionsForAgent(agentId)
+      .filter((row) => this.store.paired(agentId, row.browser_id))
+      .map((row) => this.publicSession(row));
   }
   listTabs(agentId: string, sessionId: unknown): Wire[] {
     const { live } = this.requireAttached(agentId, sessionId);
-    return [...live.tabs.values()].map(target => this.publicTab(target));
+    return [...live.tabs.values()].map((target) => this.publicTab(target));
   }
   async requestSession(agentId: string, args: Wire, signal?: AbortSignal): Promise<Wire> {
     requireValue(validShortId('b', args.browser_id) && this.store.paired(agentId, args.browser_id), 'NOT_FOUND', 404);
@@ -492,24 +820,54 @@ export class Hub {
     requireValue(conn, 'BROWSER_OFFLINE');
     const urls = args.urls || [];
     for (const url of urls) {
-      try { navigationUrl(url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
+      try {
+        navigationUrl(url, this.config.protectedOrigins);
+      } catch {
+        throw new Fault('HANDOFF_REQUIRED');
+      }
     }
     this.rates.take(`session:${agentId}:${args.browser_id}`, 10);
-    requireValue([...this.sessionRequests.values()].filter(r => r.browser_id === args.browser_id).length <
-      MAX_PENDING_PER_BROWSER, 'QUEUE_FULL', 429);
+    requireValue(
+      [...this.sessionRequests.values()].filter((r) => r.browser_id === args.browser_id).length <
+        MAX_PENDING_PER_BROWSER,
+      'QUEUE_FULL',
+      429,
+    );
     const agent = this.agent(agentId);
     const title = cleanText(args.title || agent!.name, 120);
-    const request: SessionRequest = { id: randomUUID(), agent_id: agentId, browser_id: args.browser_id, conn, purpose: args.purpose,
-      title, session_id: null, check: null };
+    const request: SessionRequest = {
+      id: randomUUID(),
+      agent_id: agentId,
+      browser_id: args.browser_id,
+      conn,
+      purpose: args.purpose,
+      title,
+      session_id: null,
+      check: null,
+    };
     const deadline = this.now() + (args.timeout_seconds ?? 300) * 1000;
     this.sessionRequests.set(request.id, request);
-    this.send(conn, { type: 'session.request', request_id: request.id, agent, purpose: args.purpose, urls, title,
-      expires_at: deadline });
+    this.send(conn, {
+      type: 'session.request',
+      request_id: request.id,
+      agent,
+      purpose: args.purpose,
+      urls,
+      title,
+      expires_at: deadline,
+    });
     try {
-      await waitFor(deadline, signal, finish => {
-        request.finish = finish;
-        return () => { request.finish = null; };
-      }, this.now);
+      await waitFor(
+        deadline,
+        signal,
+        (finish) => {
+          request.finish = finish;
+          return () => {
+            request.finish = null;
+          };
+        },
+        this.now,
+      );
     } catch (error) {
       this.sessionRequests.delete(request.id);
       if (!request.session_id) this.send(conn, { type: 'session.request.cancel', request_id: request.id });
@@ -518,18 +876,32 @@ export class Hub {
     // Approval committed: give the first inventory a bounded chance to publish starting tabs.
     const sessionId = request.session_id!;
     try {
-      await waitFor(this.now() + 10_000, signal, finish => {
-        request.check = () => { if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId)) finish(); };
-        request.check();
-        return () => { request.check = null; };
-      }, this.now);
+      await waitFor(
+        this.now() + 10_000,
+        signal,
+        (finish) => {
+          request.check = () => {
+            if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId)) finish();
+          };
+          request.check();
+          return () => {
+            request.check = null;
+          };
+        },
+        this.now,
+      );
     } catch (error) {
       if ((error as Fault).code !== 'COMMAND_EXPIRED') throw error;
-    } finally { this.sessionRequests.delete(request.id); }
+    } finally {
+      this.sessionRequests.delete(request.id);
+    }
     const row = this.store.session(sessionId);
     requireValue(row, 'SESSION_ENDED');
     const live = this.live.get(sessionId);
-    return { ...this.publicSession(row), tabs: live ? [...live.tabs.values()].map(target => this.publicTab(target)) : [] };
+    return {
+      ...this.publicSession(row),
+      tabs: live ? [...live.tabs.values()].map((target) => this.publicTab(target)) : [],
+    };
   }
   sessionDecision(conn: Conn, m: Wire): void {
     requireValue(UUID.test(m.request_id || '') && typeof m.approved === 'boolean', 'INVALID_MESSAGE');
@@ -538,15 +910,34 @@ export class Hub {
       this.send(conn, { type: 'session.request.cancel', request_id: m.request_id });
       return;
     }
-    if (!m.approved) { request.finish(new Fault('ACTION_DECLINED')); return; }
+    if (!m.approved) {
+      request.finish(new Fault('ACTION_DECLINED'));
+      return;
+    }
     requireValue(UUID.test(m.client_id || ''), 'INVALID_MESSAGE');
-    if (!this.store.paired(request.agent_id, conn.browser_id)) { request.finish(new Fault('NOT_FOUND', 404)); return; }
-    const row = this.store.createSession({ agent_id: request.agent_id, browser_id: conn.browser_id,
-      group_client_id: m.client_id, purpose: request.purpose, title: request.title });
+    if (!this.store.paired(request.agent_id, conn.browser_id)) {
+      request.finish(new Fault('NOT_FOUND', 404));
+      return;
+    }
+    const row = this.store.createSession({
+      agent_id: request.agent_id,
+      browser_id: conn.browser_id,
+      group_client_id: m.client_id,
+      purpose: request.purpose,
+      title: request.title,
+    });
     request.session_id = row.id;
     audit('session_created', { browser_id: conn.browser_id, agent_id: request.agent_id, session_id: row.id });
-    this.send(conn, { type: 'session.created', request_id: request.id, session_id: row.id, group_id: row.group_id,
-      client_id: m.client_id, agent_id: request.agent_id, title: row.title, purpose: row.purpose });
+    this.send(conn, {
+      type: 'session.created',
+      request_id: request.id,
+      session_id: row.id,
+      group_id: row.group_id,
+      client_id: m.client_id,
+      agent_id: request.agent_id,
+      title: row.title,
+      purpose: row.purpose,
+    });
     request.finish(null);
   }
   endSessionByAgent(agentId: string, sessionId: string): Wire {
@@ -555,8 +946,13 @@ export class Hub {
     return { session_id: sessionId, ended: true, tabs_closed: false };
   }
   // Closing tabs is never automatic: the extension asks the user and only closes after an explicit approval.
-  async closeSessionTabs(agentId: string, sessionId: string, description: unknown, waitMs: number,
-    signal?: AbortSignal): Promise<Wire> {
+  async closeSessionTabs(
+    agentId: string,
+    sessionId: string,
+    description: unknown,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<Wire> {
     const { live } = this.requireAttached(agentId, sessionId);
     requireExtension(live.conn, 'close_tabs');
     requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
@@ -584,32 +980,58 @@ export class Hub {
     if (call.connection_id) requireValue(conn.connection_id === call.connection_id, 'BROWSER_OFFLINE');
     if (target) {
       requireValue(live.tabs.get(target.id) === target, 'TAB_NOT_IN_SESSION');
-      requireValue(operation === 'request_handoff' || target.capabilities.includes(operation),
-        ['navigation_only', 'unavailable'].includes(target.page_state) ? 'DOCUMENT_NOT_CONTROLLABLE' : 'CAPABILITY_UNAVAILABLE');
+      requireValue(
+        operation === 'request_handoff' || target.capabilities.includes(operation),
+        ['navigation_only', 'unavailable'].includes(target.page_state)
+          ? 'DOCUMENT_NOT_CONTROLLABLE'
+          : 'CAPABILITY_UNAVAILABLE',
+      );
     }
     return conn;
   }
   async slot(live: Live, deadline: number, signal?: AbortSignal | null): Promise<void> {
-    if (live.running < SESSION_CONCURRENCY) { live.running++; return; }
+    if (live.running < SESSION_CONCURRENCY) {
+      live.running++;
+      return;
+    }
     requireValue(live.slots.size < 64, 'QUEUE_FULL', 429);
-    await waitFor(deadline, signal, finish => {
-      const slot: Slot = { cancel: finish, release: () => { live.running++; finish(); } };
-      live.slots.add(slot);
-      return () => live.slots.delete(slot);
-    }, this.now);
+    await waitFor(
+      deadline,
+      signal,
+      (finish) => {
+        const slot: Slot = {
+          cancel: finish,
+          release: () => {
+            live.running++;
+            finish();
+          },
+        };
+        live.slots.add(slot);
+        return () => live.slots.delete(slot);
+      },
+      this.now,
+    );
   }
   releaseSlot(live: Live): void {
-    live.running--; const first = live.slots.values().next().value; first?.release();
+    live.running--;
+    const first = live.slots.values().next().value;
+    first?.release();
   }
   findTarget(agentId: string, tabId: unknown): Target {
-    const owned = (target: Target | null | undefined): target is Target => Boolean(target && target.live.agent_id === agentId);
+    const owned = (target: Target | null | undefined): target is Target =>
+      Boolean(target && target.live.agent_id === agentId);
     let target: Target | null | undefined = null;
-    if (validShortId('t', tabId)) for (const live of this.live.values()) {
-      if (live.tabs.has(tabId)) { target = live.tabs.get(tabId); break; }
-    }
+    if (validShortId('t', tabId))
+      for (const live of this.live.values()) {
+        if (live.tabs.has(tabId)) {
+          target = live.tabs.get(tabId);
+          break;
+        }
+      }
     if (owned(target)) return target;
     const tombstone = this.tombstones.get(tabId as string);
-    if (tombstone && tombstone.agent_id === agentId && tombstone.expires > this.now()) throw new Fault(tombstone.reason);
+    if (tombstone && tombstone.agent_id === agentId && tombstone.expires > this.now())
+      throw new Fault(tombstone.reason);
     const row = validShortId('t', tabId) && this.store.tab(tabId);
     const session = row && this.store.session(row.session_id);
     if (session && session.agent_id === agentId) {
@@ -618,23 +1040,40 @@ export class Hub {
     }
     throw new Fault('NOT_FOUND', 404);
   }
-  async operate(agentId: string, tabId: unknown, operation: string, args: Wire, description: unknown, waitMs: number,
-    signal?: AbortSignal): Promise<unknown> {
+  async operate(
+    agentId: string,
+    tabId: unknown,
+    operation: string,
+    args: Wire,
+    description: unknown,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const spec = operation === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[operation];
     requireArguments(spec ? [] : [{ field: 'operation', reason: 'invalid_enum' }]);
     requireArguments([
       ...schemaArgumentErrors(spec, args),
-      ...schemaArgumentErrors({ properties: { tab_id: TAB_ID_SCHEMA,
-        ...(operation === 'request_handoff' ? {} : { description: DESCRIPTION_SCHEMA }) },
-      required: ['tab_id', ...(operation === 'request_handoff' ? [] : ['description'])] },
-      { tab_id: tabId, ...(operation === 'request_handoff' ? {} : { description }) }),
+      ...schemaArgumentErrors(
+        {
+          properties: {
+            tab_id: TAB_ID_SCHEMA,
+            ...(operation === 'request_handoff' ? {} : { description: DESCRIPTION_SCHEMA }),
+          },
+          required: ['tab_id', ...(operation === 'request_handoff' ? [] : ['description'])],
+        },
+        { tab_id: tabId, ...(operation === 'request_handoff' ? {} : { description }) },
+      ),
     ]);
     const target = this.findTarget(agentId, tabId);
     const live = target.live;
     const probe = { live, target, operation };
     this.checkAuthority(probe);
     if (operation === 'navigate') {
-      try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
+      try {
+        navigationUrl(args.url, this.config.protectedOrigins);
+      } catch {
+        throw new Fault('HANDOFF_REQUIRED');
+      }
     }
     if (operation === 'evaluate_script') args = { world: 'MAIN', ...args };
     if (args.return_as === 'artifact') requireExtension(live.conn, 'artifacts');
@@ -644,74 +1083,140 @@ export class Hub {
     const queued = new AbortController();
     target.queuedControllers.add(queued);
     signal = signal ? AbortSignal.any([signal, queued.signal]) : queued.signal;
-    const previous = target.tail; let release!: (value?: unknown) => void;
-    const mine = new Promise(resolve => { release = resolve; });
+    const previous = target.tail;
+    let release!: (value?: unknown) => void;
+    const mine = new Promise((resolve) => {
+      release = resolve;
+    });
     // A cancelled predecessor must not let its successor overtake an earlier running call.
-    target.tail = previous.then(() => mine); target.queued++;
+    target.tail = previous.then(() => mine);
+    target.queued++;
     let hasSlot = false;
     try {
-      await waitFor(deadline, signal, finish => { previous.then(() => finish(), finish); }, this.now);
+      await waitFor(
+        deadline,
+        signal,
+        (finish) => {
+          previous.then(() => finish(), finish);
+        },
+        this.now,
+      );
       this.checkAuthority(probe);
-      if (!human) { await this.slot(live, deadline, signal); hasSlot = true; }
+      if (!human) {
+        await this.slot(live, deadline, signal);
+        hasSlot = true;
+      }
       this.checkAuthority(probe);
       requireValue(!signal.aborted, 'COMMAND_CANCELLED');
       return await this.dispatch(live, target, operation, args, description, deadline, signal);
     } finally {
-      target.queued--; target.queuedControllers.delete(queued); release(); if (hasSlot) this.releaseSlot(live);
+      target.queued--;
+      target.queuedControllers.delete(queued);
+      release();
+      if (hasSlot) this.releaseSlot(live);
     }
   }
-  async createTab(agentId: string, sessionId: unknown, args: Wire, description: unknown, signal?: AbortSignal): Promise<unknown> {
+  async createTab(
+    agentId: string,
+    sessionId: unknown,
+    args: Wire,
+    description: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const { live } = this.requireAttached(agentId, sessionId);
     if (args.url !== undefined) {
-      try { navigationUrl(args.url, this.config.protectedOrigins); } catch { throw new Fault('HANDOFF_REQUIRED'); }
+      try {
+        navigationUrl(args.url, this.config.protectedOrigins);
+      } catch {
+        throw new Fault('HANDOFF_REQUIRED');
+      }
     }
     requireValue(live.tabs.size + live.creating < SESSION_TAB_LIMIT, 'TAB_LIMIT_REACHED');
-    const deadline = this.now() + EXECUTION_MS; live.creating++;
+    const deadline = this.now() + EXECUTION_MS;
+    live.creating++;
     let hasSlot = false;
     try {
-      await this.slot(live, deadline, signal); hasSlot = true;
+      await this.slot(live, deadline, signal);
+      hasSlot = true;
       this.checkAuthority({ live, target: null, operation: 'create_tab' });
       requireValue(!signal?.aborted, 'COMMAND_CANCELLED');
       return await this.dispatch(live, null, 'create_tab', args, description, deadline, signal);
-    } finally { live.creating--; if (hasSlot) this.releaseSlot(live); }
+    } finally {
+      live.creating--;
+      if (hasSlot) this.releaseSlot(live);
+    }
   }
-  async closeTab(agentId: string, tabId: unknown, description: unknown, waitMs: number, signal?: AbortSignal): Promise<Wire> {
-    const target = this.findTarget(agentId, tabId), live = target.live;
+  async closeTab(
+    agentId: string,
+    tabId: unknown,
+    description: unknown,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<Wire> {
+    const target = this.findTarget(agentId, tabId),
+      live = target.live;
     this.checkAuthority({ live, target: null, operation: 'close_tab' });
     requireExtension(live.conn, 'close_tabs');
     requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
-    const result = await this.dispatch(live, null, 'close_tab', { tab_id: target.id }, description,
-      this.now() + waitMs, signal);
+    const result = await this.dispatch(
+      live,
+      null,
+      'close_tab',
+      { tab_id: target.id },
+      description,
+      this.now() + waitMs,
+      signal,
+    );
     // Closing the last tab removes the group, so the extension ends the session right after this receipt.
     const ended = (result as Wire | undefined)?.session_ended === true;
     if (ended) this.endSession(live.session_id, 'SESSION_ENDED', false);
     return { tab_id: target.id, closed: true, session_ended: ended };
   }
-  dispatch(live: Live, target: Target | null, operation: string, args: Wire, description: unknown, deadline: number,
-    signal?: AbortSignal | null): Promise<unknown> {
+  dispatch(
+    live: Live,
+    target: Target | null,
+    operation: string,
+    args: Wire,
+    description: unknown,
+    deadline: number,
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
     const conn = this.checkAuthority({ live, target, operation });
     const requestId = randomUUID();
     const before = new Set(live.tabs.keys());
     return new Promise((resolve, reject) => {
-      let finished = false, timer: NodeJS.Timeout | undefined;
+      let finished = false,
+        timer: NodeJS.Timeout | undefined;
       const finish = (error: unknown, value?: unknown) => {
-        if (finished) return; finished = true; clearTimeout(timer);
-        signal?.removeEventListener('abort', abort); this.calls.delete(requestId);
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        this.calls.delete(requestId);
         if (target) target.execution_state = 'idle';
         if (error) reject(error);
         else resolve(value);
       };
       const human = operation === 'request_handoff';
       const call: Call = {
-        live, target, operation, connection_id: conn.connection_id, conn, phase: 'waiting', deadline, before,
-        resolve: value => finish(null, value), reject: error => finish(error),
-        cancel: code => {
+        live,
+        target,
+        operation,
+        connection_id: conn.connection_id,
+        conn,
+        phase: 'waiting',
+        deadline,
+        before,
+        resolve: (value) => finish(null, value),
+        reject: (error) => finish(error),
+        cancel: (code) => {
           this.send(conn, { type: 'command.cancel', request_id: requestId, reason: code });
           finish(new Fault(call.phase === 'executing' && !human ? 'OUTCOME_UNKNOWN' : code));
         },
         execute: () => {
           if (call.phase !== 'waiting') return;
-          call.phase = 'executing'; clearTimeout(timer);
+          call.phase = 'executing';
+          clearTimeout(timer);
           if (target) target.execution_state = human ? 'waiting_for_human' : 'running';
           const executionMs = human ? Math.max(1, deadline - this.now()) : EXECUTION_MS;
           timer = setTimeout(() => call.cancel(human ? 'COMMAND_EXPIRED' : 'OUTCOME_UNKNOWN'), executionMs);
@@ -725,10 +1230,25 @@ export class Hub {
       timer = setTimeout(() => call.cancel('COMMAND_EXPIRED'), Math.max(1, deadline - this.now()));
       const abort = () => call.cancel(signal?.reason instanceof Fault ? signal.reason.code : 'COMMAND_CANCELLED');
       signal?.addEventListener('abort', abort, { once: true });
-      if (signal?.aborted) { abort(); return; }
-      if (!this.send(conn, { type: 'command', request_id: requestId, session_id: live.session_id,
-        tab_id: target?.id || null, operation, args, description: description || null, agent_id: live.agent_id,
-        expires_at: deadline, wait_timeout_ms: Math.max(1, deadline - this.now()) })) call.cancel('BROWSER_OFFLINE');
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      if (
+        !this.send(conn, {
+          type: 'command',
+          request_id: requestId,
+          session_id: live.session_id,
+          tab_id: target?.id || null,
+          operation,
+          args,
+          description: description || null,
+          agent_id: live.agent_id,
+          expires_at: deadline,
+          wait_timeout_ms: Math.max(1, deadline - this.now()),
+        })
+      )
+        call.cancel('BROWSER_OFFLINE');
     });
   }
   commandReady(conn: Conn, m: Wire): void {
@@ -736,25 +1256,52 @@ export class Hub {
     if (!call) return;
     requireValue(call.conn === conn, 'NOT_AUTHORIZED', 401);
     if (call.phase !== 'waiting') return;
-    if (this.now() >= call.deadline) { call.cancel('COMMAND_EXPIRED'); return; }
-    try { this.checkAuthority(call); } catch (error) { call.cancel(failureCode(error)); return; }
+    if (this.now() >= call.deadline) {
+      call.cancel('COMMAND_EXPIRED');
+      return;
+    }
+    try {
+      this.checkAuthority(call);
+    } catch (error) {
+      call.cancel(failureCode(error));
+      return;
+    }
     call.execute();
   }
   commandResult(conn: Conn, m: Wire): void {
     const call = this.calls.get(m.request_id);
-    if (!call) { audit('result_discarded', { code: 'TARGET_STALE' }); return; }
+    if (!call) {
+      audit('result_discarded', { code: 'TARGET_STALE' });
+      return;
+    }
     requireValue(call.conn === conn, 'NOT_AUTHORIZED', 401);
     if (m.error) {
       requireValue(typeof m.error === 'object', 'INVALID_MESSAGE');
       const code = RESULT_ERRORS.has(m.error.code) ? m.error.code : 'OPERATION_FAILED';
       const diagnostics = sanitizeDiagnostics(m.error.diagnostics);
-      call.reject(Object.assign(new Fault(code), waitErrorDetails(m.error), inspectionErrorDetails(m.error),
-        dispatchDetails(m.error), errorDetails({ ...m.error, code }), diagnostics ? { diagnostics } : {}));
+      call.reject(
+        Object.assign(
+          new Fault(code),
+          waitErrorDetails(m.error),
+          inspectionErrorDetails(m.error),
+          dispatchDetails(m.error),
+          errorDetails({ ...m.error, code }),
+          diagnostics ? { diagnostics } : {},
+        ),
+      );
       return;
     }
-    try { this.checkAuthority(call); } catch (error) { call.cancel(failureCode(error)); return; }
+    try {
+      this.checkAuthority(call);
+    } catch (error) {
+      call.cancel(failureCode(error));
+      return;
+    }
     requireValue(call.phase === 'executing', 'INVALID_MESSAGE');
-    requireValue(Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= MAX_MESSAGE_BYTES, 'INVALID_MESSAGE');
+    requireValue(
+      Object.hasOwn(m, 'result') && Buffer.byteLength(JSON.stringify(m.result)) <= MAX_MESSAGE_BYTES,
+      'INVALID_MESSAGE',
+    );
     if (call.operation === 'create_tab') {
       const created = call.live.tabs.get(m.result?.tab_id);
       // A receipt cannot invent a tab: it must already be published by inventory sync.
@@ -766,7 +1313,8 @@ export class Hub {
   // ---------- lifecycle ----------
   disconnected(conn: Conn, code = 'BROWSER_OFFLINE'): void {
     if (!conn.browser_id || conn.closed) return;
-    conn.closed = true; conn.authenticated = false;
+    conn.closed = true;
+    conn.authenticated = false;
     if (this.connections.get(conn.browser_id) === conn) this.connections.delete(conn.browser_id);
     for (const live of [...this.live.values()]) {
       if (live.conn !== conn) continue;
@@ -783,7 +1331,9 @@ export class Hub {
     for (const conn of [...this.connections.values()]) {
       if (!this.store.browser(conn.browser_id!)) {
         this.send(conn, { type: 'revoked' });
-        this.disconnected(conn, 'REVOKED'); conn.ws.close(1008, 'REVOKED'); continue;
+        this.disconnected(conn, 'REVOKED');
+        conn.ws.close(1008, 'REVOKED');
+        continue;
       }
       this.pushAgents(conn);
     }
@@ -793,10 +1343,11 @@ export class Hub {
     }
   }
   sweep(): void {
-    for (const [key, entry] of this.codes) if (entry.expires <= this.now()) {
-      this.codes.delete(key);
-      for (const waiter of [...(entry.proposal?.waiters || [])]) waiter(new Fault('PAIRING_UNAVAILABLE'));
-    }
+    for (const [key, entry] of this.codes)
+      if (entry.expires <= this.now()) {
+        this.codes.delete(key);
+        for (const waiter of [...(entry.proposal?.waiters || [])]) waiter(new Fault('PAIRING_UNAVAILABLE'));
+      }
     for (const [id, row] of this.tombstones) if (row.expires <= this.now()) this.tombstones.delete(id);
     if (this.now() - this.lastStoreSweep >= 5_000) {
       this.lastStoreSweep = this.now();
@@ -805,9 +1356,12 @@ export class Hub {
       this.reconcile();
     }
     for (const conn of [...this.connections.values()]) {
-      if (this.now() - conn.lastSeen >= LIVENESS_MS) { this.disconnected(conn); conn.ws.terminate(); }
-      else if (this.now() - conn.lastPing >= HEARTBEAT_MS) {
-        conn.lastPing = this.now(); this.send(conn, { type: 'ping' });
+      if (this.now() - conn.lastSeen >= LIVENESS_MS) {
+        this.disconnected(conn);
+        conn.ws.terminate();
+      } else if (this.now() - conn.lastPing >= HEARTBEAT_MS) {
+        conn.lastPing = this.now();
+        this.send(conn, { type: 'ping' });
         this.store.touchBrowser(conn.browser_id!);
       }
     }

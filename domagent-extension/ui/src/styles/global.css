@@ -1,45 +1,196 @@
 /* Tokens, resets, base elements and patterns shared across components. */
 @import './themes/default.css';
 
-* { box-sizing: border-box; }
-html, body { height: 100%; }
-body { margin: 0; background: var(--surface); color: var(--surface-fg); font: 13px/1.5 var(--font-ui); }
-button, input, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); padding: 6px 12px; }
-button:hover:not(:disabled) { background: var(--wash); }
-button:disabled { opacity: .5; cursor: default; }
-button.primary { background: var(--primary); border-color: transparent; color: var(--primary-fg); font-weight: 600; }
-button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 85%, black); }
-button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, var(--surface)); }
-button.link { border: 0; background: none; padding: 0; color: var(--primary); text-align: left; }
-button.link:hover:not(:disabled) { background: none; text-decoration: underline; }
-button.wide { width: 100%; margin-top: 12px; padding: 8px; }
-button.icon { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border-color: transparent; background: none; }
-button.icon svg { width: 18px; height: 18px; fill: currentColor; }
-button.icon.pressed { background: var(--wash); }
-:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-input:not([type]), input[type=text], textarea { width: 100%; padding: 7px 9px; background: var(--surface);
-  border: 1px solid var(--border-strong); border-radius: 6px; }
-h1, h2, p, blockquote, ul, ol { margin: 0; }
-h1 { font-size: 15px; font-weight: 600; }
-h2 { font-size: 13px; font-weight: 600; }
-a { color: var(--primary); }
-blockquote { padding: 6px 10px; border-left: 3px solid var(--border-strong); overflow-wrap: anywhere; white-space: pre-wrap; }
-.muted { color: var(--muted); }
-.small, small { font-size: 12px; }
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--surface-fg);
+  font: 13px/1.5 var(--font-ui);
+}
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 6px 12px;
+}
+button:hover:not(:disabled) {
+  background: var(--wash);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.primary {
+  background: var(--primary);
+  border-color: transparent;
+  color: var(--primary-fg);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 85%, black);
+}
+button.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--surface));
+}
+button.link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--primary);
+  text-align: left;
+}
+button.link:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
+}
+button.wide {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px;
+}
+button.icon {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-color: transparent;
+  background: none;
+}
+button.icon svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+button.icon.pressed {
+  background: var(--wash);
+}
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+input:not([type]),
+input[type='text'],
+textarea {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+}
+h1,
+h2,
+p,
+blockquote,
+ul,
+ol {
+  margin: 0;
+}
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+}
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+}
+a {
+  color: var(--primary);
+}
+blockquote {
+  padding: 6px 10px;
+  border-left: 3px solid var(--border-strong);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.muted {
+  color: var(--muted);
+}
+.small,
+small {
+  font-size: 12px;
+}
 
 /* Single-column grids must not grow to fit nowrap text (purposes, tab titles); let it ellipsize or wrap.
    Each component applies the same rule to its own grids. */
-.card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raised); display: grid; gap: 8px;
-  grid-template-columns: minmax(0, 1fr); }
-.card > * { min-width: 0; }
-.card p, .card h2, .card blockquote, .tab-link { overflow-wrap: anywhere; }
-.card.attention { border-color: color-mix(in srgb, var(--warning) 60%, var(--surface)); }
-.card h2 { display: flex; align-items: center; gap: 8px; }
-.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; min-height: 30px; }
-.section-head h2 { text-transform: uppercase; letter-spacing: .04em; font-size: 11px; color: var(--muted); }
-.head-actions { display: flex; align-items: center; gap: 6px; }
-.tab-link { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--wash); color: var(--muted); }
-.chip.warn { background: var(--warning-bg); color: var(--warning); }
-.chip.bad { color: var(--danger); }
+.card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.card > * {
+  min-width: 0;
+}
+.card p,
+.card h2,
+.card blockquote,
+.tab-link {
+  overflow-wrap: anywhere;
+}
+.card.attention {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--surface));
+}
+.card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  min-height: 30px;
+}
+.section-head h2 {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  color: var(--muted);
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tab-link {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--wash);
+  color: var(--muted);
+}
+.chip.warn {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.chip.bad {
+  color: var(--danger);
+}

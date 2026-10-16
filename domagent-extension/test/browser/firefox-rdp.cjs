@@ -7,7 +7,7 @@ async function freePort() {
     server.listen(0, '127.0.0.1', resolve);
   });
   const port = server.address().port;
-  await new Promise(resolve => server.close(resolve));
+  await new Promise((resolve) => server.close(resolve));
   return port;
 }
 
@@ -15,13 +15,13 @@ async function connect(port) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const socket = net.connect(port, '127.0.0.1');
-    const connected = await new Promise(resolve => {
+    const connected = await new Promise((resolve) => {
       socket.once('connect', () => resolve(true));
       socket.once('error', () => resolve(false));
     });
     if (connected) return socket;
     socket.destroy();
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('Firefox remote debugger did not start');
 }
@@ -34,7 +34,7 @@ async function installTemporaryAddon(port, addonPath) {
   const greeting = new Promise((resolve, reject) => {
     pending = { actor: 'root', resolve, reject };
   });
-  socket.on('data', data => {
+  socket.on('data', (data) => {
     buffer = Buffer.concat([buffer, data]);
     while (buffer.length) {
       const colon = buffer.indexOf(':');
@@ -61,13 +61,14 @@ async function installTemporaryAddon(port, addonPath) {
       }
     }
   });
-  socket.on('error', error => pending?.reject(error));
+  socket.on('error', (error) => pending?.reject(error));
   socket.on('close', () => pending?.reject(new Error('Firefox RDP connection closed')));
-  const request = (actor, type, extra = {}) => new Promise((resolve, reject) => {
-    pending = { actor, resolve, reject };
-    const json = JSON.stringify({ to: actor, type, ...extra });
-    socket.write(`${Buffer.byteLength(json)}:${json}`);
-  });
+  const request = (actor, type, extra = {}) =>
+    new Promise((resolve, reject) => {
+      pending = { actor, resolve, reject };
+      const json = JSON.stringify({ to: actor, type, ...extra });
+      socket.write(`${Buffer.byteLength(json)}:${json}`);
+    });
   const timeout = setTimeout(() => {
     pending?.reject(new Error('Firefox temporary-addon installation timed out'));
     socket.destroy();
@@ -82,12 +83,12 @@ async function installTemporaryAddon(port, addonPath) {
     console.log('[firefox RDP] addon installed');
     if (!addon.addon?.id) throw new Error('Firefox did not confirm extension installation');
     const listed = await request('root', 'listAddons');
-    const descriptor = listed.addons?.find(entry => entry.id === addon.addon.id);
+    const descriptor = listed.addons?.find((entry) => entry.id === addon.addon.id);
     console.log('[firefox RDP] addon descriptor', JSON.stringify(descriptor));
-    if (!descriptor || descriptor.warnings?.length) throw new Error('Firefox addon descriptor missing or has manifest warnings');
+    if (!descriptor || descriptor.warnings?.length)
+      throw new Error('Firefox addon descriptor missing or has manifest warnings');
     let optionsUrl;
-    if (process.env.DOMAGENT_FIREFOX_DIAGNOSTICS === '1' ||
-        process.env.DOMAGENT_FIREFOX_NATIVE_OPTIONS === '1') {
+    if (process.env.DOMAGENT_FIREFOX_DIAGNOSTICS === '1' || process.env.DOMAGENT_FIREFOX_NATIVE_OPTIONS === '1') {
       const { processDescriptor } = await request('root', 'getProcess', { id: 0 });
       const { process: processTarget } = await request(processDescriptor.actor, 'getTarget');
       if (!processTarget.consoleActor) throw new Error('Firefox parent console unavailable for diagnostics');
@@ -113,7 +114,7 @@ async function installTemporaryAddon(port, addonPath) {
       });
       const deadline = Date.now() + 5000;
       while (!evaluations.has(resultID) && Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
       const evaluation = evaluations.get(resultID);
       if (!evaluation || evaluation.hasException || typeof evaluation.result !== 'string') {
@@ -122,7 +123,7 @@ async function installTemporaryAddon(port, addonPath) {
       console.log('[firefox parent diagnostic]', evaluation.result);
       optionsUrl = JSON.parse(evaluation.result).options.page;
       if (process.env.DOMAGENT_FIREFOX_NATIVE_OPTIONS === '1') {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
         const next = await request(processTarget.consoleActor, 'evaluateJSAsync', {
           text: `JSON.stringify((() => {
             const window = Services.wm.getMostRecentWindow("navigator:browser");
@@ -139,7 +140,7 @@ async function installTemporaryAddon(port, addonPath) {
         });
         const nextDeadline = Date.now() + 5000;
         while (!evaluations.has(next.resultID) && Date.now() < nextDeadline) {
-          await new Promise(resolve => setTimeout(resolve, 50));
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         const native = evaluations.get(next.resultID);
         console.log('[firefox native tab/browser errors]', native?.result || native?.exceptionMessage);

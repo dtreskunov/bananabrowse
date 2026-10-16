@@ -8,7 +8,9 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(path.join(root, 'domagent-mcp/package.json'));
 const { build } = require('esbuild');
 const source = path.join(root, 'domagent-extension');
-const typecheck = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', source], { stdio: 'inherit' });
+const typecheck = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', source], {
+  stdio: 'inherit',
+});
 if (typecheck.status !== 0) process.exit(typecheck.status || 1);
 const uiBuild = spawnSync('npm', ['run', 'build'], { cwd: path.join(source, 'ui'), stdio: 'inherit' });
 if (uiBuild.status !== 0) process.exit(uiBuild.status || 1);
@@ -22,10 +24,14 @@ for (const browser of ['chrome', 'firefox']) {
   await mkdir(output, { recursive: true });
   await build({
     entryPoints: { background: path.join(source, 'src/background.ts') },
-    bundle: true, outdir: output, format: 'iife', platform: 'browser',
+    bundle: true,
+    outdir: output,
+    format: 'iife',
+    platform: 'browser',
     target: browser === 'chrome' ? 'chrome118' : 'firefox128',
     define: { BUILD_BROWSER: JSON.stringify(browser) },
-    legalComments: 'none', logLevel: 'warning',
+    legalComments: 'none',
+    logLevel: 'warning',
   });
   await cp(path.join(source, browser, 'icons'), path.join(output, 'icons'), { recursive: true });
   await cp(path.join(source, 'ui/dist'), output, { recursive: true });

@@ -1,7 +1,35 @@
-.settings { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
-.field { display: grid; gap: 4px; grid-template-columns: minmax(0, 1fr); }
-.field .label, .field label { font-weight: 600; }
-.inline { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
-.plain { list-style: none; padding: 0; display: grid; gap: 6px; }
-.check { display: flex; gap: 8px; align-items: center; }
-.danger-zone { padding-top: 8px; border-top: 1px solid var(--border); }
+.settings {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.field {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.field .label,
+.field label {
+  font-weight: 600;
+}
+.inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.plain {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.danger-zone {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}

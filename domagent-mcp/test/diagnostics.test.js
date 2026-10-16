@@ -21,8 +21,16 @@ test('beta7 diagnosticDetails returns the spread wrapper with complete stack/cau
 });
 
 test('beta7 browser-provided diagnostics take precedence and remain safe to spread', () => {
-  const original = { name: 'SyntaxError', message: 'Native parse failure', stack: 'full\nstack', cause: { message: 'nested' } };
-  const result = diagnosticDetails({ message: 'do not use', diagnostics: original }, { execution_world: 'USER_SCRIPT' });
+  const original = {
+    name: 'SyntaxError',
+    message: 'Native parse failure',
+    stack: 'full\nstack',
+    cause: { message: 'nested' },
+  };
+  const result = diagnosticDetails(
+    { message: 'do not use', diagnostics: original },
+    { execution_world: 'USER_SCRIPT' },
+  );
   assert.deepEqual(result, { diagnostics: { ...original, execution_world: 'USER_SCRIPT' } });
   assert.notEqual(result.diagnostics, original);
   for (const value of [null, false, '', [], 1, undefined]) assert.equal(sanitizeDiagnostics(value), undefined);
@@ -47,13 +55,23 @@ test('beta7 diagnostics redact credentials, cookie/auth headers and arbitrary UR
   const input = {
     message: `Failed https://user:${sentinel}@page.test/path?unexpected=${sentinel}#${sentinel}`,
     stack: `Error: request\n at https://page.test/app.js?access_token=${sentinel}:12:3`,
-    cause: { message: `Bearer ${sentinel}\nCookie: session=${sentinel}\npassword="${sentinel}" token=${sentinel}`,
-      quotedHeaders: `{"Authorization":"${sentinel}","Cookie":"${sentinel}"}` },
-    native: { Authorization: sentinel, 'Set-Cookie': sentinel, cookie: { nested: sentinel },
-      api_key: sentinel, clientKey: sentinel, headers: [{ name: 'Authorization', value: sentinel }],
-      url: `https://page.test/token/${sentinel}`, ok: 'useful detail' },
+    cause: {
+      message: `Bearer ${sentinel}\nCookie: session=${sentinel}\npassword="${sentinel}" token=${sentinel}`,
+      quotedHeaders: `{"Authorization":"${sentinel}","Cookie":"${sentinel}"}`,
+    },
+    native: {
+      Authorization: sentinel,
+      'Set-Cookie': sentinel,
+      cookie: { nested: sentinel },
+      api_key: sentinel,
+      clientKey: sentinel,
+      headers: [{ name: 'Authorization', value: sentinel }],
+      url: `https://page.test/token/${sentinel}`,
+      ok: 'useful detail',
+    },
   };
-  const result = sanitizeDiagnostics(input), serialized = JSON.stringify(result);
+  const result = sanitizeDiagnostics(input),
+    serialized = JSON.stringify(result);
   assert(!serialized.includes(sentinel));
   assert(!serialized.includes('https://user:'));
   assert(serialized.includes('redacted'));
@@ -68,7 +86,12 @@ test('beta7 native diagnostics bound strings, depth, entries, cycles and getters
   let nested = input.details;
   for (let index = 0; index < 20; index++) nested = nested.child = {};
   input.native = Array.from({ length: 1000 }, () => ({ message: 'x'.repeat(6000) }));
-  Object.defineProperty(input, 'getter', { enumerable: true, get() { throw new Error('must not run'); } });
+  Object.defineProperty(input, 'getter', {
+    enumerable: true,
+    get() {
+      throw new Error('must not run');
+    },
+  });
   const result = sanitizeDiagnostics(input);
   assert.equal(result.truncated, true);
   assert(result.truncation_reasons.includes('string'));
@@ -97,12 +120,26 @@ test('agent-facing diagnostics drop stacks, causes and native objects and bound 
 });
 
 test('errorDetails projects only whitelisted, well-formed details per code', () => {
-  assert.deepEqual(errorDetails({ code: 'ELEMENT_STALE', stale_reason: 'ref_superseded', current_document: 'abcdef0123',
-    snapshot_document: 'not hex!', extra: 'x' }), { stale_reason: 'ref_superseded', current_document: 'abcdef0123' });
+  assert.deepEqual(
+    errorDetails({
+      code: 'ELEMENT_STALE',
+      stale_reason: 'ref_superseded',
+      current_document: 'abcdef0123',
+      snapshot_document: 'not hex!',
+      extra: 'x',
+    }),
+    { stale_reason: 'ref_superseded', current_document: 'abcdef0123' },
+  );
   assert.deepEqual(errorDetails({ code: 'ELEMENT_STALE', stale_reason: 'made_up' }), {});
-  assert.deepEqual(errorDetails({ code: 'RESULT_TOO_LARGE', actual_bytes: 10, limit_bytes: 5 }), { actual_bytes: 10, limit_bytes: 5 });
-  assert.deepEqual(errorDetails({ code: 'SCRIPT_SYNTAX_ERROR', line: 2, column: 11, snippet: 'const b = ;' }),
-    { line: 2, column: 11, snippet: 'const b = ;' });
+  assert.deepEqual(errorDetails({ code: 'RESULT_TOO_LARGE', actual_bytes: 10, limit_bytes: 5 }), {
+    actual_bytes: 10,
+    limit_bytes: 5,
+  });
+  assert.deepEqual(errorDetails({ code: 'SCRIPT_SYNTAX_ERROR', line: 2, column: 11, snippet: 'const b = ;' }), {
+    line: 2,
+    column: 11,
+    snippet: 'const b = ;',
+  });
   assert.deepEqual(errorDetails({ code: 'SCRIPT_RUNTIME_ERROR', line: -1, snippet: 'x'.repeat(301) }), {});
   assert.deepEqual(errorDetails({ code: 'ELEMENT_NOT_FOUND', line: 3 }), {});
 });

@@ -47,7 +47,10 @@ test('script/mutation values are never truncated into a success-shaped partial r
     const exact = { value: 'x'.repeat(max_output_bytes - overhead) };
     assert.equal(resultBytes(exact), max_output_bytes);
     assert.deepEqual(compactResult('evaluate_script', exact, { max_output_bytes }), exact);
-    assert.throws(() => compactResult('evaluate_script', { value: exact.value + 'x' }, { max_output_bytes }), /RESULT_TOO_LARGE/);
+    assert.throws(
+      () => compactResult('evaluate_script', { value: exact.value + 'x' }, { max_output_bytes }),
+      /RESULT_TOO_LARGE/,
+    );
   }
   for (const operation of ['evaluate_script', 'click', 'list_browser_targets']) {
     assert.throws(() => compactResult(operation, { value: 'x'.repeat(100_000) }), /RESULT_TOO_LARGE/);
@@ -60,8 +63,14 @@ test('script/mutation values are never truncated into a success-shaped partial r
   }
   assert.throws(() => compactResult('get_text', { text: 12 }), /INVALID_RESULT/);
   assert.throws(() => compactResult('get_text', { text: 'small' }, { max_text_chars: 16001 }), /INVALID_ARGUMENT/);
-  assert.throws(() => compactResult('get_interactive_elements', { elements: [] }, { max_elements: 101 }), /INVALID_ARGUMENT/);
+  assert.throws(
+    () => compactResult('get_interactive_elements', { elements: [] }, { max_elements: 101 }),
+    /INVALID_ARGUMENT/,
+  );
   assert.throws(() => compactResult('click', undefined), /INVALID_RESULT/);
   assert.throws(() => compactResult('get_page_snapshot', { text: 'small', elements: null }), /INVALID_RESULT/);
-  assert.throws(() => compactResult('get_text', { text: 'small', unexpected: 'x'.repeat(100_000) }), /RESULT_TOO_LARGE/);
+  assert.throws(
+    () => compactResult('get_text', { text: 'small', unexpected: 'x'.repeat(100_000) }),
+    /RESULT_TOO_LARGE/,
+  );
 });

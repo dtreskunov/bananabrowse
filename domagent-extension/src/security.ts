@@ -23,12 +23,23 @@ export function id(value: unknown): string {
 
 export function originList(values: unknown): string[] {
   if (!Array.isArray(values) || values.length > 128) fail('INVALID_MESSAGE');
-  return [...new Set((values as unknown[]).map(value => {
-    const url = new URL(text(value, 2048));
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password ||
-        url.search || url.hash || url.pathname !== '/') fail('INVALID_ORIGIN');
-    return url.origin;
-  }))];
+  return [
+    ...new Set(
+      (values as unknown[]).map((value) => {
+        const url = new URL(text(value, 2048));
+        if (
+          !['https:', 'http:'].includes(url.protocol) ||
+          url.username ||
+          url.password ||
+          url.search ||
+          url.hash ||
+          url.pathname !== '/'
+        )
+          fail('INVALID_ORIGIN');
+        return url.origin;
+      }),
+    ),
+  ];
 }
 
 export function protectedUnion(origin: string, ...lists: unknown[]): string[] {
@@ -37,26 +48,72 @@ export function protectedUnion(origin: string, ...lists: unknown[]): string[] {
 
 export function errorCode(error: any): string {
   const known = [
-    'INVALID_MESSAGE', 'INVALID_ARGUMENT', 'INVALID_ORIGIN', 'INVALID_SERVICE_ORIGIN',
-    'NOT_AUTHORIZED', 'APPROVAL_REQUIRED', 'BROWSER_OFFLINE', 'TARGET_STALE',
-    'CAPABILITY_UNAVAILABLE', 'HANDOFF_REQUIRED', 'OUTCOME_UNKNOWN', 'QUEUE_FULL',
-    'ELEMENT_NOT_FOUND', 'INVALID_SELECTOR', 'PAGE_UNAVAILABLE',
-    'RESULT_TOO_LARGE', 'ENROLLMENT_EXPIRED', 'COMMAND_EXPIRED',
-    'PERMISSION_REQUIRED', 'PROTECTION_UNAVAILABLE', 'INVALID_TENANT', 'INVALID_CONNECTION_LINK',
-    'INDICATOR_UNAVAILABLE', 'ACTION_DECLINED', 'COMMAND_CANCELLED',
-    'ELEMENT_AMBIGUOUS', 'ELEMENT_STALE', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
-    'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'ELEMENT_NOT_EDITABLE', 'OPTION_NOT_FOUND', 'WAIT_TIMEOUT',
+    'INVALID_MESSAGE',
+    'INVALID_ARGUMENT',
+    'INVALID_ORIGIN',
+    'INVALID_SERVICE_ORIGIN',
+    'NOT_AUTHORIZED',
+    'APPROVAL_REQUIRED',
+    'BROWSER_OFFLINE',
+    'TARGET_STALE',
+    'CAPABILITY_UNAVAILABLE',
+    'HANDOFF_REQUIRED',
+    'OUTCOME_UNKNOWN',
+    'QUEUE_FULL',
+    'ELEMENT_NOT_FOUND',
+    'INVALID_SELECTOR',
+    'PAGE_UNAVAILABLE',
+    'RESULT_TOO_LARGE',
+    'ENROLLMENT_EXPIRED',
+    'COMMAND_EXPIRED',
+    'PERMISSION_REQUIRED',
+    'PROTECTION_UNAVAILABLE',
+    'INVALID_TENANT',
+    'INVALID_CONNECTION_LINK',
+    'INDICATOR_UNAVAILABLE',
+    'ACTION_DECLINED',
+    'COMMAND_CANCELLED',
+    'ELEMENT_AMBIGUOUS',
+    'ELEMENT_STALE',
+    'ELEMENT_DISABLED',
+    'ELEMENT_READONLY',
+    'ELEMENT_NOT_VISIBLE',
+    'ELEMENT_OBSCURED',
+    'ELEMENT_NOT_EDITABLE',
+    'OPTION_NOT_FOUND',
+    'WAIT_TIMEOUT',
     'OPERATION_FAILED',
-    'SCRIPT_POLICY_BLOCKED', 'SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR',
-    'SCRIPT_SERIALIZATION_ERROR', 'SCRIPT_EXECUTION_UNAVAILABLE', 'INVALID_RESULT',
-    'WORKSPACE_CHANGED', 'PANEL_OPEN_REQUIRED',
+    'SCRIPT_POLICY_BLOCKED',
+    'SCRIPT_SYNTAX_ERROR',
+    'SCRIPT_RUNTIME_ERROR',
+    'SCRIPT_SERIALIZATION_ERROR',
+    'SCRIPT_EXECUTION_UNAVAILABLE',
+    'INVALID_RESULT',
+    'WORKSPACE_CHANGED',
+    'PANEL_OPEN_REQUIRED',
     'HISTORY_UNAVAILABLE',
-    'PLATFORM_UNSUPPORTED', 'WORKSPACE_PAUSED', 'WORKSPACE_INACTIVE', 'TAB_NOT_IN_WORKSPACE',
-    'DOCUMENT_NOT_CONTROLLABLE', 'TAB_LIMIT_REACHED', 'NOTIFICATION_UNAVAILABLE',
-    'PAIRING_UNAVAILABLE', 'PAIRING_CODE_COLLISION', 'RATE_LIMITED',
-    'UPGRADE_REQUIRED', 'WORKSPACE_LIMIT',
-    'GROUP_UNAVAILABLE', 'SESSION_DETACHED', 'SESSION_ENDED', 'TAB_NOT_IN_SESSION', 'BROWSER_REVOKED',
-    'INVALID_SERVICE', 'SERVICE_UNREACHABLE', 'ALREADY_OPEN', 'CLIPBOARD_UNAVAILABLE', 'ACTION_EXPIRED',
+    'PLATFORM_UNSUPPORTED',
+    'WORKSPACE_PAUSED',
+    'WORKSPACE_INACTIVE',
+    'TAB_NOT_IN_WORKSPACE',
+    'DOCUMENT_NOT_CONTROLLABLE',
+    'TAB_LIMIT_REACHED',
+    'NOTIFICATION_UNAVAILABLE',
+    'PAIRING_UNAVAILABLE',
+    'PAIRING_CODE_COLLISION',
+    'RATE_LIMITED',
+    'UPGRADE_REQUIRED',
+    'WORKSPACE_LIMIT',
+    'GROUP_UNAVAILABLE',
+    'SESSION_DETACHED',
+    'SESSION_ENDED',
+    'TAB_NOT_IN_SESSION',
+    'BROWSER_REVOKED',
+    'INVALID_SERVICE',
+    'SERVICE_UNREACHABLE',
+    'ALREADY_OPEN',
+    'CLIPBOARD_UNAVAILABLE',
+    'ACTION_EXPIRED',
   ];
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }

@@ -2,28 +2,40 @@ import type { Wire } from './protocol.js';
 
 const LIMITS = Object.freeze({ depth: 6, entries: 128, array: 32, string: 4096, stack: 16384, total: 24576 });
 const REDACTED = '[redacted]';
-const PRIVATE_KEY = /(?:authorization|authentication|proxyauthorization|cookie|credential|password|passwd|secret|token|apikey|sessionid|clientkey|privatekey)/i;
+const PRIVATE_KEY =
+  /(?:authorization|authentication|proxyauthorization|cookie|credential|password|passwd|secret|token|apikey|sessionid|clientkey|privatekey)/i;
 const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get ||
+const nativeStackGetter =
+  Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get ||
   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')?.get;
 
 function redact(value: string): string {
   return value
-    .replace(/\b(?:https?|wss?):\/\/[^\s<>"']+/gi, raw => {
+    .replace(/\b(?:https?|wss?):\/\/[^\s<>"']+/gi, (raw) => {
       try {
         const url = new URL(raw);
-        if (url.username || url.password) { url.username = 'redacted'; url.password = ''; }
+        if (url.username || url.password) {
+          url.username = 'redacted';
+          url.password = '';
+        }
         // Query values and fragments can contain credentials under arbitrary names.
         for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, REDACTED);
         if (url.hash) url.hash = REDACTED;
         url.pathname = url.pathname.replace(/\/(token|secret|password|apikey|api-key)\/[^/]+/gi, '/$1/redacted');
         return url.href;
-      } catch { return '[redacted URL]'; }
+      } catch {
+        return '[redacted URL]';
+      }
     })
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/gi, '$1 [redacted]')
-    .replace(/\b((?:proxy-)?authorization|(?:set-)?cookie)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n]+)/gi, '$1: [redacted]')
-    .replace(/(["']?(?:password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|credential)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
-      '$1[redacted]');
+    .replace(
+      /\b((?:proxy-)?authorization|(?:set-)?cookie)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\r\n]+)/gi,
+      '$1: [redacted]',
+    )
+    .replace(
+      /(["']?(?:password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|credential)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi,
+      '$1[redacted]',
+    );
 }
 
 function dataProperty(input: unknown, key: string): unknown {
@@ -45,12 +57,18 @@ function dataProperty(input: unknown, key: string): unknown {
 /** Sanitize untrusted browser/native diagnostics without evaluating getters or retaining references. */
 export function sanitizeDiagnostics(input: unknown): Wire | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
-  const ancestors = new WeakSet<object>(), reasons = new Set<string>();
-  let entries = 0, remaining = LIMITS.total;
-  const truncated = (reason: string) => { reasons.add(reason); return `[truncated:${reason}]`; };
+  const ancestors = new WeakSet<object>(),
+    reasons = new Set<string>();
+  let entries = 0,
+    remaining = LIMITS.total;
+  const truncated = (reason: string) => {
+    reasons.add(reason);
+    return `[truncated:${reason}]`;
+  };
   const string = (value: string, key: string) => {
     // Redact before clipping, so clipping cannot expose part of a credential.
-    const safe = redact(value), limit = Math.min(key === 'stack' ? LIMITS.stack : LIMITS.string, remaining);
+    const safe = redact(value),
+      limit = Math.min(key === 'stack' ? LIMITS.stack : LIMITS.string, remaining);
     remaining -= Math.min(safe.length, limit);
     if (safe.length <= limit) return safe;
     reasons.add(remaining === 0 ? 'total' : 'string');
@@ -62,25 +80,39 @@ export function sanitizeDiagnostics(input: unknown): Wire | undefined {
     if (value === null || typeof value === 'boolean') return value;
     if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
     if (typeof value !== 'object') return undefined;
-    if (ancestors.has(value)) { reasons.add('cycle'); return '[circular]'; }
+    if (ancestors.has(value)) {
+      reasons.add('cycle');
+      return '[circular]';
+    }
     if (depth > LIMITS.depth) return truncated('depth');
     if (remaining <= 0) return truncated('total');
     ancestors.add(value);
     const result: unknown[] | Wire = Array.isArray(value) ? [] : {};
     const headerName = dataProperty(value, 'name') || dataProperty(value, 'header');
     const privateHeader = typeof headerName === 'string' && PRIVATE_KEY.test(headerName.replace(/[^a-z0-9]/gi, ''));
-    const keys = value instanceof Error
-      ? [...new Set(['name', 'message', 'stack', 'cause', ...Object.keys(value)])] : Object.keys(value);
+    const keys =
+      value instanceof Error
+        ? [...new Set(['name', 'message', 'stack', 'cause', ...Object.keys(value)])]
+        : Object.keys(value);
     let count = 0;
     for (const childKey of keys) {
       if (UNSAFE_KEYS.has(childKey)) continue;
       if (entries >= LIMITS.entries || (Array.isArray(value) && count >= LIMITS.array)) {
-        reasons.add('entries'); break;
+        reasons.add('entries');
+        break;
       }
-      if (remaining <= 0) { reasons.add('total'); break; }
-      if (childKey.length > 128) { reasons.add('key'); continue; }
-      entries++; count++;
-      const child = privateHeader && childKey === 'value' ? REDACTED : visit(dataProperty(value, childKey), depth + 1, childKey);
+      if (remaining <= 0) {
+        reasons.add('total');
+        break;
+      }
+      if (childKey.length > 128) {
+        reasons.add('key');
+        continue;
+      }
+      entries++;
+      count++;
+      const child =
+        privateHeader && childKey === 'value' ? REDACTED : visit(dataProperty(value, childKey), depth + 1, childKey);
       if (child === undefined) continue;
       if (Array.isArray(result)) result.push(child);
       else result[childKey] = child;
@@ -90,7 +122,10 @@ export function sanitizeDiagnostics(input: unknown): Wire | undefined {
   };
   try {
     const result = visit(input, 0) as Wire;
-    if (reasons.size) { result.truncated = true; result.truncation_reasons = [...reasons]; }
+    if (reasons.size) {
+      result.truncated = true;
+      result.truncation_reasons = [...reasons];
+    }
     return Object.keys(result).length ? result : undefined;
   } catch {
     // Host objects/proxies are not allowed to turn diagnostic projection into a failure.
@@ -104,10 +139,21 @@ export function diagnosticDetails(error: unknown, context: Wire = {}): { diagnos
   try {
     source = dataProperty(error, 'diagnostics') as Wire;
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
-      source = { name: dataProperty(error, 'name') || 'Error',
+      source = {
+        name: dataProperty(error, 'name') || 'Error',
         message: dataProperty(error, 'message') || dataProperty(error, 'code') || 'Browser execution failed',
-        stack: dataProperty(error, 'stack') };
-      for (const key of ['cause', 'exception', 'details', 'native', 'browser', 'fileName', 'lineNumber', 'columnNumber']) {
+        stack: dataProperty(error, 'stack'),
+      };
+      for (const key of [
+        'cause',
+        'exception',
+        'details',
+        'native',
+        'browser',
+        'fileName',
+        'lineNumber',
+        'columnNumber',
+      ]) {
         const value = dataProperty(error, key);
         if (value !== undefined) source[key] = value;
       }
@@ -117,7 +163,9 @@ export function diagnosticDetails(error: unknown, context: Wire = {}): { diagnos
         if (value !== undefined) source[key] = value;
       }
     }
-  } catch { source = { name: 'Error', message: 'Browser execution failed' }; }
+  } catch {
+    source = { name: 'Error', message: 'Browser execution failed' };
+  }
   const diagnostics = sanitizeDiagnostics(source) || {};
   const safeContext = sanitizeDiagnostics(context) || {};
   return { diagnostics: sanitizeDiagnostics({ ...safeContext, ...diagnostics }) || {} };

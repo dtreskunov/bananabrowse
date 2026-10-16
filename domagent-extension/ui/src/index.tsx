@@ -5,8 +5,8 @@ import { boot, localError } from './runtime';
 
 const root = document.getElementById('app');
 if (!root) throw new Error('INVALID_MESSAGE');
-render(<App/>, root);
-void boot().catch(error => {
+render(<App />, root);
+void boot().catch((error) => {
   localError.value = error?.code || error?.message || 'INVALID_MESSAGE';
   console.error('DomAgent:', localError.value);
 });

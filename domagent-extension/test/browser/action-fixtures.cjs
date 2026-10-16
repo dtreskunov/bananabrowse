@@ -70,18 +70,31 @@ async function exerciseActions(call) {
   const styled = await result('inspect_element', { selector: '#styled-check' });
   assert.equal(styled.activation.kind, 'associated_label');
   await result('set_checked', { selector: '#styled-check', checked: true });
-  assert.equal((await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value, true);
+  assert.equal(
+    (await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value,
+    true,
+  );
   await result('click', { selector: '#styled-label' });
-  assert.equal((await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value, false);
-  for (const secret of ['fixture-password-secret', 'fixture-textarea-secret', 'fixture-editable-secret',
-    'fixture-readonly-secret', 'fixture-hidden-secret', 'Stop sharing', 'Unshared iframe control']) {
+  assert.equal(
+    (await result('evaluate_script', { script: 'document.querySelector("#styled-check").checked' })).value,
+    false,
+  );
+  for (const secret of [
+    'fixture-password-secret',
+    'fixture-textarea-secret',
+    'fixture-editable-secret',
+    'fixture-readonly-secret',
+    'fixture-hidden-secret',
+    'Stop sharing',
+    'Unshared iframe control',
+  ]) {
     assert.equal(JSON.stringify(snapshot).includes(secret), false, secret);
   }
-  const edit = snapshot.elements.find(element => element.name === 'Account nickname');
+  const edit = snapshot.elements.find((element) => element.name === 'Account nickname');
   assert.equal(edit.role, 'textbox');
   assert.equal(edit.editable, true);
   assert.equal(edit.value_redacted, true);
-  assert.equal(snapshot.elements.find(element => element.name === 'Disabled action').disabled, true);
+  assert.equal(snapshot.elements.find((element) => element.name === 'Disabled action').disabled, true);
   const title = await result('get_text', { selector: 'head > title' });
   assert.equal(title.text, snapshot.title);
   assert.equal(title.text_source, 'document_title');
@@ -91,12 +104,18 @@ async function exerciseActions(call) {
   assert.equal(hidden.text, '');
   const geometry = await result('get_interactive_elements');
   assert.equal(geometry.coordinate_system, 'viewport');
-  assert.equal(geometry.elements.some(element => element.id === 'truly-hidden'), false);
-  assert.equal(geometry.elements.find(element => element.id === 'offscreen').in_viewport, false);
-  assert.equal(geometry.elements.find(element => element.id === 'disabled').disabled, true);
+  assert.equal(
+    geometry.elements.some((element) => element.id === 'truly-hidden'),
+    false,
+  );
+  assert.equal(geometry.elements.find((element) => element.id === 'offscreen').in_viewport, false);
+  assert.equal(geometry.elements.find((element) => element.id === 'disabled').disabled, true);
   const target = { ref: edit.ref, document: snapshot.document };
   await result('type_text', { ...target, text: 'Updated nickname' });
-  assert.equal((await result('evaluate_script', { script: 'document.querySelector("#edit").value' })).value, 'Updated nickname');
+  assert.equal(
+    (await result('evaluate_script', { script: 'document.querySelector("#edit").value' })).value,
+    'Updated nickname',
+  );
   await error('click', { selector: '.duplicate' }, 'ELEMENT_AMBIGUOUS');
   await error('click', { selector: '#disabled' }, 'ELEMENT_DISABLED');
   await error('type_text', { selector: '#readonly', text: 'No change' }, 'ELEMENT_READONLY');
@@ -114,7 +133,7 @@ async function exerciseActions(call) {
   assert.equal(keyboard.native_input, false);
   assert.equal((await result('get_text', { selector: '#key-result' })).text, 'Enter');
   assert.equal((await result('scroll', { selector: '#scrollable', delta_y: 100 })).y, 100);
-  const shadow = snapshot.elements.find(element => element.name === 'Shadow action');
+  const shadow = snapshot.elements.find((element) => element.name === 'Shadow action');
   await result('click', { ref: shadow.ref, document: snapshot.document });
   assert.equal((await result('get_text', { selector: '#shadow-result' })).text, 'Shadow clicked');
   await result('evaluate_script', { script: 'document.querySelector("#edit").outerHTML = "<input id=edit>"' });
@@ -122,10 +141,14 @@ async function exerciseActions(call) {
   await error('click', { ref: shadow.ref, document: 'different-document' }, 'TARGET_STALE');
   const next = await result('get_page_snapshot');
   assert.equal(next.document, snapshot.document);
-  assert.equal(next.elements.some(element => element.ref === shadow.ref), false);
+  assert.equal(
+    next.elements.some((element) => element.ref === shadow.ref),
+    false,
+  );
   await error('click', { ref: shadow.ref, document: snapshot.document }, 'ELEMENT_STALE');
   assert.equal((await result('wait_for_page')).state, 'loaded');
-  await result('evaluate_script', { script: `(() => {
+  await result('evaluate_script', {
+    script: `(() => {
     const bulk = document.createElement('section');
     bulk.id = 'bulk-fixture';
     const text = document.createElement('p');
@@ -137,7 +160,8 @@ async function exerciseActions(call) {
     }
     document.body.append(bulk);
     return true;
-  })()` });
+  })()`,
+  });
   for (const name of ['get_page_snapshot', 'get_interactive_elements', 'get_text']) {
     const response = await call(name, name === 'get_text' ? { selector: '#bulk-text' } : {});
     assert.notEqual(response.isError, true);
@@ -149,20 +173,33 @@ async function exerciseActions(call) {
   }
   const focused = await result('get_page_snapshot', { selector: '#scrollable', max_text_chars: 0 });
   assert.equal(focused.text, '');
-  assert.equal(focused.elements.some(element => element.name.startsWith('Bulk button')), false);
+  assert.equal(
+    focused.elements.some((element) => element.name.startsWith('Bulk button')),
+    false,
+  );
   const large = await call('evaluate_script', { script: '"x".repeat(100000)' });
   assert.equal(large.isError, true);
   assert.equal(JSON.parse(large.content[0].text).error, 'RESULT_TOO_LARGE');
-  const artifact = await result('evaluate_script', { script: '"x".repeat(100000)', return_as: 'artifact',
-    artifact_name: 'bulk.txt' });
+  const artifact = await result('evaluate_script', {
+    script: '"x".repeat(100000)',
+    return_as: 'artifact',
+    artifact_name: 'bulk.txt',
+  });
   assert.deepEqual([artifact.artifact.bytes, artifact.artifact.mime], [100000, 'text/plain']);
-  const json = await result('evaluate_script', { script: 'const rows = await Promise.resolve([{ a: 1 }, { a: 2 }]);\nrows',
-    return_as: 'artifact' });
+  const json = await result('evaluate_script', {
+    script: 'const rows = await Promise.resolve([{ a: 1 }, { a: 2 }]);\nrows',
+    return_as: 'artifact',
+  });
   assert.deepEqual(json.shape, { type: 'array', length: 2, item_keys: ['a'] });
   assert.equal((await result('evaluate_script', { script: 'return document.title;' })).value, snapshot.title);
-  assert.equal((await result('evaluate_script', {
-    script: 'const title = await Promise.resolve(document.title);\ntitle',
-  })).value, snapshot.title);
+  assert.equal(
+    (
+      await result('evaluate_script', {
+        script: 'const title = await Promise.resolve(document.title);\ntitle',
+      })
+    ).value,
+    snapshot.title,
+  );
   const syntax = await call('evaluate_script', { script: 'const a = 1;\nconst = ;' });
   assert.equal(syntax.isError, true);
   const syntaxError = JSON.parse(syntax.content[0].text);
@@ -180,18 +217,35 @@ async function exerciseActions(call) {
   assert.notEqual(loaded.document, snapshot.document);
   await error('type_text', { ...target, text: 'Must not cross documents' }, 'TARGET_STALE');
   for (const [name, text] of [
-    ['custname', 'Fixture user'], ['custtel', '12345'], ['custemail', 'fixture@example.org'], ['search', 'fixture search'],
+    ['custname', 'Fixture user'],
+    ['custtel', '12345'],
+    ['custemail', 'fixture@example.org'],
+    ['search', 'fixture search'],
   ]) {
     await result('click', { selector: `input[name="${name}"]` });
-    assert.equal((await result('evaluate_script', {
-      script: `document.activeElement.name`,
-    })).value, name);
+    assert.equal(
+      (
+        await result('evaluate_script', {
+          script: `document.activeElement.name`,
+        })
+      ).value,
+      name,
+    );
     await result('type_text', { selector: `input[name="${name}"]`, text });
-    assert.equal((await result('evaluate_script', {
-      script: `document.querySelector('input[name="${name}"]').value`,
-    })).value, text);
+    assert.equal(
+      (
+        await result('evaluate_script', {
+          script: `document.querySelector('input[name="${name}"]').value`,
+        })
+      ).value,
+      text,
+    );
   }
-  await error('select_option', { selector: 'input[name="size"][value="large"]', value: 'large' }, 'ELEMENT_NOT_EDITABLE');
+  await error(
+    'select_option',
+    { selector: 'input[name="size"][value="large"]', value: 'large' },
+    'ELEMENT_NOT_EDITABLE',
+  );
   await result('click', { selector: 'input[name="size"][value="large"]' });
   await result('set_checked', { selector: 'input[name="topping"][value="bacon"]', checked: true });
   await result('click', { selector: '#submit-fixture' });

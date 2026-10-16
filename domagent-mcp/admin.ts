@@ -15,14 +15,21 @@ const usage = `Usage:
 Database: DOMAGENT_DB (default ./data/domagent.db). The running service picks up
 revocations within a few seconds. Agent configuration changes need a restart.`;
 
-function fail(message: string): never { console.error(message); process.exit(2); }
+function fail(message: string): never {
+  console.error(message);
+  process.exit(2);
+}
 
 if (command === 'agent-key') {
   const [id, name, homepage = ''] = args;
   if (!id || !AGENT_ID_PATTERN.test(id)) fail('Agent ID must be 1-32 lowercase letters, digits or hyphens.');
   if (!validName(name || '')) fail('Provide a display name of at most 80 characters.');
   if (homepage) {
-    try { new URL(homepage); } catch { fail('Homepage must be a URL.'); }
+    try {
+      new URL(homepage);
+    } catch {
+      fail('Homepage must be a URL.');
+    }
   }
   const key = `da_${randomBytes(32).toString('base64url')}`;
   const variable = `DOMAGENT_AGENT_${id.toUpperCase().replaceAll('-', '_')}`;
@@ -31,7 +38,10 @@ if (command === 'agent-key') {
   console.log(`\nMCP endpoint: <DOMAGENT_ORIGIN>/mcp/${id}  (Authorization: Bearer <key>)`);
   process.exit(0);
 }
-if (!command || command === 'help' || command === '--help') { console.log(usage); process.exit(command ? 0 : 2); }
+if (!command || command === 'help' || command === '--help') {
+  console.log(usage);
+  process.exit(command ? 0 : 2);
+}
 
 const store = new Store(process.env.DOMAGENT_DB || './data/domagent.db');
 const time = (value: number) => new Date(value).toISOString();
@@ -44,7 +54,8 @@ try {
     if (!store.deleteBrowser(args[0])) fail('No such browser.');
     console.log(`Revoked ${args[0]}.`);
   } else if (command === 'pairings') {
-    for (const row of store.listPairings()) console.log(`${row.agent_id}\t${row.browser_id}\tsince=${time(row.created_at)}`);
+    for (const row of store.listPairings())
+      console.log(`${row.agent_id}\t${row.browser_id}\tsince=${time(row.created_at)}`);
   } else if (command === 'pairing-revoke') {
     if (!store.unpair(args[0], args[1])) fail('No such pairing.');
     console.log(`Removed pairing ${args[0]} ↔ ${args[1]}.`);
@@ -53,4 +64,6 @@ try {
       console.log(`${row.id}\t${row.agent_id}\t${row.browser_id}\t${row.title}\texpires=${time(row.expires_at)}`);
     }
   } else fail(usage);
-} finally { store.close(); }
+} finally {
+  store.close();
+}

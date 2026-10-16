@@ -5,43 +5,100 @@ import { runInNewContext } from 'node:vm';
 
 function event() {
   const listeners = [];
-  return { listeners, addListener(fn, ...args) { listeners.push({ fn, args }); } };
+  return {
+    listeners,
+    addListener(fn, ...args) {
+      listeners.push({ fn, args });
+    },
+  };
 }
 
 function fixture(browser = 'chrome') {
   const calls = [];
   let sessionRules = [];
   const api = {
-    runtime: { getManifest() { return { version: '4.3.3' }; } },
-    permissions: { async contains() { return true; } },
+    runtime: {
+      getManifest() {
+        return { version: '4.3.3' };
+      },
+    },
+    permissions: {
+      async contains() {
+        return true;
+      },
+    },
     tabs: {
-      onUpdated: event(), onRemoved: event(),
-      onActivated: event(), onCreated: event(), onAttached: event(), onDetached: event(),
-      async query(args) { return [{ id: args.active ? 1 : 100, windowId: 10, active: true, url: 'https://site.example/' }]; },
-      async get(id) { return { id, windowId: 10, active: true, url: 'https://site.example/', status: 'complete' }; },
-      async remove(id) { calls.push(['remove', id]); },
-      async create(args) { calls.push(['create', args]); return { id: 100, ...args }; },
-      async update(id, args) { calls.push(['update', id, args]); },
+      onUpdated: event(),
+      onRemoved: event(),
+      onActivated: event(),
+      onCreated: event(),
+      onAttached: event(),
+      onDetached: event(),
+      async query(args) {
+        return [{ id: args.active ? 1 : 100, windowId: 10, active: true, url: 'https://site.example/' }];
+      },
+      async get(id) {
+        return { id, windowId: 10, active: true, url: 'https://site.example/', status: 'complete' };
+      },
+      async remove(id) {
+        calls.push(['remove', id]);
+      },
+      async create(args) {
+        calls.push(['create', args]);
+        return { id: 100, ...args };
+      },
+      async update(id, args) {
+        calls.push(['update', id, args]);
+      },
     },
     windows: {
-      onFocusChanged: event(), onRemoved: event(),
-      async get() { return { id: 10, type: 'normal' }; },
-      async getAll() { return [{ id: 10, focused: true, type: 'normal' }]; },
-      async create(args) { calls.push(['move', args]); return { id: 10 }; },
+      onFocusChanged: event(),
+      onRemoved: event(),
+      async get() {
+        return { id: 10, type: 'normal' };
+      },
+      async getAll() {
+        return [{ id: 10, focused: true, type: 'normal' }];
+      },
+      async create(args) {
+        calls.push(['move', args]);
+        return { id: 10 };
+      },
     },
-    sidePanel: { async open(args) { calls.push(['panel', args]); }, async setOptions() {} },
-    sidebarAction: { async open() { calls.push(['sidebar']); } },
+    sidePanel: {
+      async open(args) {
+        calls.push(['panel', args]);
+      },
+      async setOptions() {},
+    },
+    sidebarAction: {
+      async open() {
+        calls.push(['sidebar']);
+      },
+    },
     webNavigation: { onBeforeNavigate: event(), onErrorOccurred: event() },
     webRequest: { onBeforeRequest: event() },
     declarativeNetRequest: {
-      async getSessionRules() { return sessionRules; },
-      async updateSessionRules(args) { calls.push(['rules', args]); sessionRules = args.addRules || []; },
+      async getSessionRules() {
+        return sessionRules;
+      },
+      async updateSessionRules(args) {
+        calls.push(['rules', args]);
+        sessionRules = args.addRules || [];
+      },
     },
     debugger: {
-      onDetach: event(), onEvent: event(),
-      async getTargets() { return []; },
-      async attach(args) { calls.push(['attach', args]); },
-      async detach(args) { calls.push(['detach', args]); },
+      onDetach: event(),
+      onEvent: event(),
+      async getTargets() {
+        return [];
+      },
+      async attach(args) {
+        calls.push(['attach', args]);
+      },
+      async detach(args) {
+        calls.push(['detach', args]);
+      },
       async sendCommand(target, method, args) {
         calls.push(['cdp', target, method, args]);
         if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main-frame' } } };
@@ -55,8 +112,13 @@ function fixture(browser = 'chrome') {
       },
     },
     userScripts: {
-      async configureWorld(args) { calls.push(['user-world', args]); },
-      async execute(args) { calls.push(['user-script', args]); return [{ result: 'page', frameId: 0 }]; },
+      async configureWorld(args) {
+        calls.push(['user-world', args]);
+      },
+      async execute(args) {
+        calls.push(['user-script', args]);
+        return [{ result: 'page', frameId: 0 }];
+      },
     },
   };
   const adapter = new BrowserAdapter(api, browser);
@@ -74,8 +136,10 @@ test('inspection refusal diagnostics are fixed codes and never expose raw browse
   for (const [message, expected] of cases) {
     assert.equal(injectionReason(new Error(message)), expected);
     const f = fixture('firefox');
-    f.api.scripting.executeScript = async () => { throw new Error(message); };
-    await assert.rejects(f.adapter.inspect(100, []), error => {
+    f.api.scripting.executeScript = async () => {
+      throw new Error(message);
+    };
+    await assert.rejects(f.adapter.inspect(100, []), (error) => {
       assert.equal(error.code, 'PAGE_UNAVAILABLE');
       assert.equal(error.injection_reason, expected);
       assert.equal(error.inspection_stage, 'document_injection');
@@ -86,19 +150,24 @@ test('inspection refusal diagnostics are fixed codes and never expose raw browse
   }
   const f = fixture('firefox');
   f.api.scripting.executeScript = async () => [{ error: new Error('private helper exception') }];
-  await assert.rejects(f.adapter.inspect(100, []), error => error.injection_reason === 'helper_execution_failed');
+  await assert.rejects(f.adapter.inspect(100, []), (error) => error.injection_reason === 'helper_execution_failed');
   f.api.scripting.executeScript = async () => [];
-  await assert.rejects(f.adapter.inspect(100, []), error => error.injection_reason === 'empty_result');
+  await assert.rejects(f.adapter.inspect(100, []), (error) => error.injection_reason === 'empty_result');
 });
 
 test('browser diagnostics identify the installed extension and available Firefox version', async () => {
   const f = fixture('firefox');
   f.api.runtime.getBrowserInfo = async () => ({ name: 'Firefox', version: '146.0.1' });
-  assert.deepEqual(await f.adapter.browserInfo(),
-    { extension_version: '4.3.3', browser_name: 'firefox', browser_version: '146.0.1' });
+  assert.deepEqual(await f.adapter.browserInfo(), {
+    extension_version: '4.3.3',
+    browser_name: 'firefox',
+    browser_version: '146.0.1',
+  });
   const chrome = fixture();
   assert.equal((await chrome.adapter.browserInfo()).browser_version, null);
-  f.api.runtime.getBrowserInfo = async () => { throw new Error('Browser info API failure'); };
+  f.api.runtime.getBrowserInfo = async () => {
+    throw new Error('Browser info API failure');
+  };
   await assert.rejects(f.adapter.browserInfo(), /Browser info API failure/);
 });
 
@@ -115,12 +184,18 @@ test('Chrome installs tab-scoped blocking for all resources and removes only its
     assert.equal(rule.condition.excludedResourceTypes, undefined);
     assert.match(rule.condition.regexFilter, /^\^https:/);
   }
-  assert.equal(addRules.filter(rule => rule.condition.resourceTypes === undefined).length, 2);
+  assert.equal(addRules.filter((rule) => rule.condition.resourceTypes === undefined).length, 2);
   await f.adapter.attach(100);
   await f.adapter.release(100);
-  assert.deepEqual(f.calls.at(-1)[1].removeRuleIds, addRules.map(rule => rule.id));
+  assert.deepEqual(
+    f.calls.at(-1)[1].removeRuleIds,
+    addRules.map((rule) => rule.id),
+  );
   assert.equal(f.adapter.guards.size, 0);
-  assert.equal(f.calls.some(call => call[0] === 'detach'), true);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'detach'),
+    true,
+  );
 });
 
 test('protected redirects retain their rules until the browser has rejected the pending request', async () => {
@@ -131,16 +206,24 @@ test('protected redirects retain their rules until the browser has rejected the 
   await f.adapter.protect(100, ['https://control.example']);
   await f.adapter.attach(100);
   f.api.webNavigation.onBeforeNavigate.listeners[0].fn({
-    tabId: 100, frameId: 0, url: 'https://control.example/login',
+    tabId: 100,
+    frameId: 0,
+    url: 'https://control.example/login',
   });
   assert.equal(events[0][1], 'protected_pending');
   await f.adapter.release(100, { retainProtection: true });
   assert.equal(f.adapter.guards.has(100), true);
-  assert.equal(f.calls.some(call => call[0] === 'rules' && call[1].removeRuleIds), false);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'rules' && call[1].removeRuleIds),
+    false,
+  );
   f.api.webNavigation.onErrorOccurred.listeners[0].fn({
-    tabId: 100, frameId: 0, url: 'https://control.example/login', error: 'net::ERR_BLOCKED_BY_CLIENT',
+    tabId: 100,
+    frameId: 0,
+    url: 'https://control.example/login',
+    error: 'net::ERR_BLOCKED_BY_CLIENT',
   });
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(f.adapter.guards.has(100), false);
 });
 
@@ -174,11 +257,16 @@ test('failed privileged detach retains protection and reports failure rather tha
   f.adapter.onWarning = () => {};
   await f.adapter.protect(100, ['https://control.example']);
   await f.adapter.attach(100);
-  f.api.debugger.detach = async () => { throw new Error('Debugger detach failed'); };
+  f.api.debugger.detach = async () => {
+    throw new Error('Debugger detach failed');
+  };
   await assert.rejects(f.adapter.release(100), /PROTECTION_UNAVAILABLE/);
   assert.equal(f.adapter.guards.has(100), true);
   assert.equal(f.adapter.attached.has(100), true);
-  assert.equal(f.calls.some(call => call[0] === 'rules' && call[1].removeRuleIds), false);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'rules' && call[1].removeRuleIds),
+    false,
+  );
 });
 
 test('neutral or protected pages are not eligible for sharing', async () => {
@@ -195,9 +283,12 @@ test('Chrome dispatcher only issues narrowly named tab evaluation/screenshot met
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   await f.adapter.execute(grant, 'evaluate_script', { script: 'document.title' }, () => {});
   await f.adapter.execute(grant, 'get_screenshot', {}, () => {});
-  const methods = f.calls.filter(call => call[0] === 'cdp');
-  assert.deepEqual(methods.map(call => call[2]), ['Page.getFrameTree', 'Runtime.evaluate', 'Page.captureScreenshot']);
-  assert.ok(methods.every(call => call[1].tabId === 100));
+  const methods = f.calls.filter((call) => call[0] === 'cdp');
+  assert.deepEqual(
+    methods.map((call) => call[2]),
+    ['Page.getFrameTree', 'Runtime.evaluate', 'Page.captureScreenshot'],
+  );
+  assert.ok(methods.every((call) => call[1].tabId === 100));
   assert.equal(methods[1][3].contextId, undefined);
   assert.equal(methods[1][3].uniqueContextId, 'main-context');
 });
@@ -207,69 +298,102 @@ test('Firefox caller source is browser-compiled in the explicit world, never eva
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   const script = 'typeof browser';
   await f.adapter.execute(grant, 'evaluate_script', { script }, () => {});
-  const scripts = f.calls.filter(call => call[0] === 'script').map(call => call[1]);
+  const scripts = f.calls.filter((call) => call[0] === 'script').map((call) => call[1]);
   assert.equal(scripts[0].world, 'ISOLATED');
-  const native = f.calls.find(call => call[0] === 'user-script')[1];
+  const native = f.calls.find((call) => call[0] === 'user-script')[1];
   assert.equal(native.world, 'MAIN');
   assert(native.js[0].code.includes(script));
   assert(!native.js[0].code.includes('eval('));
   assert.deepEqual(native.target, { tabId: 100, frameIds: [0] });
-  const isolated = await f.adapter.execute({ ...grant, scriptWorldId: 'activation-world' },
-    'evaluate_script', { script, world: 'USER_SCRIPT' }, () => {});
+  const isolated = await f.adapter.execute(
+    { ...grant, scriptWorldId: 'activation-world' },
+    'evaluate_script',
+    { script, world: 'USER_SCRIPT' },
+    () => {},
+  );
   assert.equal(isolated.execution_world, 'USER_SCRIPT');
-  assert.equal(f.calls.filter(call => call[0] === 'user-script').at(-1)[1].worldId, 'activation-world');
+  assert.equal(f.calls.filter((call) => call[0] === 'user-script').at(-1)[1].worldId, 'activation-world');
 });
 
 test('Firefox injection failures remain distinct from script and policy failures', async () => {
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   f.adapter.onWarning = () => {};
-  f.api.userScripts.execute = async () => { throw new Error('Injection refused'); };
-  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: '1+1' }, () => {}), /SCRIPT_EXECUTION_UNAVAILABLE/);
+  f.api.userScripts.execute = async () => {
+    throw new Error('Injection refused');
+  };
+  await assert.rejects(
+    f.adapter.execute(grant, 'evaluate_script', { script: '1+1' }, () => {}),
+    /SCRIPT_EXECUTION_UNAVAILABLE/,
+  );
 });
 
 test('native script exception stacks survive classification and never trigger a second-world retry', async () => {
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   const native = new SyntaxError('Synthetic native parser failure');
-  f.api.userScripts.execute = async args => {
-    f.calls.push(['user-script', args]); return [{ error: native, frameId: 0 }];
+  f.api.userScripts.execute = async (args) => {
+    f.calls.push(['user-script', args]);
+    return [{ error: native, frameId: 0 }];
   };
-  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'throw new SyntaxError("Synthetic native parser failure")' }, () => {}), error => {
-    assert.equal(error.code, 'SCRIPT_SYNTAX_ERROR');
-    assert.equal(error.diagnostics.name, 'SyntaxError');
-    assert(error.diagnostics.stack.includes('Synthetic native parser failure'));
-    return true;
-  });
+  await assert.rejects(
+    f.adapter.execute(
+      grant,
+      'evaluate_script',
+      { script: 'throw new SyntaxError("Synthetic native parser failure")' },
+      () => {},
+    ),
+    (error) => {
+      assert.equal(error.code, 'SCRIPT_SYNTAX_ERROR');
+      assert.equal(error.diagnostics.name, 'SyntaxError');
+      assert(error.diagnostics.stack.includes('Synthetic native parser failure'));
+      return true;
+    },
+  );
 
-  assert.equal(f.calls.filter(call => call[0] === 'user-script').length, 1);
+  assert.equal(f.calls.filter((call) => call[0] === 'user-script').length, 1);
 });
 
-test('content-selector waits share one timeout budget and preserve zero-timeout probe diagnostics', async t => {
+test('content-selector waits share one timeout budget and preserve zero-timeout probe diagnostics', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   let ready = false;
-  f.api.scripting.executeScript = async args => [{
-    result: args.args[0] === 'inspect' ? { url: 'https://site.example/', document_nonce: 'doc' } : { ready },
-  }];
+  f.api.scripting.executeScript = async (args) => [
+    {
+      result: args.args[0] === 'inspect' ? { url: 'https://site.example/', document_nonce: 'doc' } : { ready },
+    },
+  ];
   const pending = f.adapter.execute(grant, 'wait_for_page', { content_selector: '#ready', timeout_ms: 100 }, () => {});
-  await new Promise(resolve => setImmediate(resolve));
-  ready = true; t.mock.timers.tick(50);
-  assert.deepEqual(await pending, { state: 'loaded', url: 'https://site.example/', document: 'doc',
-    document_ready: true, content_ready: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  ready = true;
+  t.mock.timers.tick(50);
+  assert.deepEqual(await pending, {
+    state: 'loaded',
+    url: 'https://site.example/',
+    document: 'doc',
+    document_ready: true,
+    content_ready: true,
+  });
   ready = false;
-  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { content_selector: '#ready', timeout_ms: 0 }, () => {}), error =>
-    error.code === 'WAIT_TIMEOUT' && error.readiness_stage === 'content_readiness' && error.timeout_ms === 0);
+  await assert.rejects(
+    f.adapter.execute(grant, 'wait_for_page', { content_selector: '#ready', timeout_ms: 0 }, () => {}),
+    (error) => error.code === 'WAIT_TIMEOUT' && error.readiness_stage === 'content_readiness' && error.timeout_ms === 0,
+  );
 });
 
 test('captured native failures are errors even when the browser returns them as ordinary result data', async () => {
   const f = fixture('firefox');
-  f.api.userScripts.execute = async args => [{ result: await runInNewContext(args.js[0].code), frameId: 0 }];
+  f.api.userScripts.execute = async (args) => [{ result: await runInNewContext(args.js[0].code), frameId: 0 }];
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
-  for (const script of ['throw new Error("Native runtime failure")', 'Promise.reject(new Error("Native async failure"))']) {
-    await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script }, () => {}), error =>
-      error.code === 'SCRIPT_RUNTIME_ERROR' && error.diagnostics.stack.includes('failure'));
+  for (const script of [
+    'throw new Error("Native runtime failure")',
+    'Promise.reject(new Error("Native async failure"))',
+  ]) {
+    await assert.rejects(
+      f.adapter.execute(grant, 'evaluate_script', { script }, () => {}),
+      (error) => error.code === 'SCRIPT_RUNTIME_ERROR' && error.diagnostics.stack.includes('failure'),
+    );
   }
 });
 
@@ -278,56 +402,88 @@ test('Chrome distinguishes JavaScript errors and enforces the same output budget
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
   const original = f.api.debugger.sendCommand;
   for (const name of ['SyntaxError', 'Error']) {
-    f.api.debugger.sendCommand = async (target, method, args) => method === 'Runtime.evaluate'
-      ? { exceptionDetails: { exception: { className: name } } } : original(target, method, args);
-    await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'invalid' }, () => {}),
-      name === 'SyntaxError' ? /SCRIPT_SYNTAX_ERROR/ : /SCRIPT_RUNTIME_ERROR/);
+    f.api.debugger.sendCommand = async (target, method, args) =>
+      method === 'Runtime.evaluate'
+        ? { exceptionDetails: { exception: { className: name } } }
+        : original(target, method, args);
+    await assert.rejects(
+      f.adapter.execute(grant, 'evaluate_script', { script: 'invalid' }, () => {}),
+      name === 'SyntaxError' ? /SCRIPT_SYNTAX_ERROR/ : /SCRIPT_RUNTIME_ERROR/,
+    );
   }
-  f.api.debugger.sendCommand = async (target, method, args) => method === 'Runtime.evaluate'
-    ? { result: { value: 'x'.repeat(20_000) } } : original(target, method, args);
-  await assert.rejects(f.adapter.execute(grant, 'evaluate_script', { script: 'big' }, () => {}), /RESULT_TOO_LARGE/);
+  f.api.debugger.sendCommand = async (target, method, args) =>
+    method === 'Runtime.evaluate' ? { result: { value: 'x'.repeat(20_000) } } : original(target, method, args);
+  await assert.rejects(
+    f.adapter.execute(grant, 'evaluate_script', { script: 'big' }, () => {}),
+    /RESULT_TOO_LARGE/,
+  );
 });
 
 test('Firefox screenshots capture the target tab or advertise unavailable; never the visible tab', async () => {
   const f = fixture('firefox');
   assert.equal(f.adapter.capabilities().includes('get_screenshot'), false);
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
-  await assert.rejects(f.adapter.execute(grant, 'get_screenshot', {}, () => {}), /CAPABILITY_UNAVAILABLE/);
+  await assert.rejects(
+    f.adapter.execute(grant, 'get_screenshot', {}, () => {}),
+    /CAPABILITY_UNAVAILABLE/,
+  );
   let captured;
-  f.api.tabs.captureTab = async id => { captured = id; return 'data:image/png;base64,aW1hZ2U='; };
+  f.api.tabs.captureTab = async (id) => {
+    captured = id;
+    return 'data:image/png;base64,aW1hZ2U=';
+  };
   assert.equal(f.adapter.capabilities().includes('get_screenshot'), true);
-  assert.deepEqual(await f.adapter.execute(grant, 'get_screenshot', {}, () => {}),
-    { mimeType: 'image/png', data: 'aW1hZ2U=' });
+  assert.deepEqual(await f.adapter.execute(grant, 'get_screenshot', {}, () => {}), {
+    mimeType: 'image/png',
+    data: 'aW1hZ2U=',
+  });
   assert.equal(captured, 100);
   f.adapter.onWarning = () => {};
-  f.api.tabs.captureTab = async () => { throw new Error('Capture permission unavailable'); };
-  await assert.rejects(f.adapter.execute(grant, 'get_screenshot', {}, () => {}), /CAPABILITY_UNAVAILABLE/);
+  f.api.tabs.captureTab = async () => {
+    throw new Error('Capture permission unavailable');
+  };
+  await assert.rejects(
+    f.adapter.execute(grant, 'get_screenshot', {}, () => {}),
+    /CAPABILITY_UNAVAILABLE/,
+  );
 });
 
-test('failed document inspection is not an optional-operation capability failure', async t => {
+test('failed document inspection is not an optional-operation capability failure', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   f.adapter.onWarning = () => {};
-  f.api.scripting.executeScript = async () => { throw new Error('Missing host permission for the tab'); };
+  f.api.scripting.executeScript = async () => {
+    throw new Error('Missing host permission for the tab');
+  };
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   for (const operation of ['get_text', 'get_interactive_elements']) {
     const work = f.adapter.execute(grant, operation, {}, () => {});
-    const rejected = assert.rejects(work, error => error.code === 'PAGE_UNAVAILABLE' &&
-      error.inspection_stage === 'document_injection' && error.timeout_ms === 10000 &&
-      error.injection_reason === 'permission_denied');
-    await new Promise(resolve => setImmediate(resolve));
+    const rejected = assert.rejects(
+      work,
+      (error) =>
+        error.code === 'PAGE_UNAVAILABLE' &&
+        error.inspection_stage === 'document_injection' &&
+        error.timeout_ms === 10000 &&
+        error.injection_reason === 'permission_denied',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
     t.mock.timers.tick(10000);
     await rejected;
   }
-  assert.equal(f.calls.some(call => call[0] === 'update'), false);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'update'),
+    false,
+  );
   // Navigation needs no document access, so a refused page can still be navigated away from.
-  assert.deepEqual(await f.adapter.execute(grant, 'navigate', { url: 'https://other.example/' }, () => {}),
-    { url: 'https://other.example/', navigation_started: true });
+  assert.deepEqual(await f.adapter.execute(grant, 'navigate', { url: 'https://other.example/' }, () => {}), {
+    url: 'https://other.example/',
+    navigation_started: true,
+  });
   f.api.scripting.executeScript = async () => [{ error: new Error('Document execution failed') }];
   await assert.rejects(f.adapter.inspect(100, grant.protected_origins), /PAGE_UNAVAILABLE/);
 });
 
-test('actionability waits use the configured deadline and never retry a mutation after execution', async t => {
+test('actionability waits use the configured deadline and never retry a mutation after execution', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
@@ -338,21 +494,30 @@ test('actionability waits use the configured deadline and never retry a mutation
     return [{ result: attempts < 3 ? { error: 'ELEMENT_DISABLED' } : { clicked: true } }];
   };
   const work = f.adapter.execute(grant, 'click', { selector: 'button', timeout_ms: 100 }, () => {});
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(attempts, 1);
   t.mock.timers.tick(50);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(attempts, 2);
   t.mock.timers.tick(50);
   assert.deepEqual(await work, { clicked: true });
   assert.equal(attempts, 3);
 
-  f.api.scripting.executeScript = async ({ args }) => [{ result: args[0] === 'inspect'
-    ? { url: 'https://site.example/', document_nonce: 'document-1' } : { error: 'OPERATION_FAILED' } }];
-  await assert.rejects(f.adapter.execute(grant, 'click', { selector: 'button' }, () => {}), /OPERATION_FAILED/);
+  f.api.scripting.executeScript = async ({ args }) => [
+    {
+      result:
+        args[0] === 'inspect'
+          ? { url: 'https://site.example/', document_nonce: 'document-1' }
+          : { error: 'OPERATION_FAILED' },
+    },
+  ];
+  await assert.rejects(
+    f.adapter.execute(grant, 'click', { selector: 'button' }, () => {}),
+    /OPERATION_FAILED/,
+  );
 });
 
-test('readiness deadlines and cancellation during waits are enforced without executing later work', async t => {
+test('readiness deadlines and cancellation during waits are enforced without executing later work', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
@@ -363,9 +528,11 @@ test('readiness deadlines and cancellation during waits are enforced without exe
     return [{ result: { error: 'ELEMENT_NOT_FOUND' } }];
   };
   const expired = f.adapter.execute(grant, 'click', { selector: '#missing', timeout_ms: 50 }, () => {});
-  const rejected = assert.rejects(expired, error => error.code === 'WAIT_TIMEOUT' &&
-    error.last_error === 'ELEMENT_NOT_FOUND' && error.timeout_ms === 50);
-  await new Promise(resolve => setImmediate(resolve));
+  const rejected = assert.rejects(
+    expired,
+    (error) => error.code === 'WAIT_TIMEOUT' && error.last_error === 'ELEMENT_NOT_FOUND' && error.timeout_ms === 50,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(50);
   await rejected;
   assert.equal(attempts, 2);
@@ -375,7 +542,7 @@ test('readiness deadlines and cancellation during waits are enforced without exe
     if (cancelled) throw new Error('APPROVAL_REQUIRED');
   });
   const stopped = assert.rejects(waiting, /APPROVAL_REQUIRED/);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   const before = attempts;
   cancelled = true;
   t.mock.timers.tick(50);
@@ -383,50 +550,81 @@ test('readiness deadlines and cancellation during waits are enforced without exe
   assert.equal(attempts, before);
 });
 
-test('wait_for_page distinguishes loaded state from navigation started and blocks protected destinations', async t => {
+test('wait_for_page distinguishes loaded state from navigation started and blocks protected destinations', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   let loading = true;
-  f.api.tabs.get = async () => ({ windowId: 10, url: 'https://site.example/', status: loading ? 'loading' : 'complete' });
-  f.api.scripting.executeScript = async () => [{ result: { url: 'https://site.example/', document_nonce: 'document-1' } }];
+  f.api.tabs.get = async () => ({
+    windowId: 10,
+    url: 'https://site.example/',
+    status: loading ? 'loading' : 'complete',
+  });
+  f.api.scripting.executeScript = async () => [
+    { result: { url: 'https://site.example/', document_nonce: 'document-1' } },
+  ];
   const waiting = f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 100 }, () => {});
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   loading = false;
   t.mock.timers.tick(50);
-  assert.deepEqual(await waiting, { state: 'loaded', url: 'https://site.example/', document: 'document-1',
-    document_ready: true, content_ready: null });
+  assert.deepEqual(await waiting, {
+    state: 'loaded',
+    url: 'https://site.example/',
+    document: 'document-1',
+    document_ready: true,
+    content_ready: null,
+  });
   loading = true;
-  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}), /WAIT_TIMEOUT/);
+  await assert.rejects(
+    f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 0 }, () => {}),
+    /WAIT_TIMEOUT/,
+  );
   f.api.tabs.get = async () => ({ windowId: 10, pendingUrl: 'https://control.example/login', status: 'loading' });
-  await assert.rejects(f.adapter.execute(grant, 'wait_for_page', {}, () => {}), /HANDOFF_REQUIRED/);
+  await assert.rejects(
+    f.adapter.execute(grant, 'wait_for_page', {}, () => {}),
+    /HANDOFF_REQUIRED/,
+  );
 });
 
-test('post-navigation inspection waits for tab/document readiness and retries only benign inspection', async t => {
+test('post-navigation inspection waits for tab/document readiness and retries only benign inspection', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
-  let loading = true, ready = false, failures = 1, snapshots = 0;
+  let loading = true,
+    ready = false,
+    failures = 1,
+    snapshots = 0;
   f.adapter.onWarning = () => {};
-  f.api.tabs.get = async id => ({ id, windowId: 10, url: 'https://site.example/',
-    status: loading ? 'loading' : 'complete' });
+  f.api.tabs.get = async (id) => ({
+    id,
+    windowId: 10,
+    url: 'https://site.example/',
+    status: loading ? 'loading' : 'complete',
+  });
   f.api.scripting.executeScript = async ({ args: [operation] }) => {
     if (operation === 'inspect') {
       if (failures-- > 0) throw new Error('Frame temporarily detached during navigation');
-      return [{ result: { url: 'https://site.example/', document_nonce: 'new-document',
-        ready_state: ready ? 'complete' : 'loading' } }];
+      return [
+        {
+          result: {
+            url: 'https://site.example/',
+            document_nonce: 'new-document',
+            ready_state: ready ? 'complete' : 'loading',
+          },
+        },
+      ];
     }
     snapshots++;
     return [{ result: { document: 'new-document', text: 'new page', elements: [] } }];
   };
   const previewWork = f.adapter.prepareAction(grant, 'get_page_snapshot', {}, () => {});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.calls.filter(call => call[0] === 'update').length, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.calls.filter((call) => call[0] === 'update').length, 0);
   loading = false;
   t.mock.timers.tick(50);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(50);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   ready = true;
   t.mock.timers.tick(50);
   const preview = await previewWork;
@@ -436,51 +634,69 @@ test('post-navigation inspection waits for tab/document readiness and retries on
   assert.equal(snapshots, 1);
 });
 
-test('reads after a navigation request cannot approve the previous still-complete document', async t => {
+test('reads after a navigation request cannot approve the previous still-complete document', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: [] };
-  let url = 'https://site.example/', document = 'old-document';
-  f.api.tabs.get = async id => ({ id, windowId: 10, url, status: 'complete' });
+  let url = 'https://site.example/',
+    document = 'old-document';
+  f.api.tabs.get = async (id) => ({ id, windowId: 10, url, status: 'complete' });
   f.api.scripting.executeScript = async () => [{ result: { url, document_nonce: document, ready_state: 'complete' } }];
   await f.adapter.execute(grant, 'navigate', { url: 'https://site.example/new' }, () => {});
   const preparing = f.adapter.prepareAction(grant, 'get_page_snapshot', {}, () => {});
   let prepared = false;
-  preparing.then(() => { prepared = true; });
-  await new Promise(resolve => setImmediate(resolve));
+  preparing.then(() => {
+    prepared = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(prepared, false);
   url = 'https://site.example/new';
   document = 'new-document';
   t.mock.timers.tick(50);
   assert.equal((await preparing).document_nonce, 'new-document');
   assert.equal(grant.navigation, undefined);
-  assert.equal(f.calls.filter(call => call[0] === 'update').length, 1);
+  assert.equal(f.calls.filter((call) => call[0] === 'update').length, 1);
   grant.navigation = { from: url, url: url + '#section', document };
   url += '#section';
   assert.equal((await f.adapter.prepareAction(grant, 'get_page_snapshot', {})).document_nonce, 'new-document');
 });
 
-test('navigation between tabs.get and inspection is detected; permanent refusal and cancellation stay fail-closed', async t => {
+test('navigation between tabs.get and inspection is detected; permanent refusal and cancellation stay fail-closed', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const f = fixture('firefox');
   const grant = { tabId: 100, windowId: 10, protected_origins: ['https://control.example'] };
   let url = 'https://site.example/old';
-  f.api.tabs.get = async id => ({ id, windowId: 10, url, status: 'complete' });
+  f.api.tabs.get = async (id) => ({ id, windowId: 10, url, status: 'complete' });
   f.api.scripting.executeScript = async () => {
     url = 'https://site.example/new';
     return [{ result: { url, ready_state: 'complete', document_nonce: 'new-document' } }];
   };
-  await assert.rejects(f.adapter.inspect(100, grant.protected_origins), error =>
-    error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed');
-  await assert.rejects(f.adapter.execute(grant, 'click', { selector: 'button', timeout_ms: 0 }, () => {},
-    { document_nonce: 'old-document' }), error => error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed');
+  await assert.rejects(
+    f.adapter.inspect(100, grant.protected_origins),
+    (error) => error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed',
+  );
+  await assert.rejects(
+    f.adapter.execute(grant, 'click', { selector: 'button', timeout_ms: 0 }, () => {}, {
+      document_nonce: 'old-document',
+    }),
+    (error) => error.code === 'TARGET_STALE' && error.inspection_stage === 'document_changed',
+  );
   let attempts = 0;
   f.adapter.onWarning = () => {};
-  f.api.scripting.executeScript = async () => { attempts++; throw new Error('Renderer refuses injection'); };
+  f.api.scripting.executeScript = async () => {
+    attempts++;
+    throw new Error('Renderer refuses injection');
+  };
   const unavailable = f.adapter.execute(grant, 'wait_for_page', { timeout_ms: 100 }, () => {});
-  const rejected = assert.rejects(unavailable, error => error.code === 'PAGE_UNAVAILABLE' &&
-    error.inspection_stage === 'document_injection' && error.last_error === 'PAGE_UNAVAILABLE' && error.timeout_ms === 100);
-  await new Promise(resolve => setImmediate(resolve));
+  const rejected = assert.rejects(
+    unavailable,
+    (error) =>
+      error.code === 'PAGE_UNAVAILABLE' &&
+      error.inspection_stage === 'document_injection' &&
+      error.last_error === 'PAGE_UNAVAILABLE' &&
+      error.timeout_ms === 100,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(100);
   await rejected;
   let stopped = false;
@@ -488,7 +704,7 @@ test('navigation between tabs.get and inspection is detected; permanent refusal 
     if (stopped) throw Object.assign(new Error('APPROVAL_REQUIRED'), { code: 'APPROVAL_REQUIRED' });
   });
   const cancelled = assert.rejects(waiting, /APPROVAL_REQUIRED/);
-  await new Promise(resolve => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   const before = attempts;
   stopped = true;
   t.mock.timers.tick(50);
@@ -498,4 +714,3 @@ test('navigation between tabs.get and inspection is detected; permanent refusal 
   await assert.rejects(f.adapter.prepareAction(grant, 'get_page_snapshot', {}), /HANDOFF_REQUIRED/);
   assert.equal(attempts, before);
 });
-

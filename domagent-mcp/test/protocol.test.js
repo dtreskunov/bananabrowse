@@ -1,17 +1,39 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { OPERATION_SCHEMAS, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA, schemaArgumentErrors,
-  operationArgumentErrors, validOperationArgs, inspectionErrorDetails, waitErrorDetails,
-  VERSION, registerPayload, tokenPayload, connectPayload, agentColor, GROUP_COLORS, pairingCode,
-  normalizePairingCode, validTabId, TAB_ID_SCHEMA } from '../../shared/protocol.js';
+import {
+  OPERATION_SCHEMAS,
+  HANDOFF_SCHEMA,
+  DESCRIPTION_SCHEMA,
+  schemaArgumentErrors,
+  operationArgumentErrors,
+  validOperationArgs,
+  inspectionErrorDetails,
+  waitErrorDetails,
+  VERSION,
+  registerPayload,
+  tokenPayload,
+  connectPayload,
+  agentColor,
+  GROUP_COLORS,
+  pairingCode,
+  normalizePairingCode,
+  validTabId,
+  TAB_ID_SCHEMA,
+} from '../../shared/protocol.js';
 
 test('beta7 protocol validates source UTF-16 boundary, not line count', () => {
   assert(validOperationArgs('evaluate_script', { script: 'a'.repeat(65536) }));
   assert(validOperationArgs('evaluate_script', { script: '😀'.repeat(32768) }));
   assert(validOperationArgs('evaluate_script', { script: Array(40).fill('document.title;').join('\n') }));
-  assert.deepEqual(operationArgumentErrors('evaluate_script', { script: 'a'.repeat(65537) }), [{
-    field: 'script', reason: 'too_long', limits: { maximum: 65536 }, actual_length: 65537, unit: 'utf16_code_units',
-  }]);
+  assert.deepEqual(operationArgumentErrors('evaluate_script', { script: 'a'.repeat(65537) }), [
+    {
+      field: 'script',
+      reason: 'too_long',
+      limits: { maximum: 65536 },
+      actual_length: 65537,
+      unit: 'utf16_code_units',
+    },
+  ]);
 });
 
 test('beta7 optional world, content readiness and manual handoff schemas remain bounded', () => {
@@ -43,18 +65,23 @@ test('beta7 field errors distinguish type, required, bounds and target conflicts
   ];
   for (const [name, args, field, reason] of invalid) {
     const errors = operationArgumentErrors(name, args);
-    assert(errors.some(error => error.field === field && error.reason === reason));
+    assert(errors.some((error) => error.field === field && error.reason === reason));
     assert(!JSON.stringify(errors).includes('private'));
   }
   for (const args of [null, [], false, 'private']) {
     assert.deepEqual(operationArgumentErrors('get_text', args), [{ field: 'arguments', reason: 'expected_object' }]);
   }
   assert.deepEqual(operationArgumentErrors('evaluate_script', {}), [{ field: 'script', reason: 'required' }]);
-  const typo = operationArgumentErrors('get_text', { selectr: '#a' }).find(error => error.reason === 'unexpected_field');
+  const typo = operationArgumentErrors('get_text', { selectr: '#a' }).find(
+    (error) => error.reason === 'unexpected_field',
+  );
   assert.equal(typo.did_you_mean, 'selector');
   assert(typo.allowed.includes('selector'));
-  const many = operationArgumentErrors('get_text', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, 1])));
-  assert.equal(many.filter(error => error.reason === 'unexpected_field').length, 8);
+  const many = operationArgumentErrors(
+    'get_text',
+    Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, 1])),
+  );
+  assert.equal(many.filter((error) => error.reason === 'unexpected_field').length, 8);
 });
 
 test('beta7 descriptions count Unicode points after trimming minimum and raw maximum', () => {
@@ -62,10 +89,16 @@ test('beta7 descriptions count Unicode points after trimming minimum and raw max
   for (const char of ['a', '界', '😀']) {
     assert.deepEqual(schemaArgumentErrors(spec, { description: char.repeat(40) }), []);
     assert.deepEqual(schemaArgumentErrors(spec, { description: char.repeat(500) }), []);
-    assert.deepEqual(schemaArgumentErrors(spec, { description: ` ${char.repeat(39)} ` }), [{
-      field: 'description', reason: 'too_short', limits: { minimum: 40 },
-      actual_length: 39, unit: 'unicode_code_points', measured_after_trim: true,
-    }]);
+    assert.deepEqual(schemaArgumentErrors(spec, { description: ` ${char.repeat(39)} ` }), [
+      {
+        field: 'description',
+        reason: 'too_short',
+        limits: { minimum: 40 },
+        actual_length: 39,
+        unit: 'unicode_code_points',
+        measured_after_trim: true,
+      },
+    ]);
     assert.equal(schemaArgumentErrors(spec, { description: ` ${char.repeat(499)} ` })[0].actual_length, 501);
   }
 });
@@ -73,33 +106,79 @@ test('beta7 descriptions count Unicode points after trimming minimum and raw max
 test('beta7 content readiness timeout projection preserves inspection and element causes', () => {
   for (const last_error of ['ELEMENT_NOT_FOUND', 'ELEMENT_NOT_VISIBLE', 'PAGE_UNAVAILABLE', 'TARGET_STALE']) {
     const error = { code: 'WAIT_TIMEOUT', inspection_stage: 'content_readiness', last_error, timeout_ms: 10000 };
-    assert.deepEqual(inspectionErrorDetails(error), { inspection_stage: 'content_readiness', last_error, timeout_ms: 10000 });
+    assert.deepEqual(inspectionErrorDetails(error), {
+      inspection_stage: 'content_readiness',
+      last_error,
+      timeout_ms: 10000,
+    });
     if (last_error.startsWith('ELEMENT_')) assert.deepEqual(waitErrorDetails(error), { last_error, timeout_ms: 10000 });
   }
-  assert.deepEqual(inspectionErrorDetails({ code: 'WAIT_TIMEOUT', inspection_stage: 'content_readiness',
-    last_error: 'private', timeout_ms: 10001 }), { inspection_stage: 'content_readiness' });
-  assert.deepEqual(inspectionErrorDetails({ code: 'PAGE_UNAVAILABLE', inspection_stage: 'document_injection',
-    injection_reason: 'permission_denied' }), { inspection_stage: 'document_injection', injection_reason: 'permission_denied' });
+  assert.deepEqual(
+    inspectionErrorDetails({
+      code: 'WAIT_TIMEOUT',
+      inspection_stage: 'content_readiness',
+      last_error: 'private',
+      timeout_ms: 10001,
+    }),
+    { inspection_stage: 'content_readiness' },
+  );
+  assert.deepEqual(
+    inspectionErrorDetails({
+      code: 'PAGE_UNAVAILABLE',
+      inspection_stage: 'document_injection',
+      injection_reason: 'permission_denied',
+    }),
+    { inspection_stage: 'document_injection', injection_reason: 'permission_denied' },
+  );
 });
 
 test('beta7 content readiness_stage preserves bounded waits and immediate zero-time probes', () => {
-  for (const [code, timeout_ms] of [['WAIT_TIMEOUT', 10000], ['ELEMENT_NOT_FOUND', 0], ['ELEMENT_NOT_VISIBLE', 0]]) {
+  for (const [code, timeout_ms] of [
+    ['WAIT_TIMEOUT', 10000],
+    ['ELEMENT_NOT_FOUND', 0],
+    ['ELEMENT_NOT_VISIBLE', 0],
+  ]) {
     const error = { code, readiness_stage: 'content_readiness', last_error: 'ELEMENT_NOT_FOUND', timeout_ms };
-    assert.deepEqual(waitErrorDetails(error), { readiness_stage: 'content_readiness', last_error: 'ELEMENT_NOT_FOUND', timeout_ms });
+    assert.deepEqual(waitErrorDetails(error), {
+      readiness_stage: 'content_readiness',
+      last_error: 'ELEMENT_NOT_FOUND',
+      timeout_ms,
+    });
   }
   for (const timeout_ms of [-1, 10001, 1.5, '0']) {
-    assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', readiness_stage: 'content_readiness',
-      last_error: 'ELEMENT_NOT_FOUND', timeout_ms }), {});
+    assert.deepEqual(
+      waitErrorDetails({
+        code: 'WAIT_TIMEOUT',
+        readiness_stage: 'content_readiness',
+        last_error: 'ELEMENT_NOT_FOUND',
+        timeout_ms,
+      }),
+      {},
+    );
   }
   assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 0 }), {});
-  assert.deepEqual(waitErrorDetails({ code: 'WAIT_TIMEOUT', readiness_stage: 'untrusted',
-    last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 1000 }), { last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 1000 });
+  assert.deepEqual(
+    waitErrorDetails({
+      code: 'WAIT_TIMEOUT',
+      readiness_stage: 'untrusted',
+      last_error: 'ELEMENT_NOT_FOUND',
+      timeout_ms: 1000,
+    }),
+    { last_error: 'ELEMENT_NOT_FOUND', timeout_ms: 1000 },
+  );
 });
 
 test('v6 proof transcripts are domain separated and bind origin plus nonce', () => {
   assert.equal(VERSION, 6);
-  const c = { origin: 'https://service.test', nonce: 'nonce', key_id: 'key', browser_id: 'b1',
-    connection_id: 'connection', extension_origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', name: 'Bob' };
+  const c = {
+    origin: 'https://service.test',
+    nonce: 'nonce',
+    key_id: 'key',
+    browser_id: 'b1',
+    connection_id: 'connection',
+    extension_origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    name: 'Bob',
+  };
   const expected = [
     [registerPayload, ['domagent.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]],
     [tokenPayload, ['domagent.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]],

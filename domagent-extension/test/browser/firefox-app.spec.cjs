@@ -15,34 +15,43 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
   const directory = path.join(root, 'domagent-extension/.browser-artifacts/v6-firefox');
   await fs.rm(directory, { recursive: true, force: true });
   const service = await startService(directory);
-  const profile = path.join(directory, 'profile'), extension = path.join(directory, 'extension');
+  const profile = path.join(directory, 'profile'),
+    extension = path.join(directory, 'extension');
   await fs.mkdir(profile, { recursive: true });
   await fs.cp(path.join(root, 'dist/firefox'), extension, { recursive: true });
-  await fs.writeFile(path.join(profile, 'user.js'), [
-    'user_pref("devtools.debugger.remote-enabled",true);',
-    'user_pref("devtools.debugger.prompt-connection",false);',
-    'user_pref("devtools.debugger.force-local",true);',
-    'user_pref("devtools.chrome.enabled",true);',
-    'user_pref("browser.startup.page",3);',
-    'user_pref("browser.sessionstore.resume_from_crash",true);',
-    'user_pref("browser.tabs.groups.enabled",true);',
-    'user_pref("extensions.webextensions.keepStorageOnUninstall",true);',
-    'user_pref("extensions.webextensions.keepUuidOnUninstall",true);',
-  ].join('\n'));
+  await fs.writeFile(
+    path.join(profile, 'user.js'),
+    [
+      'user_pref("devtools.debugger.remote-enabled",true);',
+      'user_pref("devtools.debugger.prompt-connection",false);',
+      'user_pref("devtools.debugger.force-local",true);',
+      'user_pref("devtools.chrome.enabled",true);',
+      'user_pref("browser.startup.page",3);',
+      'user_pref("browser.sessionstore.resume_from_crash",true);',
+      'user_pref("browser.tabs.groups.enabled",true);',
+      'user_pref("extensions.webextensions.keepStorageOnUninstall",true);',
+      'user_pref("extensions.webextensions.keepUuidOnUninstall",true);',
+    ].join('\n'),
+  );
   const port = await freePort();
   let child, exit, rdp, parent, appConsole, _backgroundConsole;
   const launch = () => {
-    child = spawn(process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(), ['--headless', '--no-remote',
-      '--profile', profile, '--start-debugger-server', String(port), 'about:blank'],
-    { env: { ...process.env, TMPDIR: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    exit = new Promise(resolve => child.once('close', resolve));
+    child = spawn(
+      process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(),
+      ['--headless', '--no-remote', '--profile', profile, '--start-debugger-server', String(port), 'about:blank'],
+      { env: { ...process.env, TMPDIR: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    exit = new Promise((resolve) => child.once('close', resolve));
   };
   const stop = async () => {
-    rdp?.close(); rdp = null; child.kill('SIGTERM');
+    rdp?.close();
+    rdp = null;
+    child.kill('SIGTERM');
     const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
-    await exit; clearTimeout(timer);
+    await exit;
+    clearTimeout(timer);
   };
-  const evaluateParent = expression => rdp.evaluate(parent.consoleActor, expression);
+  const evaluateParent = (expression) => rdp.evaluate(parent.consoleActor, expression);
   const install = async () => {
     rdp = await openNativeRdp(port);
     const rootActor = await rdp.request('root', 'getRoot');
@@ -51,7 +60,9 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     await evaluateParent(`Cc["@mozilla.org/security/x509certdb;1"].getService(Ci.nsIX509CertDB)
       .addCertFromBase64(${JSON.stringify(service.ca)},"CT,,") && true`);
     const installed = await rdp.request(rootActor.addonsActor, 'installTemporaryAddon', { addonPath: extension });
-    const descriptor = (await rdp.request('root', 'listAddons')).addons.find(addon => addon.id === installed.addon.id);
+    const descriptor = (await rdp.request('root', 'listAddons')).addons.find(
+      (addon) => addon.id === installed.addon.id,
+    );
     expect(descriptor.warnings).toEqual([]);
     // Native permission store stands in for the user's click-time grants (not a broadened manifest).
     await evaluateParent(`(() => {
@@ -64,16 +75,21 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     await rdp.request(watcher.actor, 'watchTargets', { targetType: 'frame' });
     return { descriptor, watcher };
   };
-  const findTarget = async suffix => {
-    const target = await rdp.event(packet => packet.type === 'target-available-form' && packet.target.url.endsWith(suffix));
+  const findTarget = async (suffix) => {
+    const target = await rdp.event(
+      (packet) => packet.type === 'target-available-form' && packet.target.url.endsWith(suffix),
+    );
     const actor = target.target.consoleActor;
     // The target exists before the page script has booted the controller.
     if (suffix === '/app.html') {
-      await expect.poll(() => rdp.evaluateRaw(actor, 'typeof globalThis.domagent?.controller'), { timeout: 15_000 }).toBe('object');
+      await expect
+        .poll(() => rdp.evaluateRaw(actor, 'typeof globalThis.domagent?.controller'), { timeout: 15_000 })
+        .toBe('object');
     }
     return actor;
   };
-  const app = expression => rdp.evaluate(appConsole, `(() => { const c = globalThis.domagent.controller; return (${expression}); })()`);
+  const app = (expression) =>
+    rdp.evaluate(appConsole, `(() => { const c = globalThis.domagent.controller; return (${expression}); })()`);
   const poll = (expression, options) => expect.poll(() => app(expression), { timeout: 15_000, ...options });
   launch();
   try {
@@ -93,8 +109,12 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     const paired = await pairing;
     expect(paired).toMatchObject({ name: "Bob's Firefox", paired: true });
 
-    const requested = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'Native Firefox fixture',
-      urls: [service.pageUrl], title: 'Firefox task' });
+    const requested = agent.call('request_session', {
+      browser_id: paired.browser_id,
+      purpose: 'Native Firefox fixture',
+      urls: [service.pageUrl],
+      title: 'Firefox task',
+    });
     await poll('c.requests.size').toBe(1);
     await app('c.approveSession([...c.requests.keys()][0]).then(() => true)');
     const session = await requested;
@@ -103,11 +123,17 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     const call = (name, args = {}) => agent.raw(name, { tab_id: tabId, description, ...args });
     expect((await call('wait_for_page')).isError).not.toBe(true);
     await exerciseActions(call);
-    const isolated = await agent.call('evaluate_script', { tab_id: tabId, description,
-      script: '(() => { globalThis.fixtureScratch = 1; return typeof document.querySelector("h1").textContent; })()', world: 'USER_SCRIPT' });
+    const isolated = await agent.call('evaluate_script', {
+      tab_id: tabId,
+      description,
+      script: '(() => { globalThis.fixtureScratch = 1; return typeof document.querySelector("h1").textContent; })()',
+      world: 'USER_SCRIPT',
+    });
     expect(isolated).toMatchObject({ value: 'string', execution_world: 'USER_SCRIPT' });
     // Protected origins stay blocked by the window's webRequest guard.
-    await expect(agent.call('navigate', { tab_id: tabId, url: service.origin, description })).rejects.toMatchObject({ code: 'HANDOFF_REQUIRED' });
+    await expect(agent.call('navigate', { tab_id: tabId, url: service.origin, description })).rejects.toMatchObject({
+      code: 'HANDOFF_REQUIRED',
+    });
 
     const handoff = agent.call('request_handoff', { tab_id: tabId, instructions: 'Confirm the native fixture' });
     await poll('c.handoffs.size').toBe(1);
@@ -120,7 +146,9 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     expect(tagged).toEqual({ client_id: expect.any(String), tab_id: tabId });
 
     // Closing the window disconnects; reopening reattaches without approval.
-    await app('browser.windows.getCurrent().then(w => browser.windows.remove(w.id)).then(() => true)').catch(() => null);
+    await app('browser.windows.getCurrent().then(w => browser.windows.remove(w.id)).then(() => true)').catch(
+      () => null,
+    );
     await expect.poll(async () => (await agent.call('list_browsers'))[0].online, { timeout: 15_000 }).toBe(false);
     expect((await agent.call('list_sessions'))[0].state).toBe('detached');
     await evaluateParent(`(() => { const w = Services.wm.getMostRecentWindow("navigator:browser");
@@ -130,24 +158,31 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     appConsole = await findTarget('/app.html');
     await poll('c.phase').toBe('online');
     await expect.poll(async () => (await agent.call('list_sessions'))[0]?.state, { timeout: 15_000 }).toBe('attached');
-    expect((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id)).toEqual([tabId]);
+    expect((await agent.call('list_tabs', { session_id: session.session_id })).map((tab) => tab.tab_id)).toEqual([
+      tabId,
+    ]);
 
     // Full browser restart: Firefox restores the group and per-tab values keep the same session and tab IDs.
     await app('(c.shutdown(), true)');
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await stop();
     launch();
     await install();
     appConsole = await findTarget('/app.html');
     await poll('c.phase', { timeout: 20_000 }).toBe('online');
     await expect.poll(async () => (await agent.call('list_sessions'))[0]?.state, { timeout: 20_000 }).toBe('attached');
-    expect((await agent.call('list_tabs', { session_id: session.session_id })).map(tab => tab.tab_id)).toEqual([tabId]);
+    expect((await agent.call('list_tabs', { session_id: session.session_id })).map((tab) => tab.tab_id)).toEqual([
+      tabId,
+    ]);
     // Firefox restores the tab lazily and never re-submits the last POST: same ID, navigation-only until navigated.
-    await expect(agent.call('get_text', { tab_id: tabId, description, selector: 'h1' }))
-      .rejects.toMatchObject({ code: 'DOCUMENT_NOT_CONTROLLABLE' });
+    await expect(agent.call('get_text', { tab_id: tabId, description, selector: 'h1' })).rejects.toMatchObject({
+      code: 'DOCUMENT_NOT_CONTROLLABLE',
+    });
     await agent.call('navigate', { tab_id: tabId, url: service.pageUrl, description });
     await agent.call('wait_for_page', { tab_id: tabId, description });
-    expect((await agent.call('get_text', { tab_id: tabId, description, selector: 'h1' })).text).toBe('Approved session fixture');
+    expect((await agent.call('get_text', { tab_id: tabId, description, selector: 'h1' })).text).toBe(
+      'Approved session fixture',
+    );
 
     const tabCount = 'browser.tabs.query({}).then(tabs => tabs.length)';
     const before = await app(tabCount);

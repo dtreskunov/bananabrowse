@@ -1,9 +1,38 @@
-.app { display: flex; flex-direction: column; min-height: 100%; }
-.connecting { padding: 10px 14px 0; }
-.strip { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 14px;
-  background: var(--warning-bg); color: var(--warning); border-bottom: 1px solid color-mix(in srgb, var(--warning) 35%, var(--surface)); }
-.strip div { display: grid; min-width: 0; overflow-wrap: anywhere; }
-.strip span { font-size: 12px; }
-.strip button { flex: none; }
-main { padding: 14px; display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr); }
-.app > main { align-content: start; }
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+.connecting {
+  padding: 10px 14px 0;
+}
+.strip {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 35%, var(--surface));
+}
+.strip div {
+  display: grid;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.strip span {
+  font-size: 12px;
+}
+.strip button {
+  flex: none;
+}
+main {
+  padding: 14px;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+}
+.app > main {
+  align-content: start;
+}

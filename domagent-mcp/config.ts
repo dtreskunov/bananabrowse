@@ -4,10 +4,21 @@ import { AGENT_ID_PATTERN, serviceOrigin, validName } from '../shared/protocol.j
 import { Fault, requireValue } from './errors.js';
 
 type Env = Record<string, string | undefined>;
-export interface Agent { id: string; name: string; url: string | null; key_hash: string }
+export interface Agent {
+  id: string;
+  name: string;
+  url: string | null;
+  key_hash: string;
+}
 export interface Config {
-  origin: string; bind: string; port: number; db: string; artifacts?: string | null;
-  protectedOrigins: string[]; agents: Map<string, Agent>; pairingSecret: string | null;
+  origin: string;
+  bind: string;
+  port: number;
+  db: string;
+  artifacts?: string | null;
+  protectedOrigins: string[];
+  agents: Map<string, Agent>;
+  pairingSecret: string | null;
   now?: () => number;
 }
 
@@ -38,13 +49,16 @@ export function parseAgents(env: Env): Map<string, Agent> {
     requireValue(AGENT_ID_PATTERN.test(id), 'INVALID_AGENT_ID');
     const parts = String(raw).split('|');
     requireValue(parts.length === 3, 'INVALID_AGENT_CONFIG');
-    const [name, homepage, digest] = parts.map(part => part.trim());
+    const [name, homepage, digest] = parts.map((part) => part.trim());
     requireValue(validName(name), 'INVALID_AGENT_CONFIG');
     let url: string | null = null;
     if (homepage) {
       try {
         const parsed = new URL(homepage);
-        requireValue(['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password, 'INVALID_AGENT_CONFIG');
+        requireValue(
+          ['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password,
+          'INVALID_AGENT_CONFIG',
+        );
         url = parsed.href;
       } catch (error) {
         if (error instanceof Fault) throw error;
@@ -62,18 +76,35 @@ export function parseAgents(env: Env): Map<string, Agent> {
 export function loadConfig(env: Env = process.env): Config {
   requireValue(Boolean(env.DOMAGENT_ORIGIN), 'SERVICE_ORIGIN_REQUIRED');
   let origin: string;
-  try { origin = serviceOrigin(env.DOMAGENT_ORIGIN!); }
-  catch { throw new Fault('INVALID_SERVICE_ORIGIN'); }
+  try {
+    origin = serviceOrigin(env.DOMAGENT_ORIGIN!);
+  } catch {
+    throw new Fault('INVALID_SERVICE_ORIGIN');
+  }
   const port = Number(env.DOMAGENT_PORT || 18792);
   requireValue(Number.isInteger(port) && port > 0 && port <= 65535, 'INVALID_PORT');
   const protectedOrigins = [origin];
   try {
-    protectedOrigins.push(...(env.DOMAGENT_PROTECTED_ORIGINS || '').split(',').map(value => value.trim())
-      .filter(Boolean).map(value => new URL(value).origin));
-  } catch { throw new Fault('INVALID_PROTECTED_ORIGIN'); }
+    protectedOrigins.push(
+      ...(env.DOMAGENT_PROTECTED_ORIGINS || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => new URL(value).origin),
+    );
+  } catch {
+    throw new Fault('INVALID_PROTECTED_ORIGIN');
+  }
   const db = env.DOMAGENT_DB || './data/domagent.db';
   const artifacts = env.DOMAGENT_ARTIFACTS_DIR || (db === ':memory:' ? null : join(dirname(db), 'artifacts'));
-  return { origin, bind: env.DOMAGENT_BIND || '127.0.0.1', port,
-    db, artifacts, protectedOrigins: [...new Set(protectedOrigins)],
-    agents: parseAgents(env), pairingSecret: secret(env, 'DOMAGENT_PAIRING_SECRET') };
+  return {
+    origin,
+    bind: env.DOMAGENT_BIND || '127.0.0.1',
+    port,
+    db,
+    artifacts,
+    protectedOrigins: [...new Set(protectedOrigins)],
+    agents: parseAgents(env),
+    pairingSecret: secret(env, 'DOMAGENT_PAIRING_SECRET'),
+  };
 }

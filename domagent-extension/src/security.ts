@@ -1,3 +1,4 @@
+import type { Wire } from '../../shared/protocol.js';
 import { EXECUTION_MS, MAX_MESSAGE_BYTES, serviceOrigin } from '../../shared/protocol.js';
 
 export { MAX_MESSAGE_BYTES };
@@ -5,24 +6,24 @@ export const MAX_RESULT_BYTES = MAX_MESSAGE_BYTES - 4096;
 export const MAX_QUEUE = 16;
 export const COMMAND_TIMEOUT_MS = EXECUTION_MS;
 
-export function fail(code, details = {}) {
+export function fail(code: string, details: Wire = {}): never {
   throw Object.assign(new Error(code), details, { code });
 }
 
-export function text(value, max = 256) {
+export function text(value: unknown, max = 256): string {
   if (typeof value !== 'string' || !value.length || value.length > max) fail('INVALID_MESSAGE');
   return value;
 }
 
-export function id(value) {
+export function id(value: unknown): string {
   text(value, 128);
-  if (!/^[a-zA-Z0-9_.:-]+$/.test(value)) fail('INVALID_MESSAGE');
-  return value;
+  if (!/^[a-zA-Z0-9_.:-]+$/.test(value as string)) fail('INVALID_MESSAGE');
+  return value as string;
 }
 
-export function originList(values) {
+export function originList(values: unknown): string[] {
   if (!Array.isArray(values) || values.length > 128) fail('INVALID_MESSAGE');
-  return [...new Set(values.map(value => {
+  return [...new Set((values as unknown[]).map(value => {
     const url = new URL(text(value, 2048));
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password ||
         url.search || url.hash || url.pathname !== '/') fail('INVALID_ORIGIN');
@@ -30,11 +31,11 @@ export function originList(values) {
   }))];
 }
 
-export function protectedUnion(origin, ...lists) {
+export function protectedUnion(origin: string, ...lists: unknown[]): string[] {
   return [...new Set([serviceOrigin(origin), ...lists.flatMap(originList)])];
 }
 
-export function errorCode(error) {
+export function errorCode(error: any): string {
   const known = [
     'INVALID_MESSAGE', 'INVALID_ARGUMENT', 'INVALID_ORIGIN', 'INVALID_SERVICE_ORIGIN',
     'NOT_AUTHORIZED', 'APPROVAL_REQUIRED', 'BROWSER_OFFLINE', 'TARGET_STALE',
@@ -60,7 +61,7 @@ export function errorCode(error) {
   return known.includes(error?.code || error?.message) ? error.code || error.message : 'OUTCOME_UNKNOWN';
 }
 
-export function boundedResult(value) {
+export function boundedResult(value: unknown): any {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) fail('RESULT_TOO_LARGE');
   const bytes = new TextEncoder().encode(serialized).length;
@@ -69,9 +70,9 @@ export function boundedResult(value) {
 }
 
 // Anchor the complete origin, not a hostname substring or a suffix.
-export function protectedRegex(value) {
+export function protectedRegex(value: string): string {
   const url = new URL(value);
-  const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const defaultPort = url.protocol === 'https:' ? '443' : '80';
   return `^${escape(url.protocol)}//(?:[^/@]*@)?${escape(url.hostname)}${url.port ? `:${url.port}` : `(?::${defaultPort})?`}(?:/|$)`;
 }

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
+import type { App } from './app.js';
 import { createApp } from './app.js';
 import { audit, failureCode } from './errors.js';
 
 process.umask(0o077);
-let app;
-let store;
+let app: App | undefined;
+let store: Store | undefined;
 try {
   const config = loadConfig();
   store = new Store(config.db);

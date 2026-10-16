@@ -1,3 +1,5 @@
+import type { Wire } from './protocol.js';
+
 const LIMITS = Object.freeze({ depth: 6, entries: 128, array: 32, string: 4096, stack: 16384, total: 24576 });
 const REDACTED = '[redacted]';
 const PRIVATE_KEY = /(?:authorization|authentication|proxyauthorization|cookie|credential|password|passwd|secret|token|apikey|sessionid|clientkey|privatekey)/i;
@@ -5,7 +7,7 @@ const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get ||
   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')?.get;
 
-function redact(value) {
+function redact(value: string): string {
   return value
     .replace(/\b(?:https?|wss?):\/\/[^\s<>"']+/gi, raw => {
       try {
@@ -24,7 +26,7 @@ function redact(value) {
       '$1[redacted]');
 }
 
-function dataProperty(input, key) {
+function dataProperty(input: unknown, key: string): unknown {
   let current = input;
   for (let depth = 0; current && depth < 4; depth++, current = Object.getPrototypeOf(current)) {
     const property = Object.getOwnPropertyDescriptor(current, key);
@@ -37,15 +39,16 @@ function dataProperty(input, key) {
       return undefined;
     }
   }
+  return undefined;
 }
 
 /** Sanitize untrusted browser/native diagnostics without evaluating getters or retaining references. */
-export function sanitizeDiagnostics(input) {
+export function sanitizeDiagnostics(input: unknown): Wire | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
-  const ancestors = new WeakSet(), reasons = new Set();
+  const ancestors = new WeakSet<object>(), reasons = new Set<string>();
   let entries = 0, remaining = LIMITS.total;
-  const truncated = reason => { reasons.add(reason); return `[truncated:${reason}]`; };
-  const string = (value, key) => {
+  const truncated = (reason: string) => { reasons.add(reason); return `[truncated:${reason}]`; };
+  const string = (value: string, key: string) => {
     // Redact before clipping, so clipping cannot expose part of a credential.
     const safe = redact(value), limit = Math.min(key === 'stack' ? LIMITS.stack : LIMITS.string, remaining);
     remaining -= Math.min(safe.length, limit);
@@ -53,7 +56,7 @@ export function sanitizeDiagnostics(input) {
     reasons.add(remaining === 0 ? 'total' : 'string');
     return `${safe.slice(0, limit)}[truncated]`;
   };
-  const visit = (value, depth, key = '') => {
+  const visit = (value: unknown, depth: number, key = ''): unknown => {
     if (PRIVATE_KEY.test(key.replace(/[^a-z0-9]/gi, ''))) return REDACTED;
     if (typeof value === 'string') return string(value, key);
     if (value === null || typeof value === 'boolean') return value;
@@ -63,7 +66,7 @@ export function sanitizeDiagnostics(input) {
     if (depth > LIMITS.depth) return truncated('depth');
     if (remaining <= 0) return truncated('total');
     ancestors.add(value);
-    const result = Array.isArray(value) ? [] : {};
+    const result: unknown[] | Wire = Array.isArray(value) ? [] : {};
     const headerName = dataProperty(value, 'name') || dataProperty(value, 'header');
     const privateHeader = typeof headerName === 'string' && PRIVATE_KEY.test(headerName.replace(/[^a-z0-9]/gi, ''));
     const keys = value instanceof Error
@@ -86,7 +89,7 @@ export function sanitizeDiagnostics(input) {
     return result;
   };
   try {
-    const result = visit(input, 0);
+    const result = visit(input, 0) as Wire;
     if (reasons.size) { result.truncated = true; result.truncation_reasons = [...reasons]; }
     return Object.keys(result).length ? result : undefined;
   } catch {
@@ -96,10 +99,10 @@ export function sanitizeDiagnostics(input) {
 }
 
 /** Return a result-error spread, preferring diagnostics already supplied by the browser. */
-export function diagnosticDetails(error, context = {}) {
-  let source;
+export function diagnosticDetails(error: unknown, context: Wire = {}): { diagnostics: Wire } {
+  let source: Wire;
   try {
-    source = dataProperty(error, 'diagnostics');
+    source = dataProperty(error, 'diagnostics') as Wire;
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
       source = { name: dataProperty(error, 'name') || 'Error',
         message: dataProperty(error, 'message') || dataProperty(error, 'code') || 'Browser execution failed',
@@ -108,7 +111,7 @@ export function diagnosticDetails(error, context = {}) {
         const value = dataProperty(error, key);
         if (value !== undefined) source[key] = value;
       }
-      for (const key of Object.keys(error || {}).slice(0, LIMITS.entries)) {
+      for (const key of Object.keys(error ?? {}).slice(0, LIMITS.entries)) {
         if (key === 'diagnostics' || UNSAFE_KEYS.has(key)) continue;
         const value = dataProperty(error, key);
         if (value !== undefined) source[key] = value;
@@ -126,10 +129,10 @@ const AGENT_FIELDS = Object.freeze(['name', 'message', 'layer', 'phase', 'execut
  * exception objects and causes cost thousands of tokens and rarely help an agent recover;
  * actionable locations are reported separately as line/column/snippet.
  */
-export function agentDiagnostics(input) {
+export function agentDiagnostics(input: unknown): Wire | undefined {
   const safe = sanitizeDiagnostics(input);
   if (!safe) return undefined;
-  const result = {};
+  const result: Wire = {};
   for (const key of AGENT_FIELDS) {
     if (typeof safe[key] !== 'string' || !safe[key]) continue;
     result[key] = safe[key].length > 500 ? `${safe[key].slice(0, 500)}[truncated]` : safe[key];

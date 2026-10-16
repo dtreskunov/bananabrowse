@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "npm --prefix domagent-mcp run build",
+    "build:service": "npm --prefix domagent-mcp run build:service",
+    "typecheck": "npm --prefix domagent-mcp run typecheck",
     "check": "npm --prefix domagent-mcp run check",
     "test": "npm --prefix domagent-mcp test"
   }

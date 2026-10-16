@@ -3,20 +3,23 @@
     "private": true,
     "version": "6.1.0-beta.5",
     "description": "MCP server for DOMAgent — let AI agents control your real browser via Chrome or Firefox extension",
-    "main": "index.js",
+    "main": "dist/domagent-mcp/index.js",
     "type": "module",
     "bin": {
-        "domagent": "./index.js"
+        "domagent": "./dist/domagent-mcp/index.js"
     },
     "scripts": {
-        "start": "node index.js",
-        "test": "node --test test/*.test.js ../domagent-extension/test/*.test.js && npm --prefix ../domagent-extension/ui test",
-        "build": "node ../scripts/build-extensions.mjs",
-        "test:browser": "playwright test --config ../domagent-extension/playwright.config.cjs",
+        "start": "node dist/domagent-mcp/index.js",
+        "dev": "tsx index.ts",
+        "typecheck": "tsc -p . --noEmit && tsc -p ../domagent-extension && tsc -p ../domagent-extension/ui --noEmit",
+        "test": "node --import tsx --test test/*.test.js ../domagent-extension/test/*.test.js && npm --prefix ../domagent-extension/ui test",
+        "build:service": "tsc -p .",
+        "build": "npm run build:service && node ../scripts/build-extensions.mjs",
+        "test:browser": "npm run build:service && playwright test --config ../domagent-extension/playwright.config.cjs",
         "check": "node ../scripts/check.mjs"
     },
     "files": [
-        "*.js",
+        "dist/",
         "README.md"
     ],
     "keywords": [
@@ -49,7 +52,11 @@
     },
     "devDependencies": {
         "@playwright/test": "1.58.2",
-        "esbuild": "0.25.12"
+        "@types/node": "22.20.5",
+        "@types/ws": "8.18.1",
+        "esbuild": "0.25.12",
+        "tsx": "4.21.0",
+        "typescript": "5.9.3"
     },
     "publishConfig": {
         "registry": "https://registry.npmjs.org/"

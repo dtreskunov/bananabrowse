@@ -5,8 +5,9 @@ import { pageHelper } from './page.js';
 import { actionSummary } from './approval-summary.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
 import { compileScriptSource, locateScriptError, prepareEvaluateExpression, stackLocation } from './script-source.js';
+import type { Wire } from '../../shared/protocol.js';
 
-export function injectionReason(error) {
+export function injectionReason(error: any): string {
   const message = typeof error?.message === 'string' ? error.message : '';
   if (/missing host permission|cannot access contents|permission.*(?:denied|tab)/i.test(message)) return 'permission_denied';
   if (/restricted|not allowed.*(?:page|url)|cannot.*(?:privileged|about:)|extensions.*(?:not permitted|not allowed)/i.test(message)) {
@@ -19,28 +20,52 @@ export function injectionReason(error) {
 }
 
 const POLICY_MESSAGE = /unsafe-eval|content security policy|csp|code generation/i;
-function scriptFailureCode(native) {
+function scriptFailureCode(native: any): string {
   if (native?.name === 'SyntaxError') return 'SCRIPT_SYNTAX_ERROR';
   if (native?.name === 'EvalError' && POLICY_MESSAGE.test(native.message || '')) return 'SCRIPT_POLICY_BLOCKED';
   return 'SCRIPT_RUNTIME_ERROR';
 }
-function scriptError(code, native, phase, world, script, located, layer = 'browser') {
+function scriptError(code: string, native: unknown, phase: string, world: string, script: unknown,
+  located: { line?: number; column?: number } | null | undefined, layer = 'browser'): Error {
   return locateScriptError(Object.assign(new Error(code), { code,
     ...diagnosticDetails(native, { layer, phase, execution_world: world }) }), script, located?.line, located?.column);
 }
 // Artifacts are stored by the service; only the transport bound applies to them here.
-function evaluationResult(evaluated, args, onSerializationError) {
+/** The controller's tab record as seen by the adapter. */
+export interface Grant {
+  tabId: number;
+  groupId?: number | null;
+  protected_origins: string[];
+  scriptWorldId?: string;
+  navigation?: { from?: string; url: string; document?: string } | null;
+  url?: string;
+  pageState?: string;
+  blankAllowed?: boolean;
+}
+
+function evaluationResult(evaluated: unknown, args: Wire, onSerializationError: (error: unknown) => any): any {
   if (args.return_as === 'artifact') return evaluated;
   try {
     return compactResult('evaluate_script', evaluated, args);
-  } catch (error) {
+  } catch (error: any) {
     if (error.code === 'RESULT_TOO_LARGE') throw error;
     return onSerializationError(error);
   }
 }
 
 export class BrowserAdapter {
-  constructor(api, browserName) {
+  declare api: any;
+  declare browserName: string;
+  declare guards: Map<number, Wire>;
+  declare attached: Set<number>;
+  declare contexts: Map<number, Map<string, any>>;
+  declare refBases: Map<number, number>;
+  declare nextRule: number;
+  declare onTabEvent: (tabId: number, event: string, url?: string) => void;
+  declare onWarning: (error?: unknown) => void;
+  declare selectedWindowId: number | null;
+
+  constructor(api: any, browserName: string) {
     this.api = api;
     this.browserName = browserName;
     this.guards = new Map();
@@ -68,20 +93,20 @@ export class BrowserAdapter {
     if (this.browserName === 'chrome') {
       const rules = await this.api.declarativeNetRequest.getSessionRules();
       if (rules.length) await this.api.declarativeNetRequest.updateSessionRules({
-        removeRuleIds: rules.map(rule => rule.id),
+        removeRuleIds: rules.map((rule: any) => rule.id),
       });
       const targets = await this.api.debugger.getTargets();
-      for (const target of targets.filter(target => target.attached && Number.isInteger(target.tabId))) {
+      for (const target of targets.filter((target: any) => target.attached && Number.isInteger(target.tabId))) {
         // Chrome only permits detaching this extension's own attachment. Never
         // resume a grant, even if the worker restarted while a tab stayed open.
         await this.api.debugger.detach({ tabId: target.tabId }).catch(() => {});
       }
-      this.api.debugger.onDetach.addListener(source => {
+      this.api.debugger.onDetach.addListener((source: any) => {
         this.attached.delete(source.tabId);
         this.contexts.delete(source.tabId);
         this.onTabEvent(source.tabId, 'detached');
       });
-      this.api.debugger.onEvent.addListener((source, method, params) => {
+      this.api.debugger.onEvent.addListener((source: any, method: string, params: any) => {
         if (!this.attached.has(source.tabId)) return;
         if (method === 'Runtime.executionContextsCleared') this.contexts.delete(source.tabId);
         if (method === 'Runtime.executionContextCreated' && params.context.auxData?.isDefault) {
@@ -91,13 +116,13 @@ export class BrowserAdapter {
         }
         if (method === 'Runtime.executionContextDestroyed') {
           for (const [frame, context] of this.contexts.get(source.tabId) || []) {
-            if (context.id === params.executionContextId) this.contexts.get(source.tabId).delete(frame);
+            if (context.id === params.executionContextId) this.contexts.get(source.tabId)!.delete(frame);
           }
         }
       });
     } else {
       if (!this.api.webRequest?.onBeforeRequest) fail('PROTECTION_UNAVAILABLE');
-      this.api.webRequest.onBeforeRequest.addListener(details => {
+      this.api.webRequest.onBeforeRequest.addListener((details: any) => {
         const guard = this.guards.get(details.tabId);
         if (!guard) return {};
         let blocked = false;
@@ -111,27 +136,27 @@ export class BrowserAdapter {
         return { cancel: blocked };
       }, { urls: ['http://*/*', 'https://*/*'] }, ['blocking']);
     }
-    this.api.tabs.onActivated?.addListener(info => {
+    this.api.tabs.onActivated?.addListener((info: any) => {
       void this.rememberWindow(info.windowId).catch(() => {});
     });
-    this.api.windows?.onFocusChanged.addListener(windowId => {
+    this.api.windows?.onFocusChanged.addListener((windowId: number) => {
       void this.rememberWindow(windowId).catch(() => {});
     });
-    this.api.windows?.onRemoved.addListener(windowId => {
+    this.api.windows?.onRemoved.addListener((windowId: number) => {
       if (this.selectedWindowId === windowId) this.selectedWindowId = null;
     });
-    this.api.tabs.onUpdated.addListener((tabId, change) => {
+    this.api.tabs.onUpdated.addListener((tabId: number, change: any) => {
       if (change.status === 'loading' || change.url) this.onTabEvent(tabId, 'navigation', change.url);
       if (change.status === 'complete') this.onTabEvent(tabId, 'complete');
     });
-    this.api.tabs.onRemoved.addListener(tabId => { this.refBases.delete(tabId); this.onTabEvent(tabId, 'closed'); });
-    this.api.webNavigation.onBeforeNavigate.addListener(details => {
+    this.api.tabs.onRemoved.addListener((tabId: number) => { this.refBases.delete(tabId); this.onTabEvent(tabId, 'closed'); });
+    this.api.webNavigation.onBeforeNavigate.addListener((details: any) => {
       if (details.frameId !== 0) return;
       const guard = this.guards.get(details.tabId);
       const protectedPage = guard?.origins.includes(new URL(details.url).origin);
       this.onTabEvent(details.tabId, protectedPage ? 'protected_pending' : 'navigation_pending', details.url);
     });
-    this.api.webNavigation.onErrorOccurred.addListener(details => {
+    this.api.webNavigation.onErrorOccurred.addListener((details: any) => {
       if (details.frameId !== 0) return;
       this.onTabEvent(details.tabId, 'navigation', details.url);
       const guard = this.guards.get(details.tabId);
@@ -149,7 +174,7 @@ export class BrowserAdapter {
     }
   }
 
-  async rememberWindow(windowId) {
+  async rememberWindow(windowId: number) {
     if (!Number.isInteger(windowId) || windowId < 0) return;
     const window = await this.api.windows.get(windowId);
     if (window.type === 'normal') this.selectedWindowId = windowId;
@@ -164,27 +189,27 @@ export class BrowserAdapter {
       } catch { this.selectedWindowId = null; }
     }
     const windows = await this.api.windows.getAll({ windowTypes: ['normal'] });
-    const window = windows.find(window => window.focused) || windows.at(-1);
+    const window = windows.find((window: any) => window.focused) || windows.at(-1);
     if (window) return window.id;
     return (await this.api.windows.create({ focused: false, url: 'about:blank' })).id;
   }
 
-  async assertWorkspace(grant) {
+  async assertWorkspace(grant: Grant) {
     const tab = await this.api.tabs.get(grant.tabId);
     if (tab.groupId !== grant.groupId) fail('TAB_NOT_IN_SESSION');
   }
 
-  async focusTab(tabId) {
+  async focusTab(tabId: number) {
     const tab = await this.api.tabs.get(tabId);
     await this.api.windows.update(tab.windowId, { focused: true });
     await this.api.tabs.update(tabId, { active: true });
   }
 
-  async protect(tabId, origins) {
+  async protect(tabId: number, origins: string[]) {
     await this.permissions();
     if (this.guards.has(tabId)) fail('PROTECTION_UNAVAILABLE');
     if (this.browserName === 'chrome') {
-      const rules = origins.flatMap(origin => {
+      const rules = origins.flatMap((origin: string) => {
         const condition = { regexFilter: protectedRegex(origin), isUrlFilterCaseSensitive: false, tabIds: [tabId] };
         // Chrome's default resource types exclude main_frame. Keep a broad
         // rule for every subresource, and explicitly cover top-level redirects.
@@ -203,7 +228,7 @@ export class BrowserAdapter {
     }
   }
 
-  async attach(tabId) {
+  async attach(tabId: number) {
     if (this.browserName === 'chrome') {
       await this.api.debugger.attach({ tabId }, '1.3');
       this.attached.add(tabId);
@@ -211,7 +236,7 @@ export class BrowserAdapter {
     }
   }
 
-  async release(tabId, { retainProtection = false } = {}) {
+  async release(tabId: number, { retainProtection = false } = {}) {
     if (this.attached.has(tabId)) {
       try {
         await this.api.debugger.detach({ tabId });
@@ -225,7 +250,7 @@ export class BrowserAdapter {
     if (!retainProtection) await this.dropProtection(tabId);
   }
 
-  async dropProtection(tabId) {
+  async dropProtection(tabId: number) {
     const guard = this.guards.get(tabId);
     if (guard?.ruleIds) {
       // Retain the guard record on failure; later cleanup may retry it.
@@ -234,7 +259,7 @@ export class BrowserAdapter {
     this.guards.delete(tabId);
   }
 
-  async releaseAfterNavigation(tabId) {
+  async releaseAfterNavigation(tabId: number) {
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
       const tab = await this.api.tabs.get(tabId);
@@ -247,9 +272,9 @@ export class BrowserAdapter {
     fail('PROTECTION_UNAVAILABLE');
   }
 
-  async helper(tabId, operation, args) {
+  async helper(tabId: number, operation: string, args: Wire): Promise<any> {
     if (operation === 'get_page_snapshot') args = { ...args, ref_base: this.refBases.get(tabId) ?? 1 };
-    let responses;
+    let responses: any;
     try {
       responses = await this.api.scripting.executeScript({
         target: { tabId, frameIds: [0] }, world: 'ISOLATED', func: pageHelper, args: [operation, args],
@@ -286,11 +311,11 @@ export class BrowserAdapter {
       response.result = snapshot;
     }
     return { ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
-      ? compactResult(operation, response.result, args) : response.result),
+      ? compactResult(operation, response.result, args) as Wire : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}) };
   }
 
-  async inspect(tabId, origins, allowBlank = false) {
+  async inspect(tabId: number, origins: string[], allowBlank = false): Promise<any> {
     const tab = await this.api.tabs.get(tabId);
     const blank = (tab.url || tab.pendingUrl) === 'about:blank' &&
       (!tab.pendingUrl || tab.pendingUrl === 'about:blank');
@@ -302,9 +327,9 @@ export class BrowserAdapter {
     if (tab.status === 'loading' || tab.pendingUrl) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'tab_status' });
     }
-    let page;
+    let page: any;
     try { page = await this.helper(tabId, 'inspect', {}); }
-    catch (error) {
+    catch (error: any) {
       if (['PAGE_UNAVAILABLE', 'TARGET_STALE'].includes(error.code)) error.inspection_stage = 'document_injection';
       throw error;
     }
@@ -320,7 +345,7 @@ export class BrowserAdapter {
     return page;
   }
 
-  async waitForInspection(grant, timeoutMs, check, allowBlank = false) {
+  async waitForInspection(grant: Grant, timeoutMs: number, check: () => void, allowBlank = false): Promise<any> {
     const deadline = Date.now() + timeoutMs;
     while (true) {
       check();
@@ -346,7 +371,7 @@ export class BrowserAdapter {
         if (navigation) delete grant.navigation;
         check();
         return page;
-      } catch (error) {
+      } catch (error: any) {
         check();
         if (!['TARGET_STALE', 'PAGE_UNAVAILABLE'].includes(error.code) || !error.inspection_stage) throw error;
         if (Date.now() >= deadline) {
@@ -363,7 +388,7 @@ export class BrowserAdapter {
     }
   }
 
-  async evaluateScript(grant, document, args, checkCurrent) {
+  async evaluateScript(grant: Grant, document: Wire, args: Wire, checkCurrent: () => void): Promise<any> {
     const world = args.world || 'MAIN';
     if (this.browserName === 'chrome' && world !== 'USER_SCRIPT') {
       const tree = await this.api.debugger.sendCommand({ tabId: grant.tabId }, 'Page.getFrameTree');
@@ -375,7 +400,7 @@ export class BrowserAdapter {
     return this.evaluateWithUserScripts(grant, document, args, world);
   }
 
-  async evaluateWithDebugger(tabId, context, args) {
+  async evaluateWithDebugger(tabId: number, context: any, args: Wire): Promise<any> {
     // The remote caller chooses only page source, never a CDP method/target/context.
     const prepared = prepareEvaluateExpression(args.script);
     const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
@@ -401,16 +426,16 @@ export class BrowserAdapter {
       () => fail('SCRIPT_SERIALIZATION_ERROR'));
   }
 
-  async evaluateWithUserScripts(grant, document, args, world) {
+  async evaluateWithUserScripts(grant: Grant, document: Wire, args: Wire, world: string): Promise<any> {
     const tabId = grant.tabId;
-    let compiled;
+    let compiled: ReturnType<typeof compileScriptSource>;
     try { compiled = compileScriptSource(args.script); }
-    catch (error) {
+    catch (error: any) {
       const failure = scriptError('SCRIPT_SYNTAX_ERROR', error, 'validation', world, args.script,
         { line: error.line, column: error.column }, 'extension');
       throw Object.assign(failure, { dispatch_status: 'not_dispatched' });
     }
-    let responses;
+    let responses: any;
     try {
       if (!this.api.userScripts?.execute) throw new Error('Native user-script API is unavailable or not enabled.');
       const worldId = grant.scriptWorldId || 'domagent';
@@ -450,7 +475,7 @@ export class BrowserAdapter {
     });
   }
 
-  async prepareAction(grant, operation, args, check = () => {}) {
+  async prepareAction(grant: Grant, operation: string, args: Wire, check: () => void = () => {}): Promise<Wire> {
     await this.assertWorkspace(grant);
     if (operation === 'navigate') {
       check();
@@ -463,7 +488,7 @@ export class BrowserAdapter {
       return { summary: actionSummary(operation, args, { title: tab.title, url }) };
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
-    let target;
+    let target: any;
     if (operation !== 'inspect_element' && (args.selector || args.ref)) {
       target = await this.helper(grant.tabId, 'prepare_action', {
         ...args, action: operation, document_nonce: page.document_nonce,
@@ -473,13 +498,14 @@ export class BrowserAdapter {
       document_nonce: page.document_nonce, approval_token: target?.approval_token };
   }
 
-  async releaseAction(grant, preview) {
+  async releaseAction(grant: Grant, preview: Wire | null | undefined) {
     if (preview?.approval_token) {
       await this.helper(grant.tabId, 'release_action', { approval_token: preview.approval_token });
     }
   }
 
-  async execute(grant, operation, args, checkCurrent, preview) {
+  async execute(grant: Grant, operation: string, args: Wire, checkCurrent: (after?: boolean) => void,
+    preview?: Wire | null): Promise<any> {
     if (!validOperationArgs(operation, args)) fail('INVALID_ARGUMENT');
     await this.assertWorkspace(grant);
     const tabId = grant.tabId;
@@ -498,9 +524,9 @@ export class BrowserAdapter {
       const timeout = args.timeout_ms ?? PAGE_WAIT_MS;
       const deadline = Date.now() + timeout;
       while (true) {
-        let page;
+        let page: any;
         try { page = await this.waitForInspection(grant, Math.max(0, deadline - Date.now()), checkCurrent); }
-        catch (error) {
+        catch (error: any) {
           if (error.code === 'TARGET_STALE' && args.timeout_ms === 0) error.code = error.message = 'WAIT_TIMEOUT';
           throw error;
         }
@@ -541,7 +567,7 @@ export class BrowserAdapter {
         return boundedResult({ mimeType: 'image/png', data: screenshot.data });
       }
       if (!this.api.tabs.captureTab) fail('CAPABILITY_UNAVAILABLE');
-      let screenshot;
+      let screenshot: unknown;
       try {
         screenshot = await this.api.tabs.captureTab(tabId, { format: 'png' });
       } catch (error) {
@@ -562,7 +588,7 @@ export class BrowserAdapter {
       try {
         return await this.helper(tabId, operation, { ...args, document_nonce: document.document_nonce,
           ...(preview?.approval_token ? { approval_token: preview.approval_token } : {}) });
-      } catch (error) {
+      } catch (error: any) {
         const retryable = READINESS_ERRORS.includes(error.code);
         if (!waitable || !retryable || args.timeout_ms === 0) throw error;
         if (Date.now() >= deadline) {

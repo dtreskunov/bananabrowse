@@ -1,33 +1,35 @@
+import type { Wire } from '../../shared/protocol.js';
+
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
-export async function pageHelper(operation, args = {}) {
+export async function pageHelper(operation: string, args: Wire = {}): Promise<any> {
   const nonce = () => [...crypto.getRandomValues(new Uint8Array(16))]
     .map(byte => byte.toString(16).padStart(2, '0')).join('');
   const documentKey = '__domagentDocumentNonce';
-  if (!globalThis[documentKey]) globalThis[documentKey] = nonce();
-  if (args.document_nonce && args.document_nonce !== globalThis[documentKey]) return { error: 'TARGET_STALE' };
-  if (args.document && args.document !== globalThis[documentKey]) {
+  if (!(globalThis as any)[documentKey]) (globalThis as any)[documentKey] = nonce();
+  if (args.document_nonce && args.document_nonce !== (globalThis as any)[documentKey]) return { error: 'TARGET_STALE' };
+  if (args.document && args.document !== (globalThis as any)[documentKey]) {
     return { error: 'TARGET_STALE', stale_reason: 'document_changed', snapshot_document: args.document,
-      current_document: globalThis[documentKey] };
+      current_document: (globalThis as any)[documentKey] };
   }
   if (operation === 'inspect') return { url: location.href, title: document.title,
-    content_type: document.contentType, document_nonce: globalThis[documentKey], ready_state: document.readyState };
+    content_type: document.contentType, document_nonce: (globalThis as any)[documentKey], ready_state: document.readyState };
   // Ref numbers keep rising across documents in a tab (ref_base), so a ref from an earlier
   // document can never name an element here; first classifies stale refs.
-  const state = globalThis.__domagentPageRefs ||= { entries: new Map(), next: 1, first: null };
-  const bindings = globalThis.__domagentActionBindings ||= new Map();
+  const state = (globalThis as any).__domagentPageRefs ||= { entries: new Map(), next: 1, first: null };
+  const bindings = (globalThis as any).__domagentActionBindings ||= new Map();
   if (operation === 'release_action') {
     bindings.delete(args.approval_token);
     return { released: true };
   }
   const marker = '[data-domagent-sharing],[data-domagent-control-frame]';
-  const parent = node => node.parentElement || node.getRootNode()?.host;
-  const ignored = element => {
+  const parent = (node: any) => node.parentElement || node.getRootNode()?.host;
+  const ignored = (element: any) => {
     for (let node = element; node; node = parent(node)) {
       if (node.matches(marker)) return true;
     }
     return false;
   };
-  const visible = element => {
+  const visible = (element: any) => {
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') return false;
@@ -36,9 +38,9 @@ export async function pageHelper(operation, args = {}) {
     }
     return true;
   };
-  const textOf = (element, limit = 10_000, redactEditable = false) => {
+  const textOf = (element: any, limit = 10_000, redactEditable = false) => {
     let remaining = limit;
-    const read = node => {
+    const read = (node: any): string => {
       if (remaining <= 0) return '';
       if (node.nodeType === 3) {
         const value = node.textContent.slice(0, remaining);
@@ -56,13 +58,13 @@ export async function pageHelper(operation, args = {}) {
     };
     return read(element).trim().slice(0, limit);
   };
-  const textData = (element, redactEditable = false) => {
+  const textData = (element: any, redactEditable = false) => {
     const limit = args.max_text_chars ?? 4000;
     const sample = textOf(element, limit + 1, redactEditable);
     return { text: sample.slice(0, limit), text_truncated: sample.length > limit };
   };
-  const roots = [document];
-  const all = [];
+  const roots: (Document | ShadowRoot)[] = [document];
+  const all: any[] = [];
   const needsTree = !args.ref && (args.selector ||
     ['get_page_snapshot', 'get_interactive_elements', 'clear_overlays'].includes(operation));
   for (let index = 0; needsTree && index < roots.length; index++) {
@@ -74,33 +76,33 @@ export async function pageHelper(operation, args = {}) {
       if (element.shadowRoot) roots.push(element.shadowRoot);
     }
   }
-  const roleOf = element => element.getAttribute('role')?.trim().split(/\s+/)[0] || ({
+  const roleOf = (element: any) => element.getAttribute('role')?.trim().split(/\s+/)[0] || ({
     A: element.hasAttribute('href') ? 'link' : null, BUTTON: 'button',
     TEXTAREA: 'textbox', SELECT: element.multiple ? 'listbox' : 'combobox',
-    INPUT: { checkbox: 'checkbox', radio: 'radio', range: 'slider', button: 'button',
-      submit: 'button', reset: 'button' }[element.type] || 'textbox',
+    INPUT: ({ checkbox: 'checkbox', radio: 'radio', range: 'slider', button: 'button',
+      submit: 'button', reset: 'button' } as Record<string, string>)[element.type] || 'textbox',
     H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading',
-  })[element.tagName] || (element.isContentEditable ? 'textbox' : null);
-  const nameOf = element => {
+  } as Record<string, string | null>)[element.tagName] || (element.isContentEditable ? 'textbox' : null);
+  const nameOf = (element: any) => {
     const labelled = element.getAttribute('aria-labelledby')?.split(/\s+/)
-      .map(id => element.getRootNode().getElementById(id)).filter(Boolean).map(label => textOf(label)).join(' ');
+      .map((id: string) => element.getRootNode().getElementById(id)).filter(Boolean).map((label: any) => textOf(label)).join(' ');
     return (labelled || element.getAttribute('aria-label') ||
       [...(element.labels || [])].map(label => textOf(label)).join(' ') ||
       element.getAttribute('alt') || element.getAttribute('title') ||
       (element.matches('input,textarea,select') || element.isContentEditable
         ? element.getAttribute('placeholder') : textOf(element)) || '').replace(/\s+/g, ' ').trim().slice(0, 500);
   };
-  const disabled = element => element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
-  const readonly = element => element.readOnly || element.getAttribute('aria-readonly') === 'true';
-  const editable = element => element.isContentEditable ||
+  const disabled = (element: any) => element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
+  const readonly = (element: any) => element.readOnly || element.getAttribute('aria-readonly') === 'true';
+  const editable = (element: any) => element.isContentEditable ||
     element.matches('textarea,input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="hidden"])');
-  const elementState = (element, rect) => ({
+  const elementState = (element: any, rect: DOMRect) => ({
     disabled: disabled(element), readonly: Boolean(readonly(element)),
     editable: editable(element) && !readonly(element) && !disabled(element),
     in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
   });
   const viewport = { width: innerWidth, height: innerHeight };
-  const hidingNode = element => {
+  const hidingNode = (element: any) => {
     for (let node = element; node; node = parent(node)) {
       const style = getComputedStyle(node);
       if (style.display === 'none') return { node, reason: 'DISPLAY_NONE' };
@@ -112,11 +114,11 @@ export async function pageHelper(operation, args = {}) {
     }
     return null;
   };
-  const metadata = element => ({
+  const metadata = (element: any) => ({
     tag: element.tagName.toLowerCase(), id: element.id?.slice(0, 80) || null,
     role: roleOf(element)?.slice(0, 80) || null, name: nameOf(element).slice(0, 80),
   });
-  const activationLabel = element => {
+  const activationLabel = (element: any) => {
     if (!element.matches('input[type="checkbox"],input[type="radio"]') || visible(element)) return {};
     const hiding = hidingNode(element);
     if (hiding && hiding.node !== element) return {};
@@ -125,7 +127,7 @@ export async function pageHelper(operation, args = {}) {
     if (labels.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
     return { label: labels[0] };
   };
-  const diagnostic = element => {
+  const diagnostic = (element: any) => {
     const rect = element.getBoundingClientRect();
     let reason = null;
     if (!visible(element)) reason = rect.width <= 0 || rect.height <= 0 ? 'ZERO_SIZE' : 'CSS_HIDDEN';
@@ -161,7 +163,7 @@ export async function pageHelper(operation, args = {}) {
       };
     }
     const activation = activationLabel(element);
-    return { matches: 1, state: reason ? 'not_ready' : 'ready', reason, document: globalThis[documentKey],
+    return { matches: 1, state: reason ? 'not_ready' : 'ready', reason, document: (globalThis as any)[documentKey],
       tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
       ...flags, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewport,
       value_redacted: element.matches('input,textarea,select') || element.isContentEditable,
@@ -175,7 +177,7 @@ export async function pageHelper(operation, args = {}) {
       let matches;
       try {
         matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
-      } catch (error) {
+      } catch (error: any) {
         if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
         throw error;
       }
@@ -183,7 +185,7 @@ export async function pageHelper(operation, args = {}) {
       if (!matches.length) return { error: 'ELEMENT_NOT_FOUND' };
       [scope] = matches;
     }
-    const inScope = element => {
+    const inScope = (element: any) => {
       for (let node = element; node; node = parent(node)) if (node === scope) return true;
       return false;
     };
@@ -193,7 +195,7 @@ export async function pageHelper(operation, args = {}) {
     if (state.next > 999_000_000) { state.next = 1; state.first = null; }
     state.first ??= state.next;
     state.entries.clear();
-    const decorative = element => {
+    const decorative = (element: any) => {
       const role = roleOf(element);
       if (['presentation', 'none'].includes(role)) return true;
       if (element.closest('[aria-hidden="true"]')) return true;
@@ -214,13 +216,13 @@ export async function pageHelper(operation, args = {}) {
       const order = new Map(candidates.map((element, index) => [element, index]));
       const interactive = candidates.filter(element => interactiveRoles.has(roleOf(element)));
       const rest = candidates.filter(element => !interactiveRoles.has(roleOf(element)));
-      chosen = [...interactive, ...rest].slice(0, limit).sort((a, b) => order.get(a) - order.get(b));
+      chosen = [...interactive, ...rest].slice(0, limit).sort((a, b) => order.get(a)! - order.get(b)!);
     }
     const elements = chosen.map(element => {
       const ref = `e${state.next++}`;
       state.entries.set(ref, element);
       const rect = element.getBoundingClientRect();
-      const row = {
+      const row: Record<string, any> = {
         ref, tag: element.tagName.toLowerCase(), role: roleOf(element), name: nameOf(element),
         ...elementState(element, rect),
       };
@@ -234,7 +236,7 @@ export async function pageHelper(operation, args = {}) {
     });
     const text = textData(scope, true);
     const elementsTruncated = candidates.length > elements.length;
-    return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
+    return { document: (globalThis as any)[documentKey], url: location.href, title: document.title.slice(0, 500),
       ...text, elements, elements_truncated: elementsTruncated, next_ref: state.next, truncated: elementsTruncated || text.text_truncated,
       scope: 'top-level-and-open-shadow-roots', input_mode: 'dom', viewport };
   };
@@ -254,7 +256,7 @@ export async function pageHelper(operation, args = {}) {
     try {
       const matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]);
       return { ready: matches.some(element => !ignored(element) && visible(element)) };
-    } catch (error) {
+    } catch (error: any) {
       if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
       throw error;
     }
@@ -279,16 +281,16 @@ export async function pageHelper(operation, args = {}) {
         const number = Number(args.ref.slice(1));
         const stale_reason = state.first === null || number < state.first || number >= state.next
           ? 'ref_from_other_document' : 'ref_superseded';
-        return { error: 'ELEMENT_STALE', stale_reason, current_document: globalThis[documentKey] };
+        return { error: 'ELEMENT_STALE', stale_reason, current_document: (globalThis as any)[documentKey] };
       }
       if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
-        return { error: 'ELEMENT_STALE', stale_reason: 'element_detached', current_document: globalThis[documentKey] };
+        return { error: 'ELEMENT_STALE', stale_reason: 'element_detached', current_document: (globalThis as any)[documentKey] };
       }
     } else if (args.selector) {
       let matches;
       try {
         matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
-      } catch (error) {
+      } catch (error: any) {
         if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
         throw error;
       }
@@ -306,7 +308,7 @@ export async function pageHelper(operation, args = {}) {
     }
     return { found: true, element, activator };
   };
-  const readText = element => {
+  const readText = (element: any) => {
     if (element.tagName === 'TITLE' && element.parentElement?.tagName === 'HEAD') {
       const limit = args.max_text_chars ?? 4000;
       const value = document.title;
@@ -320,7 +322,7 @@ export async function pageHelper(operation, args = {}) {
     const text = textData(element);
     return { ...text, truncated: text.text_truncated, rendered: true, text_source: 'rendered' };
   };
-  const actionBlocker = (element, activator) => {
+  const actionBlocker = (element: any, activator: any) => {
     if (!visible(activator)) return { error: 'ELEMENT_NOT_VISIBLE' };
     if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
     if (operation === 'type_text' && (!editable(element) || element.matches('input[type="file"]'))) {
@@ -334,7 +336,7 @@ export async function pageHelper(operation, args = {}) {
     if (operation === 'set_checked' && element.type === 'radio' && !args.checked) return { error: 'HANDOFF_REQUIRED' };
     return null;
   };
-  const hitBlocker = (element, activator) => {
+  const hitBlocker = (element: any, activator: any) => {
     const link = element.closest('a[href]');
     const labelControl = element.closest('label')?.control;
     if (element.matches('input[type="file"]') || labelControl?.matches('input[type="file"]') ||
@@ -356,7 +358,7 @@ export async function pageHelper(operation, args = {}) {
       return hit;
     };
     let hit = hitAtPoint();
-    const indicator = globalThis.__domagentSharingHost;
+    const indicator = (globalThis as any).__domagentSharingHost;
     if (indicator?.isConnected && ignored(hit)) {
       // Ignore only our own cosmetic banner, never a site's blocking overlay.
       const display = indicator.style.getPropertyValue('display');
@@ -379,7 +381,7 @@ export async function pageHelper(operation, args = {}) {
     return null;
   };
   const actions = {
-    click: (element, activator) => {
+    click: (element: any, activator: any) => {
       if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
         element.focus({ preventScroll: true });
         if (!element.isConnected) return { error: 'ELEMENT_STALE' };
@@ -388,13 +390,13 @@ export async function pageHelper(operation, args = {}) {
       element.click();
       return { clicked: true, input_mode: 'dom' };
     },
-    set_checked: (element, activator) => {
+    set_checked: (element: any, activator: any) => {
       if (element.checked !== args.checked) activator.click();
       if (!element.isConnected || (activator !== element && activator.control !== element)) return { error: 'ELEMENT_STALE' };
       if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
       return { checked: element.checked, input_mode: 'dom' };
     },
-    select_option: (element, activator) => {
+    select_option: (element: any, activator: any) => {
       const options = [...element.options].filter(option => option.value === args.value);
       if (!options.length) return { error: 'OPTION_NOT_FOUND' };
       if (options.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
@@ -408,14 +410,14 @@ export async function pageHelper(operation, args = {}) {
       if (element.value !== args.value) return { error: 'OPERATION_FAILED' };
       return { selected: args.value, input_mode: 'dom' };
     },
-    press_key: (element, activator) => {
+    press_key: (element: any, activator: any) => {
       element.focus();
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       element.dispatchEvent(new KeyboardEvent('keydown', { key: args.key, bubbles: true, composed: true, cancelable: true }));
       element.dispatchEvent(new KeyboardEvent('keyup', { key: args.key, bubbles: true, composed: true, cancelable: true }));
       return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
     },
-    type_text: async (element, activator) => {
+    type_text: async (element: any, activator: any) => {
       element.focus();
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       let inputMode = 'dom';
@@ -435,7 +437,7 @@ export async function pageHelper(operation, args = {}) {
         if (!element.dispatchEvent(before)) return { error: 'INPUT_REJECTED' };
         if (!element.isConnected) return { error: 'ELEMENT_STALE' };
         const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, args.text);
+        Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(element, args.text);
         element.dispatchEvent(new InputEvent('input', {
           bubbles: true, composed: true, inputType: 'insertReplacementText', data: args.text,
         }));
@@ -485,6 +487,6 @@ export async function pageHelper(operation, args = {}) {
   }
   const obstruction = hitBlocker(element, activator);
   if (obstruction) return obstruction;
-  if (Object.hasOwn(actions, operation)) return actions[operation](element, activator);
+  if (Object.hasOwn(actions, operation)) return (actions as Record<string, (element: any, activator: any) => any>)[operation](element, activator);
   return { error: 'CAPABILITY_UNAVAILABLE' };
 }

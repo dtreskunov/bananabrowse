@@ -1,31 +1,33 @@
 import {
   DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, DEFAULT_TEXT_CHARS, DEFAULT_ELEMENTS, MAX_TEXT_CHARS, MAX_ELEMENTS,
 } from './protocol.js';
+import type { Wire } from './protocol.js';
 
-function failure(code, details = {}) {
+function failure(code: string, details: Wire = {}): never {
   throw Object.assign(new Error(code), { code, ...details });
 }
 
-export function textResult(value) {
+export function textResult(value: unknown): { content: [{ type: 'text'; text: string }] } {
   const text = JSON.stringify(value);
-  if (text === undefined) failure('INVALID_RESULT');
+  // JSON.stringify returns undefined for undefined, functions and symbols despite its declared type.
+  if ((text as string | undefined) === undefined) failure('INVALID_RESULT');
   return { content: [{ type: 'text', text }] };
 }
 
-export function resultBytes(value) {
+export function resultBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(textResult(value))).length;
 }
 
-function prefix(text, length) {
+function prefix(text: string, length: number): string {
   const end = Math.min(length, text.length);
   return text.slice(0, end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]) ? end - 1 : end);
 }
 
-export function compactResult(operation, value, args = {}) {
+export function compactResult(operation: string, value: unknown, args: Wire = {}): unknown {
   const maximum = operation === 'inspect_element' ? 4096 : MAX_OUTPUT_BYTES;
   const limit = args.max_output_bytes ?? (operation === 'inspect_element' ? 4096 : DEFAULT_OUTPUT_BYTES);
   if (!Number.isSafeInteger(limit) || limit < 1024 || limit > maximum) failure('INVALID_ARGUMENT');
-  let result = value;
+  let result: unknown = value;
   const hasText = ['get_text', 'get_page_snapshot'].includes(operation);
   const hasElements = ['get_interactive_elements', 'get_page_snapshot'].includes(operation);
   const textLimit = args.max_text_chars ?? DEFAULT_TEXT_CHARS;
@@ -35,36 +37,38 @@ export function compactResult(operation, value, args = {}) {
     failure('INVALID_ARGUMENT');
   }
   if (hasText || hasElements) {
-    if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        (hasText && typeof value.text !== 'string') ||
-        (hasElements && !Array.isArray(value.elements))) failure('INVALID_RESULT');
-    result = { ...value, truncated: value.truncated === true };
+    const input = value as Wire;
+    if (!input || typeof input !== 'object' || Array.isArray(input) ||
+        (hasText && typeof input.text !== 'string') ||
+        (hasElements && !Array.isArray(input.elements))) failure('INVALID_RESULT');
+    const out: Wire = { ...input, truncated: input.truncated === true };
+    result = out;
     if (hasText) {
-      result.text = prefix(value.text, textLimit);
-      result.truncated ||= result.text.length < value.text.length;
-      result.text_truncated = value.text_truncated === true || result.text.length < value.text.length;
+      out.text = prefix(input.text, textLimit);
+      out.truncated ||= out.text.length < input.text.length;
+      out.text_truncated = input.text_truncated === true || out.text.length < input.text.length;
     }
     if (hasElements) {
-      result.elements = value.elements.slice(0, elementLimit);
-      result.truncated ||= result.elements.length < value.elements.length;
-      result.elements_truncated = value.elements_truncated === true || result.elements.length < value.elements.length;
+      out.elements = input.elements.slice(0, elementLimit);
+      out.truncated ||= out.elements.length < input.elements.length;
+      out.elements_truncated = input.elements_truncated === true || out.elements.length < input.elements.length;
     }
     // Trim only complete rows/text, never arbitrary JSON or mutation receipts.
-    while (resultBytes(result) > limit && hasElements && result.elements.length) {
-      result.elements.pop();
-      result.elements_truncated = result.truncated = true;
+    while (resultBytes(out) > limit && hasElements && out.elements.length) {
+      out.elements.pop();
+      out.elements_truncated = out.truncated = true;
     }
-    if (resultBytes(result) > limit && hasText && result.text.length) {
-      const original = result.text;
+    if (resultBytes(out) > limit && hasText && out.text.length) {
+      const original = out.text;
       let low = 0, high = original.length;
-      result.text_truncated = result.truncated = true;
+      out.text_truncated = out.truncated = true;
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);
-        result.text = prefix(original, middle);
-        if (resultBytes(result) <= limit) low = middle;
+        out.text = prefix(original, middle);
+        if (resultBytes(out) <= limit) low = middle;
         else high = middle - 1;
       }
-      result.text = prefix(original, low);
+      out.text = prefix(original, low);
     }
   }
   const bytes = resultBytes(result);

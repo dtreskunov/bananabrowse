@@ -55,10 +55,32 @@ cd domagent
 # Install MCP server dependencies
 cd domagent-mcp
 npm ci --ignore-scripts
+npm --prefix ../domagent-extension ci --ignore-scripts
+npm --prefix ../domagent-extension/ui ci --ignore-scripts
 npm test
 npm run build
 npm run check
 ```
+
+### Code layout and build
+
+Everything outside tests is strict TypeScript, typechecked by `tsc` and never
+committed as build output (`dist/` is ignored):
+
+| Project | tsconfig | Output |
+| --- | --- | --- |
+| Service (`domagent-mcp/*.ts` + `shared/`) | `domagent-mcp/tsconfig.json` (NodeNext) | `tsc` → `domagent-mcp/dist/` |
+| Extension runtime (`domagent-extension/src/`) | `domagent-extension/tsconfig.json` (bundler, no emit) | esbuild → `dist/<browser>/background.js` |
+| Window UI (`domagent-extension/ui/src/`, Preact TSX) | `domagent-extension/ui/tsconfig.json` (no emit) | esbuild → `ui/dist/ui.js` + `ui.css` |
+
+Relative imports keep the `.js` extension; both `tsc` and esbuild resolve it to
+the `.ts` source. UI components live in `ui/src/components/<Name>.tsx` with a
+colocated `<Name>.css` that the component imports; global resets and shared
+classes live in `ui/src/styles/global.css` and design tokens in
+`ui/src/styles/themes/default.css`. Tests stay JavaScript and run against the
+sources through `tsx`; the real-browser suite runs against the compiled service.
+`npm run typecheck` checks all three projects; `npm run check` adds syntax
+checks for the remaining JavaScript.
 
 Then load the extension for the browser you want to work on:
 
@@ -79,7 +101,7 @@ See the browser-specific READMEs for full setup instructions:
 
 Before opening an issue, please:
 
-1. Check that the MCP server is running (`npm start` in `domagent-mcp/`)
+1. Check that the MCP server is running (`npm run build:service && npm start` in `domagent-mcp/`)
 2. Check the browser extension console for errors (DevTools → Service Worker for Chrome, `about:debugging` → Inspect for Firefox)
 3. Search existing issues to see if the bug has already been reported
 
@@ -210,7 +232,7 @@ There is no automated linter configured yet. Follow the patterns already present
 ### General rules
 
 - **Indentation:** 2 spaces (no tabs)
-- **Quotes:** Single quotes for strings in JavaScript
+- **Quotes:** Single quotes for strings in TypeScript and JavaScript
 - **Semicolons:** Use semicolons, consistent with the secure-pairing runtime
 - **Comments:** Use plain English; comment the *why*, not the *what*
 - **Error handling:** Return explicit typed failures and metadata-only diagnostics;
@@ -227,10 +249,12 @@ There is no automated linter configured yet. Follow the patterns already present
 
 ### MCP server (`domagent-mcp/`)
 
-- `index.js` configures and starts the service; `app.js` owns HTTP routing (registration,
-  token refresh, MCP); `hub.js` owns authenticated WSS, inventory, sessions and commands.
-- MCP tool registration and schemas live in `mcp.js`; shared signing payloads and
-  operation names live in `shared/protocol.js`.
+- `index.ts` configures and starts the service; `app.ts` owns HTTP routing (registration,
+  token refresh, MCP); `hub.ts` owns authenticated WSS, inventory, sessions and commands.
+- MCP tool registration and schemas live in `mcp.ts`; shared signing payloads and
+  operation names live in `shared/protocol.ts`.
+- Use the shared `Wire` type for untrusted or loosely shaped JSON (wire messages,
+  tool arguments) and real interfaces for the service's own state.
 - Do not reintroduce stdio authorization bypasses, raw CDP forwarding, direct
   credential fallback, or remote control approval.
 - Proof transcripts bind the service origin and a fresh nonce. Every agent lookup is

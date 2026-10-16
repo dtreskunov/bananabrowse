@@ -1,15 +1,16 @@
 import { parse } from 'acorn';
+import type { Program } from 'acorn';
 
 const MAX_SNIPPET = 300;
 const TOP_LEVEL = { allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true };
 
-function snippetAt(script, line) {
+function snippetAt(script: unknown, line: number): string | undefined {
   const text = String(script).split('\n')[line - 1];
   return typeof text === 'string' ? text.trim().slice(0, MAX_SNIPPET) : undefined;
 }
 
 /** Attach 1-based script line/column (and the offending line) to an error. */
-export function locateScriptError(error, script, line, column) {
+export function locateScriptError<T extends object>(error: T, script: unknown, line: any, column?: any): T {
   if (!Number.isSafeInteger(line) || line < 1) return error;
   const snippet = snippetAt(script, line);
   return Object.assign(error, { line, ...(Number.isSafeInteger(column) && column > 0 ? { column } : {}),
@@ -20,7 +21,7 @@ export function locateScriptError(error, script, line, column) {
  * Locate the first frame of the wrapped script in a native stack, translated back to a
  * script line. Columns are omitted: wrapper text shifts them on the first and last lines.
  */
-export function stackLocation(stack, marker, lineOffset = 0) {
+export function stackLocation(stack: unknown, marker: unknown, lineOffset = 0): { line: number } | null {
   if (typeof stack !== 'string' || typeof marker !== 'string') return null;
   const escaped = marker.replace(/[^0-9A-Za-z-]/g, '');
   const match = new RegExp(`domagent-script-${escaped}\\.js:(\\d+):(\\d+)`).exec(stack);
@@ -34,7 +35,7 @@ export function stackLocation(stack, marker, lineOffset = 0) {
  * parse with top-level await/return are wrapped in an async function whose
  * final expression statement becomes the return value.
  */
-function parseScript(script) {
+function parseScript(script: string): { program: Program; async: boolean } {
   try {
     return { program: parse(script, { ecmaVersion: 'latest', sourceType: 'script' }), async: false };
   } catch (error) {
@@ -42,12 +43,12 @@ function parseScript(script) {
       return { program: parse(script, { ecmaVersion: 'latest', sourceType: 'script', ...TOP_LEVEL }), async: true };
     } catch {
       // Report the original error; acorn columns are 0-based.
-      throw locateScriptError(error, script, error.loc?.line, (error.loc?.column ?? -1) + 1);
+      throw locateScriptError(error as any, script, (error as any).loc?.line, ((error as any).loc?.column ?? -1) + 1);
     }
   }
 }
 
-function asyncBody(script, program) {
+function asyncBody(script: string, program: Program): string {
   const last = program.body.at(-1);
   // No newline after the opening brace keeps script line numbers unchanged.
   if (last?.type === 'ExpressionStatement') {
@@ -58,18 +59,18 @@ function asyncBody(script, program) {
 }
 
 /** Source for the Chrome CDP MAIN-world path, which awaits a final promise itself. */
-export function prepareEvaluateExpression(script) {
+export function prepareEvaluateExpression(script: string): { expression: string; marker: string; async: boolean } {
   const marker = crypto.randomUUID();
-  let parsed = null;
+  let parsed: { program: Program; async: boolean } | null = null;
   try { parsed = parseScript(script); } catch { parsed = null; }
   // When acorn rejects the source, let V8 report its own syntax error.
   const body = parsed?.async ? asyncBody(script, parsed.program) : script;
   return { expression: `${body}\n//# sourceURL=domagent-script-${marker}.js`, marker, async: !!parsed?.async };
 }
 
-export function compileScriptSource(script) {
+export function compileScriptSource(script: string): { code: string; marker: string; async: boolean; wrapper_line_offset: number } {
   const { program, async } = parseScript(script);
-  const strict = program.body.some(statement => statement.directive === 'use strict');
+  const strict = program.body.some(statement => (statement as { directive?: string }).directive === 'use strict');
   const marker = crypto.randomUUID();
   const prefix = strict ? '"use strict";\n' : '';
   const capture = `(function capture(error, depth) {
@@ -97,7 +98,7 @@ export function compileScriptSource(script) {
     })`;
   const last = program.body.at(-1);
   let body = script;
-  const settle = expression => `Promise.resolve((${expression})).then(value => {
+  const settle = (expression: string) => `Promise.resolve((${expression})).then(value => {
         if (["function", "symbol", "bigint"].includes(typeof value)) {
           const failure = ${capture}(new TypeError("Script result cannot be serialized as JSON."), 0);
           failure.serialization_error = true;

@@ -18,11 +18,16 @@ service-only (stale-browser cleanup) and keeps extension 6.1.1. 6.1.0-beta.4
 close wait for the user's approval.
 
 Before tagging, run the unit/MCP tests, build both extensions, run the
-real-browser suite (Chrome and native Firefox) and the syntax check, then commit
+real-browser suite (Chrome and native Firefox) and `npm run check` (typecheck plus
+syntax check), then commit
 and tag the exact tested revision. Package only the built extension directories
 and `git archive` source; never include runtime state, credentials, browser test
 profiles or `node_modules`. Publish all assets together, download them again and
 verify their hashes. Firefox ZIPs are unsigned temporary add-ons.
+
+The source ZIP contains TypeScript, not runnable JavaScript. To deploy it, run
+`npm ci && npm run build:service` in `domagent-mcp/` and start
+`dist/domagent-mcp/index.js` (see `deployment/domagent.service`).
 
 Manual checksums verify asset integrity, not SLSA provenance. Never force-update
 an existing release tag.
@@ -73,7 +78,7 @@ Before tagging a release, go through this checklist:
 - [ ] All tests pass (manual test checklist in [CONTRIBUTING.md](CONTRIBUTING.md))
 - [ ] Extension loads without errors in Chrome (latest stable)
 - [ ] Extension loads without errors in Firefox 109+
-- [ ] MCP server starts without errors: `cd domagent-mcp && npm start`
+- [ ] MCP server starts without errors: `cd domagent-mcp && npm run build:service && npm start`
 - [ ] End-to-end: at least `navigate`, `click`, `get_screenshot` work correctly
 - [ ] **`domagent-mcp/package.json` version is updated** to match the new tag
 - [ ] `CHANGELOG.md` is updated (if you maintain one)

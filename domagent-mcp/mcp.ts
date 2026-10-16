@@ -1,16 +1,22 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { HUMAN_WAIT_MS, OPERATIONS, OPERATION_SCHEMAS, TAB_ID_SCHEMA, HANDOFF_SCHEMA, DESCRIPTION_SCHEMA,
   BROWSER_ID_SCHEMA, SESSION_ID_SCHEMA, SESSION_TAB_LIMIT, schemaArgumentErrors, waitErrorDetails,
   inspectionErrorDetails, errorDetails, ARTIFACT_TEXT_MIME, DEFAULT_ARTIFACT_READ_BYTES, MAX_ARTIFACT_READ_BYTES,
-  MAX_ARTIFACT_BYTES } from '../shared/protocol.js';
+  MAX_ARTIFACT_BYTES, type ArgumentError, type CodedError, type OperationSpec, type Wire } from '../shared/protocol.js';
 import { agentDiagnostics } from '../shared/diagnostics.js';
 import { Fault, requireValue, requireArguments, validationDetails, dispatchDetails, failureCode, audit } from './errors.js';
 import { compactResult, textResult } from '../shared/results.js';
 import { SERVICE_VERSION } from './version.js';
+import type { Hub } from './hub.js';
+import type { Agent } from './config.js';
+import type { ArtifactMeta } from './artifacts.js';
 
-const NOTES = {
+export interface Tool { name: string; description: string; inputSchema: Wire }
+
+const NOTES: Record<string, string> = {
   get_page_snapshot: 'Preferred first read. Compact DOM summary: 4000 text characters, 50 elements (interactive first; links include href) and 16 KiB by default. Narrow with selector; check explicit truncation. Field values are redacted. Refs are valid only for the latest snapshot of the returned document: after navigation or a new snapshot, use the new refs.',
   get_text: 'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
   get_interactive_elements: 'Prefer snapshots for actionable refs. Geometry is viewport-relative. Hidden inputs are excluded. Explicit truncation.',
@@ -26,10 +32,10 @@ const NOTES = {
 const description = { type: 'string', minLength: 40, maxLength: 500,
   description: 'What this action does and why, shown to the user in the DomAgent activity feed. 40–500 Unicode code points.' };
 const humanWait = { type: 'integer', minimum: 1, maximum: HUMAN_WAIT_MS / 1000, default: 300 };
-const schema = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
+const schema = (properties: Wire, required: string[] = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
 const urlField = { type: 'string', minLength: 1, maxLength: 2048 };
 const session = { ...SESSION_ID_SCHEMA, description: 'Session ID from request_session or list_sessions.' };
-export const tools = [
+export const tools: Tool[] = [
   { name: 'pair_browser', description: 'Pair this agent with a browser using the 8-character code the user reads from their DomAgent window (for example K7MP-4QTX). Waits until the user approves or declines in that window. Codes expire after five minutes and are single use. Returns the browser_id.',
     inputSchema: schema({ code: { type: 'string', minLength: 8, maxLength: 16 }, timeout_seconds: humanWait }, ['code']) },
   { name: 'list_browsers', description: 'Browsers paired with this agent: browser_id, user-chosen name, whether its DomAgent window is open (online), last_seen and paired_at. Only online browsers can start sessions. A long-offline browser with the same name as a newer one is usually a reinstalled extension; remove it with unpair_browser. Browsers offline for 30 days are removed automatically.',
@@ -82,7 +88,7 @@ export const INSTRUCTIONS = 'DomAgent v6 lets you work in the user\'s real brows
   'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user. ' +
   'For bulk data use evaluate_script with return_as:"artifact" and download the artifact; never copy large results through the conversation.';
 
-const HINTS = {
+const HINTS: Record<string, string> = {
   RESULT_TOO_LARGE: 'Narrow the request (selector, max_elements, fewer fields). For evaluate_script, pass return_as:"artifact" to store the full result and download it instead of reading it inline.',
   ELEMENT_STALE: 'Refs are valid only for the latest get_page_snapshot of the same document. Take a new snapshot and use its ref and document.',
   TARGET_STALE: 'The page navigated or is still loading. Call wait_for_page, then take a new snapshot.',
@@ -92,23 +98,23 @@ const HINTS = {
   HANDOFF_REQUIRED: 'This needs the person: call request_handoff with clear instructions (for example to log in), then continue.',
   OUTCOME_UNKNOWN: 'The action may have happened. Inspect the page before retrying.',
 };
-const STALE_HINTS = {
+const STALE_HINTS: Record<string, string> = {
   document_changed: 'The page navigated since that snapshot (current_document differs). Take a new snapshot and use its refs.',
   ref_from_other_document: 'That ref was issued for an earlier document in this tab. Take a new snapshot of the current page and use its refs.',
   ref_superseded: 'A newer snapshot replaced that ref. Use refs from your latest snapshot.',
   element_detached: 'The element was removed from the page (for example a menu re-rendered). Take a new snapshot.',
 };
-function hint(code, details) {
+function hint(code: string, details: Wire): string | undefined {
   if (code === 'CAPABILITY_UNAVAILABLE' && details.required_extension_version) {
     return `Requires DomAgent extension ${details.required_extension_version} or newer. Ask the user to update the extension.`;
   }
   return STALE_HINTS[details.stale_reason] || HINTS[code];
 }
 
-const MIME_BY_EXTENSION = { json: 'application/json', ndjson: 'application/x-ndjson', jsonl: 'application/x-ndjson',
+const MIME_BY_EXTENSION: Record<string, string> = { json: 'application/json', ndjson: 'application/x-ndjson', jsonl: 'application/x-ndjson',
   csv: 'text/csv', html: 'text/html', htm: 'text/html', md: 'text/markdown', txt: 'text/plain',
   gz: 'application/gzip', zip: 'application/zip', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg' };
-function shapeOf(value) {
+function shapeOf(value: unknown): Wire {
   if (Array.isArray(value)) {
     const first = value.find(item => item && typeof item === 'object' && !Array.isArray(item));
     return { type: 'array', length: value.length, ...(first ? { item_keys: Object.keys(first).slice(0, 40) } : {}) };
@@ -119,9 +125,9 @@ function shapeOf(value) {
   }
   return { type: value === null ? 'null' : typeof value };
 }
-function encodeArtifact(value, args) {
+function encodeArtifact(value: unknown, args: Wire): { data: Buffer; mime: string; shape?: Wire } {
   const encoding = args.artifact_encoding ?? 'utf8';
-  const mimeOr = fallback => args.artifact_mime || MIME_BY_EXTENSION[args.artifact_name?.split('.').pop()?.toLowerCase()] || fallback;
+  const mimeOr = (fallback: string): string => args.artifact_mime || MIME_BY_EXTENSION[args.artifact_name?.split('.').pop()?.toLowerCase()] || fallback;
   if (typeof value !== 'string') {
     requireValue(encoding === 'utf8', 'INVALID_RESULT');
     return { data: Buffer.from(JSON.stringify(value), 'utf8'), mime: args.artifact_mime || 'application/json', shape: shapeOf(value) };
@@ -134,43 +140,43 @@ function encodeArtifact(value, args) {
   const mime = mimeOr('text/plain');
   return { data: Buffer.from(value, 'utf8'), mime, shape: mime === 'application/json' ? jsonShape(value) : undefined };
 }
-function jsonShape(text) {
+function jsonShape(text: string): Wire | undefined {
   try { return shapeOf(JSON.parse(text)); } catch { return undefined; /* the page chose the bytes; shape is best effort */ }
 }
-function storeArtifact(hub, agentId, result, args) {
+function storeArtifact(hub: Hub, agentId: string, result: Wire | undefined, args: Wire): Wire {
   const { data, mime, shape } = encodeArtifact(result?.value ?? null, args);
   const meta = hub.artifacts.put(agentId, data, { mime, name: args.artifact_name || null, source: 'evaluate_script' });
   return { artifact: publicArtifact(hub, meta), ...(shape ? { shape } : {}),
     ...(ARTIFACT_TEXT_MIME.test(mime) ? { preview: data.subarray(0, 600).toString('utf8').replace(/\uFFFD+$/, '') } : {}),
     execution_world: result?.execution_world };
 }
-export function publicArtifact(hub, meta) {
+export function publicArtifact(hub: Hub, meta: ArtifactMeta): Wire {
   return { artifact_id: meta.id, name: meta.name, mime: meta.mime, bytes: meta.bytes, sha256: meta.sha256,
     expires_at: new Date(meta.expires_at).toISOString(),
     download_url: `${hub.config.origin}/mcp/${meta.agent_id}?artifact=${meta.id}` };
 }
-function readArtifact(hub, agentId, args) {
+function readArtifact(hub: Hub, agentId: string, args: Wire): Wire {
   const { meta, data } = hub.artifacts.read(agentId, args.artifact_id);
   const offset = Math.min(args.offset ?? 0, data.length);
   let end = Math.min(data.length, offset + (args.max_bytes ?? DEFAULT_ARTIFACT_READ_BYTES));
   const text = ARTIFACT_TEXT_MIME.test(meta.mime);
   // Never split a UTF-8 sequence, so each page decodes cleanly and offsets stay exact.
-  if (text) while (end < data.length && end > offset && (data[end] & 0xc0) === 0x80) end--;
+  if (text) while (end < data.length && end > offset && (data[end]! & 0xc0) === 0x80) end--;
   const slice = data.subarray(offset, end);
   return { artifact_id: meta.id, offset, next_offset: end, total_bytes: data.length, eof: end >= data.length,
     encoding: text ? 'utf8' : 'base64', data: text ? slice.toString('utf8') : slice.toString('base64') };
 }
 
-function validateUrls(args) {
+function validateUrls(args: Wire): ArgumentError[] {
   if (!Object.hasOwn(args, 'urls')) return [];
   const urls = args.urls;
   if (!Array.isArray(urls)) return [{ field: 'urls', reason: 'expected_array' }];
   if (urls.length > SESSION_TAB_LIMIT) return [{ field: 'urls', reason: 'too_long', limits: { maximum: SESSION_TAB_LIMIT } }];
-  return urls.flatMap((url, index) => schemaArgumentErrors({ properties: { url: urlField } }, { url })
+  return urls.flatMap((url, index) => schemaArgumentErrors({ properties: { url: urlField } } as Partial<OperationSpec> as OperationSpec, { url })
     .map(error => ({ ...error, field: `urls[${index}]` })));
 }
 
-export async function callTool(name, args, agent, hub, signal) {
+export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub, signal?: AbortSignal): Promise<Wire> {
   try {
     requireValue(hub.agents.get(agent.id) === agent, 'NOT_AUTHORIZED', 401);
     const tool = tools.find(t => t.name === name);
@@ -182,8 +188,8 @@ export async function callTool(name, args, agent, hub, signal) {
     delete properties.urls;
     const scalar = urls ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'urls')) : args;
     requireArguments([...schemaArgumentErrors({ ...tool.inputSchema, properties,
-      required: tool.inputSchema.required }, scalar), ...(urls ? validateUrls(args) : [])]);
-    let result;
+      required: tool.inputSchema.required } as OperationSpec, scalar), ...(urls ? validateUrls(args) : [])]);
+    let result: Wire | undefined;
     if (name === 'pair_browser') result = await hub.pairBrowser(agent.id, args.code, (args.timeout_seconds ?? 300) * 1000, signal);
     else if (name === 'list_browsers') result = hub.listBrowsers(agent.id);
     else if (name === 'unpair_browser') result = hub.unpairBrowser(agent.id, args.browser_id);
@@ -202,16 +208,16 @@ export async function callTool(name, args, agent, hub, signal) {
     else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id);
     else if (name === 'create_tab') {
       result = await hub.createTab(agent.id, args.session_id, args.url === undefined ? {} : { url: args.url },
-        args.description, signal);
+        args.description, signal) as Wire | undefined;
     } else if (name === 'report_progress') result = hub.reportProgress(agent.id, args.session_id, args.message);
     else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map(meta => publicArtifact(hub, meta));
     else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
     else if (name === 'request_handoff') {
       const { tab_id, timeout_seconds, ...handoff } = args;
-      result = await hub.operate(agent.id, tab_id, name, handoff, null, (timeout_seconds ?? 300) * 1000, signal);
+      result = await hub.operate(agent.id, tab_id, name, handoff, null, (timeout_seconds ?? 300) * 1000, signal) as Wire | undefined;
     } else {
       const { tab_id, description: intent, ...operationArgs } = args;
-      result = await hub.operate(agent.id, tab_id, name, operationArgs, intent, 0, signal);
+      result = await hub.operate(agent.id, tab_id, name, operationArgs, intent, 0, signal) as Wire | undefined;
     }
     if (name === 'get_screenshot') {
       requireValue(result?.mimeType === 'image/png' && typeof result.data === 'string' &&
@@ -225,24 +231,24 @@ export async function callTool(name, args, agent, hub, signal) {
     if (['read_artifact', 'list_artifacts'].includes(name)) return textResult(result);
     try { return textResult(compactResult(name, result, args)); }
     catch (error) {
-      if (['RESULT_TOO_LARGE', 'INVALID_RESULT', 'INVALID_ARGUMENT'].includes(error.code)) {
-        throw Object.assign(new Fault(error.code), errorDetails(error));
+      if (['RESULT_TOO_LARGE', 'INVALID_RESULT', 'INVALID_ARGUMENT'].includes((error as CodedError).code)) {
+        throw Object.assign(new Fault((error as CodedError).code), errorDetails(error));
       }
       throw error;
     }
   } catch (error) {
     const code = failureCode(error);
-    audit('mcp_tool_failure', { agent_id: agent.id, code, ...inspectionErrorDetails(error) });
-    const diagnostics = agentDiagnostics(error?.diagnostics);
-    const details = errorDetails({ ...error, code });
+    audit('mcp_tool_failure', { agent_id: agent.id, code, ...inspectionErrorDetails(error as Wire) });
+    const diagnostics = agentDiagnostics((error as Wire | undefined)?.diagnostics);
+    const details = errorDetails({ ...(error as Wire), code });
     const advice = hint(code, details);
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({
-      error: code, ...validationDetails(error), ...waitErrorDetails(error), ...inspectionErrorDetails(error),
+      error: code, ...validationDetails(error), ...waitErrorDetails(error as Wire), ...inspectionErrorDetails(error as Wire),
       ...dispatchDetails(error), ...details, ...(diagnostics ? { diagnostics } : {}), ...(advice ? { hint: advice } : {}),
     }) }] };
   }
 }
-export async function handleMcp(req, res, body, agent, hub) {
+export async function handleMcp(req: IncomingMessage, res: ServerResponse, body: Wire, agent: Agent, hub: Hub): Promise<void> {
   const disconnected = new AbortController();
   const closed = () => { if (!res.writableFinished) disconnected.abort(); };
   res.on('close', closed);

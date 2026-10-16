@@ -75,6 +75,7 @@ jobs:
         run: |
           cd domagent-mcp
           npm ci --ignore-scripts
+          npm run build:service
 
       # ── 6. Publish to npm ─────────────────────────────────────────
       #   --access public  required for scoped packages; harmless for unscoped

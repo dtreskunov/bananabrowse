@@ -1,6 +1,9 @@
 // The extension UI and all browser control live in the app window (app.html).
 // This background script only opens/focuses that window and cleans up after it closes.
-const api = typeof browser === 'undefined' ? chrome : browser;
+declare const browser: any;
+declare const chrome: any;
+declare const BUILD_BROWSER: 'chrome' | 'firefox';
+const api: any = typeof browser === 'undefined' ? chrome : browser;
 const APP = 'app.html';
 
 async function appWindowId() {
@@ -32,7 +35,7 @@ async function cleanup() {
   for (const id of Object.keys(notifications)) if (id.startsWith('domagent-')) await api.notifications.clear(id).catch(() => {});
   if (BUILD_BROWSER === 'chrome') {
     const rules = await api.declarativeNetRequest.getSessionRules().catch(() => []);
-    if (rules.length) await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map(rule => rule.id) }).catch(() => {});
+    if (rules.length) await api.declarativeNetRequest.updateSessionRules({ removeRuleIds: rules.map((rule: any) => rule.id) }).catch(() => {});
     const targets = await api.debugger.getTargets().catch(() => []);
     for (const target of targets) {
       if (target.attached && Number.isInteger(target.tabId)) await api.debugger.detach({ tabId: target.tabId }).catch(() => {});
@@ -41,23 +44,23 @@ async function cleanup() {
 }
 
 api.action.onClicked.addListener(() => { void openApp().catch(error => console.error('DomAgent:', error?.message)); });
-api.runtime.onInstalled.addListener(details => {
+api.runtime.onInstalled.addListener((details: any) => {
   if (details.reason === 'install') void openApp().catch(error => console.error('DomAgent:', error?.message));
 });
 api.runtime.onStartup.addListener(() => {
-  void api.storage.local.get('settings').then(({ settings }) => {
+  void api.storage.local.get('settings').then(({ settings }: any) => {
     if (settings?.openAtStartup === true) return openApp();
     return cleanup();
-  }).catch(error => console.error('DomAgent:', error?.message));
+  }).catch((error: any) => console.error('DomAgent:', error?.message));
 });
-api.windows.onRemoved.addListener(windowId => {
-  void api.storage.session.get('appWindowId').then(async ({ appWindowId: id }) => {
+api.windows.onRemoved.addListener((windowId: number) => {
+  void api.storage.session.get('appWindowId').then(async ({ appWindowId: id }: any) => {
     if (id !== windowId) return;
     await api.storage.session.remove('appWindowId');
     await cleanup();
   }).catch(() => {});
 });
-api.runtime.onMessage.addListener((message, sender, respond) => {
+api.runtime.onMessage.addListener((message: any, sender: any, respond: (response: unknown) => void) => {
   if (sender.id !== api.runtime.id || message?.type !== 'open-app') return false;
   void openApp().then(() => respond({ ok: true }), () => respond({ ok: false }));
   return true;

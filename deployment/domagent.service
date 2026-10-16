@@ -10,7 +10,7 @@ Group=domagent
 WorkingDirectory=/opt/domagent/domagent-mcp
 EnvironmentFile=/etc/domagent/domagent.env
 Environment=DOMAGENT_DB=/var/lib/domagent/domagent.db
-ExecStart=/usr/bin/node /opt/domagent/domagent-mcp/index.js
+ExecStart=/usr/bin/node /opt/domagent/domagent-mcp/dist/domagent-mcp/index.js
 Restart=on-failure
 RestartSec=5
 StateDirectory=domagent

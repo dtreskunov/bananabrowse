@@ -1,12 +1,12 @@
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 const requireLocal = createRequire(path.join(__dirname, '../../../domagent-mcp/package.json'));
 const { test, expect, chromium, firefox } = requireLocal('@playwright/test');
+const { loadPageHelper } = require('./page-helper.cjs');
 
 for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
   test(`${name}: visible content readiness distinguishes delayed rows, empty state and invalid selectors`, async () => {
-    const { pageHelper } = await import(pathToFileURL(path.resolve(__dirname, '../../src/page.js')).href);
+    const { pageHelper } = await loadPageHelper();
     const previous = process.env.TMPDIR; process.env.TMPDIR = '/tmp';
     const browser = await engine.launch({ headless: true });
     try {
@@ -27,7 +27,7 @@ for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
   });
 
   test(`${name}: native contenteditable editing updates managed state and detects delayed rollback without native keystrokes`, async () => {
-    const { pageHelper } = await import(pathToFileURL(path.resolve(__dirname, '../../src/page.js')).href);
+    const { pageHelper } = await loadPageHelper();
     const previous = process.env.TMPDIR; process.env.TMPDIR = '/tmp';
     const browser = await engine.launch({ headless: true });
     try {

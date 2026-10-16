@@ -19,16 +19,29 @@ SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 Changing agents requires a restart. Removing an agent deletes its pairings and
 sessions at startup.
 
+## Build and run
+
+The service is strict TypeScript compiled by `tsc` to `dist/` (not committed):
+
+```sh
+npm ci                  # includes the TypeScript toolchain
+npm run build:service   # tsc -p . → dist/domagent-mcp/*.js, dist/shared/*.js
+npm start               # node dist/domagent-mcp/index.js
+npm run dev             # run from source with tsx, no build step
+```
+
+Rebuild after every update before restarting the service.
+
 ## Operator CLI
 
 ```sh
 export DOMAGENT_DB=/var/lib/domagent/domagent.db
-node admin.js agent-key atlas "Atlas" https://atlas.example   # new key + env line (key shown once)
-node admin.js browsers                                        # registered browsers
-node admin.js browser-revoke b7                               # revoke a browser, its pairings and sessions
-node admin.js pairings
-node admin.js pairing-revoke atlas b7
-node admin.js sessions
+node dist/domagent-mcp/admin.js agent-key atlas "Atlas" https://atlas.example   # new key + env line (key shown once)
+node dist/domagent-mcp/admin.js browsers                                        # registered browsers
+node dist/domagent-mcp/admin.js browser-revoke b7                               # revoke a browser, its pairings and sessions
+node dist/domagent-mcp/admin.js pairings
+node dist/domagent-mcp/admin.js pairing-revoke atlas b7
+node dist/domagent-mcp/admin.js sessions
 ```
 
 The running service applies revocations within about five seconds and

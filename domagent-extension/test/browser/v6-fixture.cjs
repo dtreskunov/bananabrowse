@@ -30,8 +30,8 @@ async function startService(directory) {
     '-CAkey', path.join(directory, 'ca-key.pem'), '-CAcreateserial', '-out', path.join(directory, 'cert.pem'),
     '-days', '1', '-extfile', path.join(directory, 'server.ext')]);
   const ca = (await fs.readFile(path.join(directory, 'ca.pem'), 'utf8')).replace(/-----[^-]+-----|\s/g, '');
-  const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/store.js')).href);
-  const { createApp } = await import(pathToFileURL(path.join(root, 'domagent-mcp/app.js')).href);
+  const { Store } = await import(pathToFileURL(path.join(root, 'domagent-mcp/dist/domagent-mcp/store.js')).href);
+  const { createApp } = await import(pathToFileURL(path.join(root, 'domagent-mcp/dist/domagent-mcp/app.js')).href);
   let app;
   const tls = https.createServer({ key: await fs.readFile(path.join(directory, 'key.pem')),
     cert: await fs.readFile(path.join(directory, 'cert.pem')) }, (req, res) => app.server.listeners('request')[0](req, res));

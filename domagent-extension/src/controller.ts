@@ -6,6 +6,39 @@ import {
 } from '../../shared/protocol.js';
 import { boundedResult, errorCode, fail, id as validId, originList, protectedUnion } from './security.js';
 import { diagnosticDetails } from '../../shared/diagnostics.js';
+import type { Wire } from '../../shared/protocol.js';
+import type { BrowserAdapter, Grant } from './adapter.js';
+import type { Identity } from './keys.js';
+
+interface Agent { id: string; name: string; url?: string | null; color?: string }
+interface Candidate { groupId: number; title: string; tab_count: number; matching: number }
+interface Task {
+  message: Wire; human: boolean; confirm: boolean; approved: boolean; deadline: number;
+  documentGeneration: number | undefined; executing: boolean; cancelled: boolean; connection_id: string;
+  preparing?: boolean; ready?: boolean; preview?: Wire; abort?: (() => void) | null; after?: () => Promise<void>;
+}
+interface Tab extends Grant {
+  groupId: number | null; windowId: number; id: string | null; title: string; url: string; pageState: string;
+  queue: Task[]; documentGeneration: number; scriptWorldId: string;
+}
+interface Session {
+  client_id: string; session_id: string | null; request_id?: string | null; agent_id: string; title: string;
+  purpose: string; groupId: number | null; windowId?: number; state: string; tabs: Map<number, Tab>; tasks: Task[];
+  running: number; creating: number; excluded: number; candidates?: Candidate[]; startTabs?: number[];
+  startUrls?: string[]; color?: string; painted?: string;
+}
+interface SessionRequest {
+  request_id: string; agent: Agent; purpose: string; urls: string[]; title: string; expires_at: number;
+}
+interface Pairing {
+  code: string; state: string; expires_at: number | null; proposal: { request_id: string; agent: Agent } | null;
+}
+interface StorageArea { get(keys: string | string[]): Promise<Wire>; set(items: Wire): Promise<void> }
+interface ControllerOptions {
+  api: any; adapter: BrowserAdapter; identity: Identity; storage: StorageArea; sessionStorage: StorageArea;
+  browserName: string; extensionUrl: string; Socket?: typeof WebSocket; fetcher?: typeof fetch; now?: () => number;
+  appWindowId?: number | null;
+}
 
 const FEED_LIMIT = 200;
 const SYNC_KEEPALIVE_MS = 30 * 60_000;
@@ -16,7 +49,7 @@ const READ_OPERATIONS = ['get_text', 'get_page_snapshot', 'get_interactive_eleme
 const CLOSE_OPERATIONS = ['close_tab', 'close_session'];
 const MUTATIONS = ['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'];
 
-export function defaultBrowserName(browserName, platform = globalThis.navigator?.userAgentData?.platform ||
+export function defaultBrowserName(browserName: string, platform: string = (globalThis.navigator as any)?.userAgentData?.platform ||
   globalThis.navigator?.platform || '') {
   const os = /mac/i.test(platform) ? 'Mac' : /win/i.test(platform) ? 'Windows' : /linux/i.test(platform) ? 'Linux' :
     /cros/i.test(platform) ? 'ChromeOS' : 'this computer';
@@ -24,8 +57,8 @@ export function defaultBrowserName(browserName, platform = globalThis.navigator?
 }
 
 /** Candidate native groups for a session whose group IDs did not survive a browser restart. */
-export function reattachCandidates(record, groups, tabsByGroup) {
-  const urls = new Set((record.tabs || []).map(tab => tab.url));
+export function reattachCandidates(record: Wire, groups: any[], tabsByGroup: Map<number, any[]>): Candidate[] {
+  const urls = new Set((record.tabs || []).map((tab: Wire) => tab.url));
   return groups.filter(group => group.title === record.title).map(group => {
     const tabs = tabsByGroup.get(group.id) || [];
     return { groupId: group.id, title: group.title, tab_count: tabs.length,
@@ -34,8 +67,25 @@ export function reattachCandidates(record, groups, tabsByGroup) {
 }
 
 export class Controller {
+  declare api: any; declare adapter: BrowserAdapter; declare identityStore: Identity; declare storage: StorageArea; declare sessionStorage: StorageArea;
+  declare browserName: string; declare Socket: typeof WebSocket; declare fetcher: typeof fetch; declare now: () => number; declare appWindowId: number | null;
+  declare extension_origin: string;
+  declare identity: Wire | null; declare phase: string; declare error: string | null; declare lastSetup: { origin: string; name: string } | null;
+  declare socket: WebSocket | null; declare generation: number; declare connection: { connection_id: string } | null; declare lastPing: number;
+  declare access: { token: string; expires_at: number } | null;
+  declare reconnectDelay: number; declare reconnectTimer: any; declare closing: boolean;
+  declare agents: Map<string, Agent>; declare sessions: Map<string, Session>; declare requests: Map<string, SessionRequest>;
+  declare pairing: Pairing | null;
+  declare handoffs: Map<string, { session: Session; tab: Tab; task: Task }>; declare closures: Map<string, { session: Session; task: Task }>;
+  declare feed: Wire[]; declare settings: { openAtStartup: boolean };
+  declare protectedOrigins: string[]; declare records: Wire[]; declare knownTabs: Map<number, string>;
+  declare lastInventory: string; declare lastSyncAt: number; declare flashOn: boolean; declare refreshing: Promise<void> | null;
+  declare refreshQueued: boolean; declare listeners: Set<() => void>; declare endingTasks: Set<Promise<unknown>>;
+  declare ready?: boolean; declare browserInfo?: Wire; declare timer?: any; declare persistTimer?: any; declare refreshTimer?: any; declare refreshCount?: number;
+  declare menuSignature?: string; declare menuWork?: Promise<void>;
+
   constructor({ api, adapter, identity, storage, sessionStorage, browserName, extensionUrl, Socket = WebSocket,
-    fetcher = (...args) => fetch(...args), now = () => Date.now(), appWindowId = null }) {
+    fetcher = (...args: Parameters<typeof fetch>) => fetch(...args), now = () => Date.now(), appWindowId = null }: ControllerOptions) {
     Object.assign(this, { api, adapter, identityStore: identity, storage, sessionStorage, browserName, Socket, fetcher,
       now, appWindowId });
     const url = new URL(extensionUrl);
@@ -53,17 +103,17 @@ export class Controller {
   }
 
   // ---------- observation ----------
-  subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  subscribe(listener: () => void) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   changed() {
     for (const listener of this.listeners) listener();
     void this.updateBadge().catch(() => {});
   }
-  report(error) {
+  report(error: unknown) {
     this.error = errorCode(error);
     console.error('DomAgent:', this.error);
     this.changed();
   }
-  addFeed(entry) {
+  addFeed(entry: Wire) {
     const existing = entry.id && this.feed.find(item => item.id === entry.id);
     if (existing) Object.assign(existing, entry, { updated_at: this.now() });
     else if (!entry.description) return;
@@ -92,7 +142,7 @@ export class Controller {
 
   snapshot() {
     const agentsById = this.agents;
-    const sessionView = session => {
+    const sessionView = (session: Session) => {
       const agent = agentsById.get(session.agent_id) || { id: session.agent_id, name: session.agent_id };
       return {
         client_id: session.client_id, session_id: session.session_id, agent, title: session.title,
@@ -119,7 +169,7 @@ export class Controller {
         instructions: task.message.args.instructions })),
       closures: [...this.closures.values()].map(({ session, task }) => {
         const one = task.message.operation === 'close_tab';
-        const tabs = one ? [this.sessionTab(session, task.message.args.tab_id)].filter(Boolean) : [...session.tabs.values()];
+        const tabs = one ? [this.sessionTab(session, task.message.args.tab_id)].filter(Boolean) as Tab[] : [...session.tabs.values()];
         return { request_id: task.message.request_id, agent: agentsById.get(session.agent_id) || { name: session.agent_id },
           kind: one ? 'tab' : 'session', session_title: session.title, description: task.message.description,
           tabs: tabs.map(t => ({ tabId: t.tabId, title: t.title, url: t.url })), excluded: one ? 0 : session.excluded || 0 };
@@ -154,7 +204,7 @@ export class Controller {
     await this.adapter.initialize();
     this.listen();
     this.timer = setInterval(() => { void this.tick().catch(error => this.report(error)); }, 1000);
-    try { this.identity = await this.identityStore.load(); }
+    try { this.identity = await this.identityStore.load() as Wire | null; }
     catch (error) { this.identity = null; this.report(error); }
     if (this.identity?.browser_id) this.connect();
     else this.phase = 'setup';
@@ -165,50 +215,50 @@ export class Controller {
     const { tabs, tabGroups } = this.api;
     tabs.onCreated.addListener(refresh); tabs.onRemoved.addListener(refresh);
     tabs.onAttached.addListener(refresh); tabs.onDetached.addListener(refresh);
-    tabs.onUpdated.addListener((_id, change) => {
+    tabs.onUpdated.addListener((_id: number, change: Wire) => {
       if ('groupId' in change || 'title' in change || 'url' in change || 'status' in change) refresh();
     });
     tabGroups.onUpdated.addListener(refresh); tabGroups.onRemoved.addListener(refresh);
     tabGroups.onMoved?.addListener(refresh);
     const menus = this.api.menus || this.api.contextMenus;
-    menus?.onClicked.addListener((info, tab) => { void this.menuClicked(info, tab).catch(error => this.report(error)); });
-    this.api.notifications?.onClicked.addListener(id => { void this.notificationClicked(id).catch(error => this.report(error)); });
+    menus?.onClicked.addListener((info: Wire, tab: Wire) => { void this.menuClicked(info, tab).catch(error => this.report(error)); });
+    this.api.notifications?.onClicked.addListener((id: string) => { void this.notificationClicked(id).catch(error => this.report(error)); });
   }
 
   // ---------- identity and connection ----------
-  async http(path, body) {
-    const response = await this.fetcher(`${this.identity.origin}${path}`, {
+  async http(path: string, body?: Wire): Promise<any> {
+    const response = await this.fetcher(`${this.identity!.origin}${path}`, {
       method: body ? 'POST' : 'GET', credentials: 'omit', redirect: 'error', cache: 'no-store',
       headers: { 'X-DomAgent-Extension-Origin': this.extension_origin, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10_000),
     });
     const raw = await response.text();
     if (raw.length > 16_384) fail('INVALID_MESSAGE');
-    let value;
+    let value: any;
     try { value = JSON.parse(raw); } catch { fail(response.ok ? 'INVALID_MESSAGE' : 'SERVICE_UNREACHABLE'); }
     if (!response.ok) fail(value.error || 'SERVICE_UNREACHABLE');
     return value;
   }
-  async setup({ domain, name }) {
+  async setup({ domain, name }: { domain: string; name: string }) {
     let candidate = String(domain || '').trim();
     if (!candidate.includes('://')) candidate = `https://${candidate}`;
     const origin = serviceOrigin(candidate);
     if (!validName(name)) fail('INVALID_ARGUMENT');
-    let metadata;
+    let metadata: any;
     try {
       const response = await this.fetcher(`${origin}/.well-known/domagent`, { credentials: 'omit', redirect: 'error',
         cache: 'no-store', signal: AbortSignal.timeout(10_000) });
       const raw = await response.text();
       if (!response.ok || raw.length > 4096) fail('INVALID_SERVICE');
       metadata = JSON.parse(raw);
-    } catch (error) { fail(error.code === 'INVALID_SERVICE' ? error.code : 'SERVICE_UNREACHABLE'); }
+    } catch (error: any) { fail(error.code === 'INVALID_SERVICE' ? error.code : 'SERVICE_UNREACHABLE'); }
     if (metadata.service !== 'domagent' || metadata.origin !== origin) fail('INVALID_SERVICE');
     if (metadata.protocol_version !== VERSION) fail('UPGRADE_REQUIRED');
     const record = await this.identityStore.create(origin);
     this.identity = record;
     try {
       const { nonce } = await this.http('/api/challenge');
-      const data = { name: name.trim(), key_id: record.key_id, public_key: record.public_key, nonce };
+      const data: Wire = { name: name.trim(), key_id: record.key_id, public_key: record.public_key, nonce };
       data.signature = await sign(record.privateKey, registerPayload({ ...data, origin, extension_origin: this.extension_origin }));
       const result = await this.http('/api/browsers', data);
       validId(result.browser_id);
@@ -224,9 +274,9 @@ export class Controller {
   }
   async accessToken() {
     if (this.access && this.access.expires_at > this.now() + 30_000) return this.access.token;
-    const record = this.identity;
+    const record = this.identity!;
     const { nonce } = await this.http('/api/challenge');
-    const data = { browser_id: record.browser_id, refresh_token: record.refresh_token, nonce };
+    const data: Wire = { browser_id: record.browser_id, refresh_token: record.refresh_token, nonce };
     data.signature = await sign(record.privateKey, tokenPayload({ ...data, origin: record.origin, key_id: record.key_id }));
     const result = await this.http('/api/token', data);
     // Persist the rotated refresh token before anything else can fail.
@@ -240,16 +290,16 @@ export class Controller {
     clearTimeout(this.reconnectTimer);
     const generation = ++this.generation;
     this.phase = 'connecting'; this.changed();
-    let accessToken;
+    let accessToken: string;
     try { accessToken = await this.accessToken(); }
-    catch (error) {
+    catch (error: any) {
       if (generation !== this.generation) return;
       if (error.code === 'NOT_AUTHORIZED') { await this.revoked(); return; }
       this.phase = 'offline'; this.error = errorCode(error) === 'OUTCOME_UNKNOWN' ? 'SERVICE_UNREACHABLE' : errorCode(error);
       this.scheduleReconnect(); this.changed(); return;
     }
     if (generation !== this.generation || this.socket) return;
-    const socket = new this.Socket(`${this.identity.origin.replace('https:', 'wss:')}/extension`);
+    const socket = new this.Socket(`${this.identity!.origin.replace('https:', 'wss:')}/extension`);
     this.socket = socket; this.lastPing = this.now();
     let messages = Promise.resolve();
     socket.onopen = () => {
@@ -264,7 +314,7 @@ export class Controller {
     };
     socket.onclose = socket.onerror = () => this.lost(socket, generation);
   }
-  current(socket, generation) { return this.socket === socket && this.generation === generation; }
+  current(socket: WebSocket, generation: number) { return this.socket === socket && this.generation === generation; }
   scheduleReconnect() {
     if (this.closing || !this.identity?.browser_id) return;
     clearTimeout(this.reconnectTimer);
@@ -272,13 +322,13 @@ export class Controller {
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
   }
   retry() { this.reconnectDelay = 1000; clearTimeout(this.reconnectTimer); void this.connect(); }
-  lost(socket, generation) {
+  lost(socket: WebSocket, generation: number) {
     if (!this.current(socket, generation)) return;
     this.socket = null; this.connection = null; this.ready = false; this.generation++;
     try { socket.close(); } catch { /* already closed */ }
     this.phase = this.identity?.browser_id ? 'offline' : 'setup';
     // Keeps the offline notice up across reconnect attempts; welcome clears it.
-    if (!['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'].includes(this.error)) this.error = 'BROWSER_OFFLINE';
+    if (!['UPGRADE_REQUIRED', 'NOT_AUTHORIZED', 'INVALID_SERVICE'].includes(this.error!)) this.error = 'BROWSER_OFFLINE';
     this.lastInventory = '';
     for (const request of this.requests.keys()) this.clearNotification(`domagent-request-${request}`);
     this.requests.clear();
@@ -304,20 +354,20 @@ export class Controller {
     this.phase = 'setup'; this.error = 'BROWSER_REVOKED';
     this.changed();
   }
-  send(message) {
+  send(message: Wire) {
     if (!this.connection || this.socket?.readyState !== 1) fail('BROWSER_OFFLINE');
-    this.socket.send(JSON.stringify(message));
+    this.socket!.send(JSON.stringify(message));
   }
 
-  async receive(raw, socket, generation) {
+  async receive(raw: unknown, socket: WebSocket, generation: number): Promise<void> {
     if (!this.current(socket, generation)) return;
     if (typeof raw !== 'string' || raw.length > 4 * 1024 * 1024) fail('INVALID_MESSAGE');
     const message = JSON.parse(raw);
     if (!message || typeof message !== 'object' || typeof message.type !== 'string') fail('INVALID_MESSAGE');
     if (!this.connection) {
       if (message.type === 'challenge') {
-        const signature = await sign(this.identity.privateKey, connectPayload({ origin: this.identity.origin,
-          nonce: message.nonce, browser_id: this.identity.browser_id, connection_id: message.connection_id }));
+        const signature = await sign(this.identity!.privateKey, connectPayload({ origin: this.identity!.origin,
+          nonce: message.nonce, browser_id: this.identity!.browser_id, connection_id: message.connection_id }));
         if (this.current(socket, generation)) socket.send(JSON.stringify({ type: 'proof', signature }));
         return;
       }
@@ -337,11 +387,11 @@ export class Controller {
       case 'sync.ack': return this.acknowledged(message);
       case 'agents': this.setAgents(message.agents); return;
       case 'browser':
-        if (validName(message.name)) { this.identity.name = message.name; await this.identityStore.save(this.identity); }
+        if (validName(message.name)) { this.identity!.name = message.name; await this.identityStore.save(this.identity!); }
         this.changed(); return;
       case 'pairing.code.ok':
         if (this.pairing?.code === message.code) {
-          this.pairing.state = 'waiting'; this.pairing.expires_at = message.expires_at; this.changed();
+          this.pairing!.state = 'waiting'; this.pairing!.expires_at = message.expires_at; this.changed();
         }
         return;
       case 'pairing.proposal': return this.proposal(message);
@@ -364,16 +414,16 @@ export class Controller {
       default: fail('INVALID_MESSAGE');
     }
   }
-  async welcome(message) {
+  async welcome(message: Wire) {
     validId(message.browser_id);
-    if (message.browser_id !== this.identity.browser_id) fail('NOT_AUTHORIZED');
+    if (message.browser_id !== this.identity!.browser_id) fail('NOT_AUTHORIZED');
     this.connection = { connection_id: message.connection_id };
     // An inventory sent before reattach finishes would tell the server every session is gone.
     this.ready = false;
     this.phase = 'online'; this.error = null; this.reconnectDelay = 1000;
-    this.protectedOrigins = protectedUnion(this.identity.origin, originList(message.protected_origins || []));
-    if (validName(message.name) && message.name !== this.identity.name) {
-      this.identity.name = message.name; await this.identityStore.save(this.identity);
+    this.protectedOrigins = protectedUnion(this.identity!.origin, originList(message.protected_origins || []));
+    if (validName(message.name) && message.name !== this.identity!.name) {
+      this.identity!.name = message.name; await this.identityStore.save(this.identity!);
     }
     this.setAgents(message.agents);
     await this.reattach(Array.isArray(message.sessions) ? message.sessions : []);
@@ -382,7 +432,7 @@ export class Controller {
     await this.sync(true);
     this.changed();
   }
-  setAgents(agents) {
+  setAgents(agents: Wire[]) {
     if (!Array.isArray(agents)) fail('INVALID_MESSAGE');
     this.agents = new Map(agents.filter(agent => agent && typeof agent.id === 'string').map(agent => [agent.id, {
       id: agent.id, name: String(agent.name || agent.id).slice(0, 80), url: typeof agent.url === 'string' ? agent.url : null,
@@ -392,20 +442,20 @@ export class Controller {
   }
 
   // ---------- reattach ----------
-  async reattach(serverSessions) {
-    const server = new Map(serverSessions.filter(s => UUID.test(s.client_id || '')).map(s => [s.client_id, s]));
-    const run = await this.sessionStorage.get('run').catch(() => ({}));
+  async reattach(serverSessions: Wire[]) {
+    const server = new Map<string, Wire>(serverSessions.filter(s => UUID.test(s.client_id || '')).map(s => [s.client_id, s]));
+    const run: Wire = await this.sessionStorage.get('run').catch(() => ({}));
     const sameRun = run.run === true;
     const groups = await this.api.tabGroups.query({});
-    const groupIds = new Set(groups.map(group => group.id));
+    const groupIds = new Set(groups.map((group: Wire) => group.id));
     const allTabs = await this.api.tabs.query({});
-    const tabsByGroup = new Map();
+    const tabsByGroup = new Map<number, any[]>();
     for (const tab of allTabs) if (tab.groupId >= 0) {
       if (!tabsByGroup.has(tab.groupId)) tabsByGroup.set(tab.groupId, []);
-      tabsByGroup.get(tab.groupId).push(tab);
+      tabsByGroup.get(tab.groupId)!.push(tab);
     }
     // Firefox persists per-tab values across restarts; Chrome only keeps group IDs for one browser run.
-    const located = new Map();
+    const located = new Map<string, { groups: Map<number, number>; tabs: Map<number, string> }>();
     if (this.api.sessions?.getTabValue) {
       for (const tab of allTabs) {
         if (tab.groupId < 0) continue;
@@ -420,7 +470,7 @@ export class Controller {
     for (const [clientId, local] of [...this.sessions]) {
       if (local.state === 'pending') {
         // The decision may have been committed while the connection dropped.
-        if (server.has(clientId)) await this.commitPending(local, server.get(clientId).session_id);
+        if (server.has(clientId)) await this.commitPending(local, server.get(clientId)!.session_id);
         else await this.discardPending(local);
         continue;
       }
@@ -433,11 +483,11 @@ export class Controller {
       }
       if (existing?.state === 'unconfirmed') continue;
       const record = this.records.find(r => r.client_id === clientId) || { client_id: clientId, title: info.title, tabs: [] };
-      const base = { client_id: clientId, session_id: info.session_id, agent_id: info.agent_id, title: info.title,
+      const base: Omit<Session, 'state' | 'groupId'> = { client_id: clientId, session_id: info.session_id, agent_id: info.agent_id, title: info.title,
         purpose: info.purpose, tabs: new Map(), tasks: [], running: 0, creating: 0, excluded: 0 };
       const found = located.get(clientId);
-      let groupId = null;
-      const knownTabs = new Map();
+      let groupId: number | null = null;
+      const knownTabs = new Map<number, string>();
       const claimed = new Set([...this.sessions.values()].map(s => s.groupId).filter(id => id !== null && id !== undefined));
       if (found) {
         const [candidate, tagged] = [...found.groups].sort((a, b) => b[1] - a[1])[0];
@@ -451,7 +501,7 @@ export class Controller {
         for (const tab of record.tabs || []) knownTabs.set(tab.key, tab.id);
       }
       if (groupId !== null) {
-        const group = groups.find(g => g.id === groupId);
+        const group = groups.find((g: Wire) => g.id === groupId);
         this.sessions.set(clientId, { ...base, state: 'attached', groupId, windowId: group.windowId,
           title: group.title || info.title });
         for (const [key, value] of knownTabs) this.knownTabs.set(key, value);
@@ -470,9 +520,9 @@ export class Controller {
     await this.sessionStorage.set({ run: true }).catch(() => {});
     this.buildMenus();
   }
-  async confirmReattach(clientId, groupId) {
+  async confirmReattach(clientId: string, groupId: number) {
     const session = this.sessions.get(clientId);
-    if (!session || session.state !== 'unconfirmed' || !session.candidates.some(c => c.groupId === groupId)) fail('ACTION_EXPIRED');
+    if (!session || session.state !== 'unconfirmed' || !session.candidates!.some(c => c.groupId === groupId)) fail('ACTION_EXPIRED');
     const group = await this.api.tabGroups.get(groupId);
     const record = this.records.find(r => r.client_id === clientId);
     const tabs = await this.api.tabs.query({ groupId });
@@ -485,7 +535,7 @@ export class Controller {
     await this.refresh();
     await this.sync(true);
   }
-  async discardReattach(clientId) {
+  async discardReattach(clientId: string) {
     const session = this.sessions.get(clientId);
     if (!session || session.state !== 'unconfirmed') fail('ACTION_EXPIRED');
     this.sessions.delete(clientId);
@@ -500,7 +550,7 @@ export class Controller {
     clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => { void this.refresh().catch(error => this.report(error)); }, 100);
   }
-  async refresh() {
+  async refresh(): Promise<void> {
     if (this.refreshing) { this.refreshQueued = true; return this.refreshing; }
     this.refreshCount = (this.refreshCount || 0) + 1;
     this.refreshing = (async () => {
@@ -518,8 +568,8 @@ export class Controller {
     await this.sync();
     this.changed();
   }
-  async scan(session) {
-    let group = null;
+  async scan(session: Session) {
+    let group: any = null;
     try { group = await this.api.tabGroups.get(session.groupId); } catch { group = null; }
     if (!group) {
       // The user closed or ungrouped the tab group: the session ends.
@@ -532,7 +582,7 @@ export class Controller {
     session.windowId = group.windowId;
     const tabs = await this.api.tabs.query({ groupId: session.groupId });
     for (const [tabId, tab] of [...session.tabs]) {
-      if (!tabs.some(current => current.id === tabId)) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
+      if (!tabs.some((current: Wire) => current.id === tabId)) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
     }
     let excluded = 0;
     for (const current of tabs) {
@@ -549,7 +599,7 @@ export class Controller {
         if (moved) this.dropTab(other, moved, 'TAB_NOT_IN_SESSION');
       }
       await Promise.all([...this.endingTasks]);
-      const tab = { tabId: current.id, groupId: session.groupId, windowId: current.windowId,
+      const tab: Tab = { tabId: current.id, groupId: session.groupId, windowId: current.windowId,
         id: this.knownTabs.get(current.id) || null, title: (current.title || 'New tab').slice(0, 160),
         url: currentUrl.slice(0, 2048), pageState: ordinary ? (current.status === 'loading' ? 'loading' : 'ready') : 'navigation_only',
         protected_origins: this.protectedOrigins, queue: [], documentGeneration: 0,
@@ -565,7 +615,7 @@ export class Controller {
     }
     session.excluded = excluded;
   }
-  async updateTab(session, tab, current, currentUrl) {
+  async updateTab(session: Session, tab: Tab, current: Wire, currentUrl: string) {
     tab.windowId = current.windowId;
     if (!currentUrl) { tab.pageState = 'loading'; return; }
     if (tab.navigation && !/^https?:/.test(currentUrl)) { tab.pageState = 'loading'; return; }
@@ -581,12 +631,12 @@ export class Controller {
     else if (current.status === 'loading') tab.pageState = tab.pageState === 'unavailable' ? 'unavailable' : 'loading';
     else if (['loading', 'navigation_only'].includes(tab.pageState)) tab.pageState = 'ready';
   }
-  tagTab(session, tab) {
+  tagTab(session: Session, tab: Tab) {
     if (!this.api.sessions?.setTabValue) return;
     void this.api.sessions.setTabValue(tab.tabId, TAB_VALUE, { client_id: session.client_id, tab_id: tab.id })
       .catch(() => {});
   }
-  dropTab(session, tab, code) {
+  dropTab(session: Session, tab: Tab, code: string) {
     session.tabs.delete(tab.tabId);
     for (const task of [...session.tasks]) {
       if (task.message.operation === 'close_tab' && task.message.args.tab_id === tab.id && !task.executing) {
@@ -598,7 +648,7 @@ export class Controller {
     const cleanup = this.adapter.release(tab.tabId).catch(error => this.report(error));
     this.endingTasks.add(cleanup); void cleanup.finally(() => this.endingTasks.delete(cleanup));
   }
-  async closeLocal(session, ungroup, closeTabIds = []) {
+  async closeLocal(session: Session, ungroup: boolean, closeTabIds: number[] = []) {
     if (this.sessions.get(session.client_id) === session) this.sessions.delete(session.client_id);
     for (const tab of [...session.tabs.values()]) this.dropTab(session, tab, 'SESSION_ENDED');
     for (const task of [...session.tasks]) this.finishTask(session, null, task, { code: 'SESSION_ENDED' });
@@ -607,7 +657,7 @@ export class Controller {
     await Promise.all(closeTabIds.map(id => this.api.tabs.remove(id).catch(() => {})));
     if (ungroup && session.groupId !== null && session.groupId !== undefined) {
       const tabs = await this.api.tabs.query({ groupId: session.groupId }).catch(() => []);
-      if (tabs.length) await this.api.tabs.ungroup(tabs.map(tab => tab.id)).catch(error => this.report(error));
+      if (tabs.length) await this.api.tabs.ungroup(tabs.map((tab: Wire) => tab.id)).catch((error: unknown) => this.report(error));
     }
     this.records = this.records.filter(record => record.client_id !== session.client_id);
     this.buildMenus();
@@ -615,7 +665,7 @@ export class Controller {
     this.changed();
   }
   inventory() {
-    const groups = [];
+    const groups: Wire[] = [];
     for (const session of this.sessions.values()) {
       if (session.state === 'pending') {
         groups.push({ client_id: session.client_id, title: session.title, state: 'attached',
@@ -641,14 +691,14 @@ export class Controller {
     this.lastInventory = serialized; this.lastSyncAt = this.now();
     this.send({ type: 'sync', groups });
   }
-  acknowledged(message) {
+  acknowledged(message: Wire) {
     if (!Array.isArray(message.assignments) || !Array.isArray(message.unknown)) fail('INVALID_MESSAGE');
     for (const assignment of message.assignments) {
       const session = this.sessions.get(assignment.client_id);
       const tab = session?.tabs.get(assignment.key);
       if (!tab || typeof assignment.id !== 'string') continue;
       tab.id = assignment.id;
-      this.tagTab(session, tab);
+      this.tagTab(session!, tab);
     }
     for (const clientId of message.unknown) {
       const session = this.sessions.get(clientId);
@@ -673,7 +723,7 @@ export class Controller {
     if (this.pairing && this.connection) this.send({ type: 'pairing.cancel' });
     this.pairing = null; this.clearNotification('domagent-pairing'); this.changed();
   }
-  proposal(message) {
+  proposal(message: Wire) {
     if (!this.pairing || !UUID.test(message.request_id || '') || !message.agent?.id) return;
     this.pairing.state = 'proposed';
     this.pairing.proposal = { request_id: message.request_id, agent: { id: message.agent.id,
@@ -682,7 +732,7 @@ export class Controller {
       `${this.pairing.proposal.agent.name} wants to use this browser.`);
     this.changed();
   }
-  decidePairing(approved) {
+  decidePairing(approved: boolean) {
     const proposal = this.pairing?.proposal;
     if (!proposal) fail('ACTION_EXPIRED');
     this.send({ type: 'pairing.decision', request_id: proposal.request_id, approved });
@@ -691,13 +741,13 @@ export class Controller {
     this.pairing = null; this.clearNotification('domagent-pairing');
     this.changed();
   }
-  revokeAgent(agentId) {
+  revokeAgent(agentId: string) {
     this.send({ type: 'pairing.revoke', agent_id: agentId });
     const agent = this.agents.get(agentId);
     this.addFeed({ kind: 'pairing', agent_id: agentId, status: 'cancelled',
       description: `Unpaired ${agent?.name || agentId}. Its sessions ended.` });
   }
-  renameBrowser(name) {
+  renameBrowser(name: string) {
     if (!validName(name)) fail('INVALID_ARGUMENT');
     this.send({ type: 'browser.rename', name: name.trim() });
   }
@@ -707,17 +757,17 @@ export class Controller {
     await this.revoked();
     this.error = null; this.changed();
   }
-  async setOpenAtStartup(value) {
+  async setOpenAtStartup(value: boolean) {
     this.settings.openAtStartup = value === true;
     await this.persist();
     this.changed();
   }
 
   // ---------- session requests ----------
-  sessionRequest(message) {
+  sessionRequest(message: Wire) {
     if (!UUID.test(message.request_id || '') || !message.agent?.id || typeof message.purpose !== 'string') fail('INVALID_MESSAGE');
-    const urls = Array.isArray(message.urls) ? message.urls.slice(0, SESSION_TAB_LIMIT).filter(url => typeof url === 'string') : [];
-    const request = { request_id: message.request_id, agent: { id: message.agent.id, name: String(message.agent.name).slice(0, 80),
+    const urls = Array.isArray(message.urls) ? message.urls.slice(0, SESSION_TAB_LIMIT).filter((url: unknown) => typeof url === 'string') : [];
+    const request: SessionRequest = { request_id: message.request_id, agent: { id: message.agent.id, name: String(message.agent.name).slice(0, 80),
       url: message.agent.url || null, color: message.agent.color || agentColor(message.agent.id) },
     purpose: message.purpose.slice(0, 500), urls, title: String(message.title || message.agent.name).slice(0, 120),
     expires_at: message.expires_at };
@@ -726,21 +776,21 @@ export class Controller {
       request.purpose.slice(0, 180));
     this.changed();
   }
-  async approveSession(requestId) {
+  async approveSession(requestId: string) {
     const request = this.requests.get(requestId);
     if (!request || request.expires_at <= this.now()) fail('ACTION_EXPIRED');
     this.requests.delete(requestId);
     this.clearNotification(`domagent-request-${requestId}`);
     const windowId = await this.adapter.lastNormalWindow();
     const count = Math.max(1, request.urls.length);
-    const created = [];
+    const created: number[] = [];
     try {
       for (let index = 0; index < count; index++) {
         created.push((await this.api.tabs.create({ windowId, url: 'about:blank', active: false })).id);
       }
       const groupId = await this.api.tabs.group({ tabIds: created, createProperties: { windowId } });
       await this.api.tabGroups.update(groupId, { title: request.title, color: request.agent.color, collapsed: false });
-      const session = { client_id: crypto.randomUUID(), session_id: null, request_id: requestId,
+      const session: Session = { client_id: crypto.randomUUID(), session_id: null, request_id: requestId,
         agent_id: request.agent.id, title: request.title, purpose: request.purpose, groupId, windowId, state: 'pending',
         tabs: new Map(), tasks: [], running: 0, creating: 0, excluded: 0, startTabs: created, startUrls: request.urls,
         color: request.agent.color };
@@ -753,25 +803,25 @@ export class Controller {
     }
     this.changed();
   }
-  declineSession(requestId) {
+  declineSession(requestId: string) {
     if (!this.requests.delete(requestId)) fail('ACTION_EXPIRED');
     this.clearNotification(`domagent-request-${requestId}`);
     this.send({ type: 'session.decision', request_id: requestId, approved: false });
     this.changed();
   }
-  async requestCancelled(requestId) {
+  async requestCancelled(requestId: string) {
     if (this.requests.delete(requestId)) this.clearNotification(`domagent-request-${requestId}`);
     const pending = [...this.sessions.values()].find(session => session.request_id === requestId && session.state === 'pending');
     if (pending) await this.discardPending(pending);
     this.changed();
   }
-  async sessionCreated(message) {
+  async sessionCreated(message: Wire) {
     const session = [...this.sessions.values()].find(s => s.request_id === message.request_id && s.state === 'pending');
     if (!session || session.client_id !== message.client_id) return;
     validId(message.session_id);
     await this.commitPending(session, message.session_id);
   }
-  async commitPending(session, sessionId) {
+  async commitPending(session: Session, sessionId: string) {
     validId(sessionId);
     Object.assign(session, { session_id: sessionId, state: 'attached', request_id: null });
     delete session.startTabs;
@@ -795,13 +845,13 @@ export class Controller {
     await this.sync(true);
     this.changed();
   }
-  async discardPending(session) {
+  async discardPending(session: Session) {
     this.sessions.delete(session.client_id);
     // Only blank tabs exist before commit; nothing has loaded in them.
     if (session.startTabs?.length) await this.api.tabs.remove(session.startTabs).catch(() => {});
     this.changed();
   }
-  async sessionEnded(message) {
+  async sessionEnded(message: Wire) {
     const session = this.sessions.get(message.client_id);
     if (!session) return;
     this.addFeed({ session_id: session.session_id, agent_id: session.agent_id, kind: 'session', status: 'cancelled',
@@ -809,7 +859,7 @@ export class Controller {
     await this.closeLocal(session, true);
     await this.sync(true);
   }
-  progress(message) {
+  progress(message: Wire) {
     const session = [...this.sessions.values()].find(s => s.session_id === message.session_id);
     if (typeof message.message !== 'string') fail('INVALID_MESSAGE');
     this.addFeed({ kind: 'progress', session_id: message.session_id, agent_id: message.agent_id,
@@ -818,10 +868,10 @@ export class Controller {
   }
 
   // ---------- commands ----------
-  findSession(sessionId) {
+  findSession(sessionId: string) {
     return [...this.sessions.values()].find(session => session.session_id === sessionId) || null;
   }
-  check(session, tab, task, after = false) {
+  check(session: Session, tab: Tab | null | undefined, task: Task, after = false) {
     if (!this.connection || task.connection_id !== this.connection.connection_id) fail('BROWSER_OFFLINE');
     if (this.sessions.get(session.client_id) !== session || session.state !== 'attached') fail('SESSION_DETACHED');
     if (task.cancelled || (tab && session.tabs.get(tab.tabId) !== tab)) fail('TAB_NOT_IN_SESSION');
@@ -830,8 +880,8 @@ export class Controller {
         !['wait_for_page', 'request_handoff'].includes(task.message.operation) &&
         !(after && MUTATIONS.includes(task.message.operation))) fail('TARGET_STALE');
   }
-  enqueue(message) {
-    let session, tab, task;
+  enqueue(message: Wire) {
+    let session: Session | null, tab: Tab | null | undefined, task: Task;
     try {
       validId(message.request_id);
       session = this.findSession(message.session_id);
@@ -855,7 +905,7 @@ export class Controller {
       const duration = message.wait_timeout_ms;
       if (!Number.isSafeInteger(duration) || duration <= 0 || duration > HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
       task = { message, human, confirm, approved: false, deadline: this.now() + duration, documentGeneration: tab?.documentGeneration,
-        executing: false, cancelled: false, connection_id: this.connection.connection_id };
+        executing: false, cancelled: false, connection_id: this.connection!.connection_id };
       this.check(session, tab, task);
       const queue = tab?.queue || session.tasks;
       if (queue.length >= 16) fail('QUEUE_FULL');
@@ -867,20 +917,20 @@ export class Controller {
         this.closures.set(message.request_id, { session, task });
         const agent = this.agents.get(session.agent_id)?.name || 'Your agent';
         const what = message.operation === 'close_tab'
-          ? `“${this.sessionTab(session, message.args.tab_id).title || 'a tab'}”`
+          ? `“${this.sessionTab(session, message.args.tab_id)!.title || 'a tab'}”`
           : `${session.tabs.size} tab${session.tabs.size === 1 ? '' : 's'} of “${session.title}”`;
         this.notify(`domagent-close-${message.request_id}`, `${agent} asks to close ${what}`,
           `${String(message.description).slice(0, 150)} — approve or keep open in the DomAgent window.`);
       }
       if (human) {
-        this.handoffs.set(message.request_id, { session, tab, task });
+        this.handoffs.set(message.request_id, { session, tab: tab!, task });
         this.notify(`domagent-help-${message.request_id}`, `${this.agents.get(session.agent_id)?.name || 'Your agent'} needs your help`,
           String(message.args.instructions).slice(0, 180));
       }
       this.drain(session); this.changed();
     } catch (error) { this.result(message, { code: errorCode(error) }); }
   }
-  drain(session) {
+  drain(session: Session) {
     if (session.state !== 'attached') return;
     const full = session.running >= SESSION_CONCURRENCY;
     for (const tab of [null, ...session.tabs.values()]) {
@@ -892,7 +942,7 @@ export class Controller {
       void this.prepare(session, tab, task).catch(error => this.report(error));
     }
   }
-  async prepare(session, tab, task) {
+  async prepare(session: Session, tab: Tab | null, task: Task) {
     try {
       this.check(session, tab, task);
       if (tab) {
@@ -903,14 +953,14 @@ export class Controller {
       task.ready = true;
       this.addFeed({ id: task.message.request_id, status: 'ready' });
       this.send({ type: 'command.ready', request_id: task.message.request_id });
-    } catch (error) {
+    } catch (error: any) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') { tab.pageState = 'unavailable'; void this.sync(); }
       this.finishTask(session, tab, task, { code: error.code === 'PAGE_UNAVAILABLE' ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error),
         ...inspectionErrorDetails(error), ...errorDetails(error),
         ...diagnosticDetails(error, { layer: 'extension', phase: 'preparation' }) });
     } finally { task.preparing = false; }
   }
-  decideHandoff(requestId, action) {
+  decideHandoff(requestId: string, action: string) {
     const entry = this.handoffs.get(requestId);
     if (!entry) fail('ACTION_EXPIRED');
     const { session, tab, task } = entry;
@@ -920,7 +970,7 @@ export class Controller {
     task.ready = true;
     this.send({ type: 'command.ready', request_id: requestId });
   }
-  decideClose(requestId, approve) {
+  decideClose(requestId: string, approve: boolean) {
     const entry = this.closures.get(requestId);
     if (!entry) fail('ACTION_EXPIRED');
     const { session, task } = entry;
@@ -932,7 +982,7 @@ export class Controller {
     this.addFeed({ id: requestId, status: 'approved' });
     this.drain(session); this.changed();
   }
-  findTask(requestId) {
+  findTask(requestId: string) {
     for (const session of this.sessions.values()) {
       for (const tab of [null, ...session.tabs.values()]) {
         const task = (tab?.queue || session.tasks).find(task => task.message.request_id === requestId);
@@ -941,12 +991,12 @@ export class Controller {
     }
     return null;
   }
-  cancelCommand(message) {
+  cancelCommand(message: Wire) {
     const found = this.findTask(message.request_id);
     if (found) this.finishTask(found.session, found.tab, found.task,
       { code: found.task.executing ? 'OUTCOME_UNKNOWN' : 'COMMAND_CANCELLED' });
   }
-  async executeReady(message) {
+  async executeReady(message: Wire) {
     const found = this.findTask(message.request_id);
     if (!found) return;
     const { session, tab, task } = found;
@@ -962,10 +1012,10 @@ export class Controller {
     task.executing = true;
     this.addFeed({ id: task.message.request_id, status: 'running' });
     if (!unslotted) session.running++;
-    let timer, after = null;
+    let timer: ReturnType<typeof setTimeout> | undefined, after: (() => Promise<void>) | null | undefined = null;
     try {
       this.check(session, tab, task);
-      let operation;
+      let operation: unknown;
       if (task.human) operation = Promise.resolve({ state: 'completed', user_confirmed: true });
       else if (tab) operation = this.adapter.execute(tab, task.message.operation, task.message.args,
         after => this.check(session, tab, task, after), task.preview);
@@ -981,7 +1031,7 @@ export class Controller {
       if (tab && task.message.operation === 'navigate') await this.sync();
       this.finishTask(session, tab, task, null, boundedResult(value));
       after = task.after;
-    } catch (error) {
+    } catch (error: any) {
       if (tab && error.code === 'PAGE_UNAVAILABLE') { tab.pageState = 'unavailable'; void this.sync(); }
       this.finishTask(session, tab, task, { code: error.code === 'PAGE_UNAVAILABLE' ? 'DOCUMENT_NOT_CONTROLLABLE' : errorCode(error),
         ...inspectionErrorDetails(error), ...waitErrorDetails(error), ...errorDetails(error),
@@ -995,8 +1045,8 @@ export class Controller {
     // Runs after the receipt so the closing command is not itself ended with the session.
     if (after) await after().catch(error => this.report(error));
   }
-  sessionTab(session, id) { return [...session.tabs.values()].find(tab => tab.id === id) || null; }
-  async closeTab(session, task) {
+  sessionTab(session: Session, id: unknown) { return [...session.tabs.values()].find(tab => tab.id === id) || null; }
+  async closeTab(session: Session, task: Task) {
     const tab = this.sessionTab(session, task.message.args.tab_id);
     if (!tab) fail('TAB_NOT_IN_SESSION');
     // The last tab takes the group with it, so the approved close ends the session.
@@ -1009,21 +1059,21 @@ export class Controller {
     await this.sync(true);
     return { tab_id: tab.id, session_ended: false };
   }
-  closeSession(session, task) {
+  closeSession(session: Session, task: Task) {
     const tabIds = [...session.tabs.keys()];
     task.after = () => this.endApprovedClose(session, tabIds);
     return { tabs_closed: tabIds.length };
   }
-  async endApprovedClose(session, tabIds) {
+  async endApprovedClose(session: Session, tabIds: number[]) {
     this.addFeed({ session_id: session.session_id, agent_id: session.agent_id, kind: 'session', status: 'cancelled',
       description: `Session “${session.title}” ended. You approved closing its tabs.` });
     await this.closeLocal(session, true, tabIds);
     await this.sync(true);
   }
-  async createTab(session, task) {
+  async createTab(session: Session, task: Task) {
     if (session.tabs.size + session.creating >= SESSION_TAB_LIMIT) fail('TAB_LIMIT_REACHED');
     session.creating++;
-    let created;
+    let created: any;
     try { created = await this.api.tabs.create({ windowId: session.windowId, url: 'about:blank', active: false }); }
     catch (error) { session.creating--; throw error; }
     try {
@@ -1055,7 +1105,7 @@ export class Controller {
       throw error;
     } finally { session.creating--; }
   }
-  finishTask(session, tab, task, error, value) {
+  finishTask(session: Session, tab: Tab | null, task: Task, error: Wire | null, value?: unknown) {
     if (task.cancelled) return;
     let status = 'complete';
     if (error?.code === 'OUTCOME_UNKNOWN') status = 'uncertain';
@@ -1072,12 +1122,12 @@ export class Controller {
     if (tab && task.preview) void this.adapter.releaseAction(tab, task.preview).catch(() => {});
     this.drain(session); this.changed();
   }
-  result(message, error, value) {
+  result(message: Wire, error: Wire | null, value?: unknown) {
     if (!this.connection) return;
     try { this.send({ type: 'result', request_id: message.request_id, ...(error ? { error } : { result: value }) }); }
     catch (failure) { this.report(failure); }
   }
-  tabEvent(tabId, event, destination) {
+  tabEvent(tabId: number, event: string, destination?: string) {
     for (const session of this.sessions.values()) {
       const tab = session.tabs.get(tabId);
       if (!tab) continue;
@@ -1091,7 +1141,7 @@ export class Controller {
       if (event === 'navigation_pending') {
         tab.navigation = null;
         if (/^https?:/.test(destination || '')) {
-          try { tab.navigation = { from: tab.url, url: navigationUrl(destination, this.protectedOrigins) }; }
+          try { tab.navigation = { from: tab.url, url: navigationUrl(destination!, this.protectedOrigins) }; }
           catch { continue; }
         }
       }
@@ -1109,21 +1159,21 @@ export class Controller {
   }
 
   // ---------- native affordances ----------
-  notify(id, title, message) {
+  notify(id: string, title: string, message: string) {
     void this.api.notifications?.create(id, { type: 'basic', iconUrl: this.api.runtime.getURL('icons/icon128.png'),
       title, message }).catch(() => this.report(Object.assign(new Error('NOTIFICATION_UNAVAILABLE'), { code: 'NOTIFICATION_UNAVAILABLE' })));
   }
-  clearNotification(id) { void this.api.notifications?.clear(id).catch(() => {}); }
+  clearNotification(id: string) { void this.api.notifications?.clear(id).catch(() => {}); }
   async focusApp() {
     if (this.appWindowId !== null) await this.api.windows.update(this.appWindowId, { focused: true });
   }
-  async notificationClicked(id) {
+  async notificationClicked(id: string) {
     if (!id.startsWith('domagent-')) return;
     const help = id.startsWith('domagent-help-') && this.handoffs.get(id.slice('domagent-help-'.length));
     if (help) await this.adapter.focusTab(help.tab.tabId).catch(() => {});
     await this.focusApp();
   }
-  async focusTab(tabId) { await this.adapter.focusTab(tabId); }
+  async focusTab(tabId: number) { await this.adapter.focusTab(tabId); }
   buildMenus() {
     const menus = this.api.menus || this.api.contextMenus;
     if (!menus) return;
@@ -1131,7 +1181,7 @@ export class Controller {
     const signature = JSON.stringify(sessions.map(session => [session.client_id, session.title]));
     if (signature === this.menuSignature) return;
     this.menuSignature = signature;
-    const create = properties => new Promise(resolve => {
+    const create = (properties: Wire) => new Promise<void>(resolve => {
       menus.create(properties, () => { void this.api.runtime.lastError; resolve(); });
     });
     this.menuWork = (this.menuWork || Promise.resolve()).then(async () => {
@@ -1146,7 +1196,7 @@ export class Controller {
       await create({ id: 'domagent-remove', title: 'Remove tab from DomAgent session', contexts });
     }).catch(error => this.report(error));
   }
-  async menuClicked(info, tab) {
+  async menuClicked(info: Wire, tab: Wire) {
     if (!tab || tab.id === undefined) return;
     const id = String(info.menuItemId);
     if (id === 'domagent-remove') {

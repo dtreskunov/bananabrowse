@@ -15,7 +15,7 @@ const usage = `Usage:
 Database: DOMAGENT_DB (default ./data/domagent.db). The running service picks up
 revocations within a few seconds. Agent configuration changes need a restart.`;
 
-function fail(message) { console.error(message); process.exit(2); }
+function fail(message: string): never { console.error(message); process.exit(2); }
 
 if (command === 'agent-key') {
   const [id, name, homepage = ''] = args;
@@ -34,7 +34,7 @@ if (command === 'agent-key') {
 if (!command || command === 'help' || command === '--help') { console.log(usage); process.exit(command ? 0 : 2); }
 
 const store = new Store(process.env.DOMAGENT_DB || './data/domagent.db');
-const time = value => new Date(value).toISOString();
+const time = (value: number) => new Date(value).toISOString();
 try {
   if (command === 'browsers') {
     for (const row of store.listBrowsers()) {

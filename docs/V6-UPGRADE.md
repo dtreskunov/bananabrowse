@@ -12,7 +12,7 @@ Browsers register again and agents pair again.
    must stay off-limits (for example a former identity provider) in
    `DOMAGENT_PROTECTED_ORIGINS`.
 4. Add one `DOMAGENT_AGENT_<ID>="Name|homepage|sha256:<hex>"` line per agent.
-   Generate new keys with `node domagent-mcp/admin.js agent-key <id> "<Name>"`.
+   Generate new keys with `node domagent-mcp/dist/domagent-mcp/admin.js agent-key <id> "<Name>"`.
    To keep a v5 client's existing credential, reuse its stored SHA-256 hash
    (`clients.credential_hash` in the old DB) as the `sha256:` value, so no secret
    changes hands.

@@ -1,9 +1,8 @@
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 const localRequire = createRequire(path.join(__dirname, '../../../domagent-mcp/package.json'));
 const { test, expect, chromium, firefox } = localRequire('@playwright/test');
-const pageModule = pathToFileURL(path.resolve(__dirname, '../../src/page.js')).href;
+const { loadPageHelper } = require('./page-helper.cjs');
 const runHelper = (page, helper, operation, args = {}) => page.evaluate(({ source, operation, args }) =>
   (0, eval)(`(${source})`)(operation, args), { source: helper.toString(), operation, args });
 async function launchBrowser(engine) {
@@ -19,7 +18,7 @@ async function launchBrowser(engine) {
 
 for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
   test(`${name}: styled hidden checkboxes use bound visible labels, never unrelated overlays or replacements`, async () => {
-    const { pageHelper } = await import(pageModule);
+    const { pageHelper } = await loadPageHelper();
     const browser = await launchBrowser(engine);
     try {
       const page = await browser.newPage();
@@ -75,7 +74,7 @@ for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
   });
 
   test(`${name}: inspector reports bounded hiding ancestors and explicit reveal controls without mutating`, async () => {
-    const { pageHelper } = await import(pageModule);
+    const { pageHelper } = await loadPageHelper();
     const browser = await launchBrowser(engine);
     try {
       const page = await browser.newPage();
@@ -95,7 +94,7 @@ for (const [name, engine] of [['chrome', chromium], ['firefox', firefox]]) {
   });
 
   test(`${name}: read-only diagnostics and approval binding reject responsive replacements`, async () => {
-    const { pageHelper } = await import(pageModule);
+    const { pageHelper } = await loadPageHelper();
     const browser = await launchBrowser(engine);
     try {
       const page = await browser.newPage({ viewport: { width: 610, height: 700 } });

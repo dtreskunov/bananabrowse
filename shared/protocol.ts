@@ -1,3 +1,22 @@
+/**
+ * A JSON object from the wire, the browser or a caller that has not been validated as a whole.
+ * Code reading it checks each field at runtime before use, so fields are deliberately untyped.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Wire = Record<string, any>;
+/** An Error carrying a stable DomAgent error code plus value-free details. */
+export interface CodedError extends Error { code: string; [detail: string]: unknown }
+export interface FieldSchema {
+  type: string; description?: string; default?: unknown; minimum?: number; maximum?: number;
+  minLength?: number; maxLength?: number; pattern?: string; format?: string; enum?: readonly unknown[];
+  unit?: 'unicode_code_points' | 'utf16_code_units'; trimMinimum?: boolean;
+}
+export interface OperationSpec {
+  properties: Record<string, FieldSchema>; required: readonly string[];
+  anyOf?: readonly { required: readonly string[] }[];
+}
+export interface ArgumentError { field: string; reason: string; [detail: string]: unknown }
+
 export const VERSION = 6;
 export const SESSION_TAB_LIMIT = 8;
 export const SESSION_CONCURRENCY = 2;
@@ -35,8 +54,8 @@ export const ARTIFACT_TEXT_MIME = /^(?:text\/|application\/(?:json|x-ndjson)$)/;
 export const ARTIFACT_ID_PATTERN = /^a[0-9A-Za-z_-]{22}$/;
 /** Lowest extension version that understands each optional capability. */
 export const EXTENSION_FEATURES = Object.freeze({ artifacts: '6.1.0', close_tabs: '6.1.3' });
-export function versionAtLeast(version, minimum) {
-  const parts = value => String(value || '0').split('.').map(part => Number.parseInt(part, 10) || 0);
+export function versionAtLeast(version: unknown, minimum: string): boolean {
+  const parts = (value: unknown) => String(value || '0').split('.').map(part => Number.parseInt(part, 10) || 0);
   const [a, b] = [parts(version), parts(minimum)];
   for (let index = 0; index < Math.max(a.length, b.length); index++) {
     if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) > (b[index] || 0);
@@ -45,35 +64,35 @@ export function versionAtLeast(version, minimum) {
 }
 export const GROUP_COLORS = Object.freeze(['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']);
 
-const shortId = prefix => Object.freeze({ type: 'string', pattern: `^${prefix}[0-9a-z]{1,12}(?![\\s\\S])` });
+const shortId = (prefix: string) => Object.freeze({ type: 'string', pattern: `^${prefix}[0-9a-z]{1,12}(?![\\s\\S])` });
 export const BROWSER_ID_SCHEMA = shortId('b');
 export const SESSION_ID_SCHEMA = shortId('s');
 export const GROUP_ID_SCHEMA = shortId('g');
 export const TAB_ID_SCHEMA = Object.freeze({ ...shortId('t'),
   description: 'Tab ID from list_tabs, request_session or create_tab. IDs are scoped to your sessions; shape alone grants nothing.' });
 export const AGENT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
-export const validShortId = (prefix, value) =>
+export const validShortId = (prefix: string, value: unknown): value is string =>
   typeof value === 'string' && new RegExp(`^${prefix}[0-9a-z]{1,12}$`).test(value);
-export const validTabId = value => validShortId('t', value);
+export const validTabId = (value: unknown): value is string => validShortId('t', value);
 
 /** Stable per-agent native group color; grey is reserved for the attention flash. */
-export function agentColor(agentId) {
+export function agentColor(agentId: string): string {
   let hash = 0;
-  for (const char of String(agentId)) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
-  return GROUP_COLORS[hash % GROUP_COLORS.length];
+  for (const char of String(agentId)) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+  return GROUP_COLORS[hash % GROUP_COLORS.length]!;
 }
 
-export const READINESS_ERRORS = Object.freeze([
+export const READINESS_ERRORS: readonly string[] = Object.freeze([
   'ELEMENT_NOT_FOUND', 'ELEMENT_DISABLED', 'ELEMENT_READONLY',
   'ELEMENT_NOT_VISIBLE', 'ELEMENT_OBSCURED', 'OPTION_NOT_FOUND',
 ]);
 export const MIN_DESCRIPTION_LENGTH = 40;
-export function validDescription(value) {
+export function validDescription(value: unknown): value is string {
   return typeof value === 'string' && [...value].length <= 500 &&
     [...value.trim()].length >= MIN_DESCRIPTION_LENGTH;
 }
-export function validBrowserInfo(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) &&
+export function validBrowserInfo(value: Wire | null | undefined): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).every(key => ['extension_version', 'browser_name', 'browser_version'].includes(key)) &&
     typeof value.extension_version === 'string' && value.extension_version.length <= 32 &&
     /^[0-9]+(?:\.[0-9]+){0,3}$/.test(value.extension_version) &&
@@ -82,10 +101,10 @@ export function validBrowserInfo(value) {
       typeof value.browser_version === 'string' && /^[0-9][0-9A-Za-z.+_-]{0,63}$/.test(value.browser_version)
     ));
 }
-export function inspectionErrorDetails(error) {
-  if (!['PAGE_UNAVAILABLE', 'DOCUMENT_NOT_CONTROLLABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error?.code) ||
+export function inspectionErrorDetails(error: Wire | null | undefined): Wire {
+  if (!error || !['PAGE_UNAVAILABLE', 'DOCUMENT_NOT_CONTROLLABLE', 'TARGET_STALE', 'WAIT_TIMEOUT'].includes(error.code) ||
       !['tab_status', 'document_injection', 'document_state', 'document_changed', 'content_readiness'].includes(error.inspection_stage)) return {};
-  const result = { inspection_stage: error.inspection_stage };
+  const result: Wire = { inspection_stage: error.inspection_stage };
   if (['permission_denied', 'browser_restricted', 'frame_unavailable', 'helper_execution_failed',
     'empty_result', 'unknown'].includes(error.injection_reason)) result.injection_reason = error.injection_reason;
   if (['PAGE_UNAVAILABLE', 'TARGET_STALE', ...(error.inspection_stage === 'content_readiness' ? READINESS_ERRORS : [])].includes(error.last_error) &&
@@ -97,68 +116,69 @@ export function inspectionErrorDetails(error) {
 }
 const STALE_REASONS = ['document_changed', 'ref_from_other_document', 'ref_superseded', 'element_detached'];
 const DOCUMENT_NONCE = /^[0-9a-f]{8,128}$/;
-const boundedInteger = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+const boundedInteger = (value: unknown, maximum: number): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
 /** Whitelisted, value-free error details that help an agent recover without leaking page data. */
-export function errorDetails(error) {
+export function errorDetails(error: unknown): Wire {
   if (!error || typeof error !== 'object') return {};
-  const result = {};
-  if (['ELEMENT_STALE', 'TARGET_STALE'].includes(error.code) && STALE_REASONS.includes(error.stale_reason)) {
-    result.stale_reason = error.stale_reason;
+  const e = error as Wire, result: Wire = {};
+  if (['ELEMENT_STALE', 'TARGET_STALE'].includes(e.code) && STALE_REASONS.includes(e.stale_reason)) {
+    result.stale_reason = e.stale_reason;
     for (const key of ['snapshot_document', 'current_document']) {
-      if (typeof error[key] === 'string' && DOCUMENT_NONCE.test(error[key])) result[key] = error[key];
+      if (typeof e[key] === 'string' && DOCUMENT_NONCE.test(e[key])) result[key] = e[key];
     }
   }
-  if (['RESULT_TOO_LARGE', 'INVALID_RESULT'].includes(error.code) &&
-      boundedInteger(error.actual_bytes, 2 ** 40) && boundedInteger(error.limit_bytes, 2 ** 40)) {
-    result.actual_bytes = error.actual_bytes;
-    result.limit_bytes = error.limit_bytes;
+  if (['RESULT_TOO_LARGE', 'INVALID_RESULT'].includes(e.code) &&
+      boundedInteger(e.actual_bytes, 2 ** 40) && boundedInteger(e.limit_bytes, 2 ** 40)) {
+    result.actual_bytes = e.actual_bytes;
+    result.limit_bytes = e.limit_bytes;
   }
-  if (['SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR'].includes(error.code)) {
-    if (boundedInteger(error.line, 10_000_000) && error.line > 0) result.line = error.line;
-    if (boundedInteger(error.column, 10_000_000) && error.column > 0) result.column = error.column;
-    if (typeof error.snippet === 'string' && error.snippet.length <= 300) result.snippet = error.snippet;
+  if (['SCRIPT_SYNTAX_ERROR', 'SCRIPT_RUNTIME_ERROR'].includes(e.code)) {
+    if (boundedInteger(e.line, 10_000_000) && e.line > 0) result.line = e.line;
+    if (boundedInteger(e.column, 10_000_000) && e.column > 0) result.column = e.column;
+    if (typeof e.snippet === 'string' && e.snippet.length <= 300) result.snippet = e.snippet;
   }
-  if (error.code === 'CAPABILITY_UNAVAILABLE' && typeof error.required_extension_version === 'string' &&
-      /^[0-9]+(?:\.[0-9]+){0,3}$/.test(error.required_extension_version)) {
-    result.required_extension_version = error.required_extension_version;
+  if (e.code === 'CAPABILITY_UNAVAILABLE' && typeof e.required_extension_version === 'string' &&
+      /^[0-9]+(?:\.[0-9]+){0,3}$/.test(e.required_extension_version)) {
+    result.required_extension_version = e.required_extension_version;
   }
   return result;
 }
-export function waitErrorDetails(error) {
+export function waitErrorDetails(error: Wire | null | undefined): Wire {
   const contentReadiness = error?.readiness_stage === 'content_readiness';
   const causes = contentReadiness ? [...READINESS_ERRORS, 'PAGE_UNAVAILABLE', 'TARGET_STALE'] : READINESS_ERRORS;
   const codes = contentReadiness ? ['WAIT_TIMEOUT', ...causes] : ['WAIT_TIMEOUT'];
-  if (!codes.includes(error?.code) || !causes.includes(error.last_error) ||
+  if (!error || !codes.includes(error.code) || !causes.includes(error.last_error) ||
       !Number.isSafeInteger(error.timeout_ms) || error.timeout_ms < (contentReadiness ? 0 : 1) ||
       error.timeout_ms > PAGE_WAIT_MS) return {};
   return { last_error: error.last_error, timeout_ms: error.timeout_ms,
     ...(contentReadiness ? { readiness_stage: 'content_readiness' } : {}) };
 }
-const output = { max_output_bytes: { type: 'integer', minimum: 1024, maximum: MAX_OUTPUT_BYTES,
+const output: Record<string, FieldSchema> = { max_output_bytes: { type: 'integer', minimum: 1024, maximum: MAX_OUTPUT_BYTES,
   default: DEFAULT_OUTPUT_BYTES, description: 'Maximum UTF-8 bytes for the serialized MCP result, including its text-content wrapper. Default 16 KiB; hard maximum 64 KiB. Narrow the request before increasing.' } };
-const readText = { max_text_chars: { type: 'integer', minimum: 0, maximum: MAX_TEXT_CHARS,
+const readText: Record<string, FieldSchema> = { max_text_chars: { type: 'integer', minimum: 0, maximum: MAX_TEXT_CHARS,
   default: DEFAULT_TEXT_CHARS, description: 'Maximum returned text characters; default 4000. Truncation is explicit. Prefer a focused selector.' } };
-const readElements = { max_elements: { type: 'integer', minimum: 1, maximum: MAX_ELEMENTS,
+const readElements: Record<string, FieldSchema> = { max_elements: { type: 'integer', minimum: 1, maximum: MAX_ELEMENTS,
   default: DEFAULT_ELEMENTS, description: 'Maximum returned elements; default 50. Truncation is explicit.' } };
-const target = {
+const target: Record<'selector' | 'ref' | 'document', FieldSchema> = {
   selector: { type: 'string', minLength: 1, maxLength: 4096 },
   ref: { type: 'string', pattern: '^e[1-9][0-9]{0,8}(?![\\s\\S])' },
   document: { type: 'string', minLength: 8, maxLength: 128 },
 };
-const timeout = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS,
+const timeout: Record<string, FieldSchema> = { timeout_ms: { type: 'integer', minimum: 0, maximum: PAGE_WAIT_MS,
   description: 'Page/element readiness wait, not a human wait. Element actions default to 3000 ms; wait_for_page defaults to 10000 ms. Use 0 for immediate selector probes. An exhausted positive wait returns WAIT_TIMEOUT; last_error identifies the last element-readiness cause.' } };
 const targeted = { ...target, ...timeout };
-const text = { type: 'string', maxLength: 65_536 };
-const operation = (properties, required = [], needsTarget = false) => ({
+const text: FieldSchema = { type: 'string', maxLength: 65_536 };
+const operation = (properties: Record<string, FieldSchema>, required: string[] = [], needsTarget = false): OperationSpec => ({
   properties, required, ...(needsTarget ? {
     anyOf: [{ required: ['selector'] }, { required: ['ref', 'document'] }],
   } : {}),
 });
-export const OPERATION_SCHEMAS = Object.freeze({
+export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object.freeze({
   navigate: operation({ url: { type: 'string', minLength: 1, maxLength: 8192 } }, ['url']),
   click: operation(targeted, [], true),
   inspect_element: operation({ ...target,
-    max_output_bytes: { ...output.max_output_bytes, default: 4096, maximum: 4096,
+    max_output_bytes: { ...output.max_output_bytes!, default: 4096, maximum: 4096,
       description: 'Inspector JSON result budget; default and hard maximum 4096 UTF-8 bytes.' },
   }, [], true),
   type_text: operation({ ...targeted, text }, ['text'], true),
@@ -193,28 +213,28 @@ export const OPERATION_SCHEMAS = Object.freeze({
     description: 'Optional content readiness selector: wait for at least one visible match after the document settles. Maximum 4096 UTF-16 code units.' } }),
   clear_overlays: operation({}),
 });
-export const OPERATIONS = Object.freeze(Object.keys(OPERATION_SCHEMAS));
+export const OPERATIONS: readonly string[] = Object.freeze(Object.keys(OPERATION_SCHEMAS));
 export const HANDOFF_SCHEMA = operation({
   instructions: { type: 'string', minLength: 1, maxLength: 2000, unit: 'unicode_code_points',
     description: 'What the person should do in this tab. Plain text, maximum 2000 Unicode code points.' },
 }, ['instructions']);
-export const DESCRIPTION_SCHEMA = Object.freeze({ type: 'string', minLength: MIN_DESCRIPTION_LENGTH,
+export const DESCRIPTION_SCHEMA: Readonly<FieldSchema> = Object.freeze({ type: 'string', minLength: MIN_DESCRIPTION_LENGTH,
   maxLength: 500, unit: 'unicode_code_points', trimMinimum: true });
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![\\s\\S])';
 
-function editDistance(a, b) {
+function editDistance(a: string, b: string): number {
   let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
   for (let i = 1; i <= a.length; i++) {
     const current = [i];
     for (let j = 1; j <= b.length; j++) {
-      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      current[j] = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
     }
     previous = current;
   }
-  return previous[b.length];
+  return previous[b.length]!;
 }
-function closestKey(key, allowed) {
-  let best = null, distance = Infinity;
+function closestKey(key: string, allowed: string[]): string | null {
+  let best: string | null = null, distance = Infinity;
   for (const candidate of allowed) {
     const score = editDistance(key.toLowerCase(), candidate.toLowerCase());
     if (score < distance) { best = candidate; distance = score; }
@@ -222,11 +242,12 @@ function closestKey(key, allowed) {
   return distance <= Math.max(2, Math.floor(key.length / 3)) ? best : null;
 }
 
-export function schemaArgumentErrors(spec, args) {
+export function schemaArgumentErrors(spec: OperationSpec | undefined, args: unknown): ArgumentError[] {
   if (!spec || !args || typeof args !== 'object' || Array.isArray(args)) {
     return [{ field: 'arguments', reason: 'expected_object' }];
   }
-  const errors = [];
+  const input = args as Wire;
+  const errors: ArgumentError[] = [];
   const allowed = Object.keys(spec.properties);
   for (const key of Object.keys(args).filter(key => !Object.hasOwn(spec.properties, key)).slice(0, 8)) {
     // Field names are caller-supplied; bound them, but never echo values.
@@ -239,10 +260,10 @@ export function schemaArgumentErrors(spec, args) {
   }
   for (const [key, field] of Object.entries(spec.properties)) {
     if (!Object.hasOwn(args, key)) continue;
-    const value = args[key];
+    const value = input[key];
     if (field.type === 'integer') {
       if (!Number.isSafeInteger(value)) errors.push({ field: key, reason: 'expected_integer' });
-      else if (value < field.minimum || value > field.maximum) errors.push({
+      else if (value < field.minimum! || value > field.maximum!) errors.push({
         field: key, reason: 'out_of_range', limits: { minimum: field.minimum, maximum: field.maximum },
       });
       continue;
@@ -269,9 +290,9 @@ export function schemaArgumentErrors(spec, args) {
     });
   }
   if (Object.hasOwn(spec.properties, 'ref')) {
-    if (args.ref !== undefined && args.document === undefined) errors.push({ field: 'document', reason: 'required_with_ref' });
-    if (args.ref !== undefined && args.selector !== undefined) errors.push({ field: 'selector', reason: 'conflicts_with_ref' });
-    if (args.document !== undefined && args.ref === undefined && args.selector === undefined) {
+    if (input.ref !== undefined && input.document === undefined) errors.push({ field: 'document', reason: 'required_with_ref' });
+    if (input.ref !== undefined && input.selector !== undefined) errors.push({ field: 'selector', reason: 'conflicts_with_ref' });
+    if (input.document !== undefined && input.ref === undefined && input.selector === undefined) {
       errors.push({ field: 'document', reason: 'requires_ref_or_selector' });
     }
   }
@@ -280,18 +301,18 @@ export function schemaArgumentErrors(spec, args) {
   }
   return errors;
 }
-export function operationArgumentErrors(name, args) {
+export function operationArgumentErrors(name: string, args: unknown): ArgumentError[] {
   return schemaArgumentErrors(name === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[name], args);
 }
-export function validOperationArgs(name, args) {
+export function validOperationArgs(name: string, args: unknown): boolean {
   return operationArgumentErrors(name, args).length === 0;
 }
 
-export function validName(value, max = 80) {
+export function validName(value: unknown, max = 80): value is string {
   return typeof value === 'string' && value.trim().length > 0 && [...value].length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
-export function serviceOrigin(value) {
+export function serviceOrigin(value: string): string {
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username || url.password || url.search ||
       url.hash || (url.pathname !== '/' && url.pathname !== '')) {
@@ -300,30 +321,30 @@ export function serviceOrigin(value) {
   return url.origin;
 }
 
-export function extensionOrigin(value) {
+export function extensionOrigin(value: string): string {
   if (!/^(chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[a-f0-9-]{36})$/i.test(value)) {
     throw new Error('INVALID_EXTENSION_ORIGIN');
   }
   return value;
 }
 
-export function encode(value) {
+export function encode(value: unknown): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-export function base64url(bytes) {
+export function base64url(bytes: ArrayBuffer | Uint8Array): string {
   return btoa(String.fromCharCode(...new Uint8Array(bytes)))
     .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
-export function unbase64url(value) {
+export function unbase64url(value: unknown): Uint8Array<ArrayBuffer> {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(value) || value.length > 1024) {
     throw new Error('INVALID_SIGNATURE');
   }
   return Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
 }
 
-export async function keyId(jwk) {
+export async function keyId(jwk: Wire | null | undefined): Promise<string> {
   if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || Object.hasOwn(jwk, 'd') ||
       typeof jwk.x !== 'string' || typeof jwk.y !== 'string') {
     throw new Error('INVALID_PUBLIC_KEY');
@@ -332,36 +353,36 @@ export async function keyId(jwk) {
 }
 
 // Domain-separated proof transcripts. Each binds the service origin and a fresh server nonce.
-export function registerPayload(c) {
+export function registerPayload(c: Wire): Uint8Array<ArrayBuffer> {
   return encode(['domagent.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]);
 }
 
-export function tokenPayload(c) {
+export function tokenPayload(c: Wire): Uint8Array<ArrayBuffer> {
   return encode(['domagent.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]);
 }
 
-export function connectPayload(c) {
+export function connectPayload(c: Wire): Uint8Array<ArrayBuffer> {
   return encode(['domagent.v6', 'connect', c.origin, c.nonce, c.browser_id, c.connection_id]);
 }
 
-export function normalizePairingCode(value) {
+export function normalizePairingCode(value: unknown): string {
   if (typeof value !== 'string' || value.length > 16) throw new Error('PAIRING_UNAVAILABLE');
   const code = value.toUpperCase().replaceAll('-', '').replaceAll(' ', '');
   if (!/^[0-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('PAIRING_UNAVAILABLE');
   return code;
 }
 
-export function pairingCode(random = n => crypto.getRandomValues(new Uint8Array(n))) {
+export function pairingCode(random: (n: number) => Iterable<number> = n => crypto.getRandomValues(new Uint8Array(n))): string {
   const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   const code = [...random(8)].map(value => alphabet[value % 32]).join('');
   return `${code.slice(0, 4)}-${code.slice(4)}`;
 }
 
-export async function sign(key, payload) {
+export async function sign(key: Parameters<typeof crypto.subtle.sign>[1], payload: Uint8Array<ArrayBuffer>): Promise<string> {
   return base64url(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, payload));
 }
 
-export async function verify(jwk, payload, signature) {
+export async function verify(jwk: Wire, payload: Uint8Array<ArrayBuffer>, signature: unknown): Promise<boolean> {
   const publicKey = await crypto.subtle.importKey('jwk',
     { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, ext: true },
     { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
@@ -369,7 +390,7 @@ export async function verify(jwk, payload, signature) {
     publicKey, unbase64url(signature), payload);
 }
 
-export function navigationUrl(value, protectedOrigins) {
+export function navigationUrl(value: string, protectedOrigins: readonly string[]): string {
   const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
       protectedOrigins.includes(url.origin)) {

@@ -68,7 +68,7 @@ Agents authenticate with an API key at `https://<server>/mcp/<agent-id>`. The
 operator generates the key and adds one line to the service environment:
 
 ```sh
-node domagent-mcp/admin.js agent-key atlas "Atlas" https://atlas.example
+node domagent-mcp/dist/domagent-mcp/admin.js agent-key atlas "Atlas" https://atlas.example
 # prints the key once, plus:
 # DOMAGENT_AGENT_ATLAS="Atlas|https://atlas.example/|sha256:<hex>"
 ```

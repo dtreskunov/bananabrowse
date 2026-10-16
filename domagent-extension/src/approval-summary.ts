@@ -1,4 +1,6 @@
-export function actionSummary(operation, args, page, target) {
+import type { Wire } from '../../shared/protocol.js';
+
+export function actionSummary(operation: string, args: Wire, page?: Wire | null, target?: Wire | null): string[] {
   const lines = [`Operation: ${operation}`];
   if (page) {
     lines.push(`Tab: ${page.title || 'Untitled'} (${new URL(page.url).origin})`);

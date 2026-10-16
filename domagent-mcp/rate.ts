@@ -1,8 +1,11 @@
 import { requireValue } from './errors.js';
 
 export class RateLimiter {
-  constructor(now = Date.now, maxKeys = 4096) { this.now = now; this.maxKeys = maxKeys; this.entries = new Map(); }
-  take(key, limit, windowMs = 60_000) {
+  now: () => number;
+  maxKeys: number;
+  entries: Map<string, { count: number; expires: number }>;
+  constructor(now: () => number = Date.now, maxKeys = 4096) { this.now = now; this.maxKeys = maxKeys; this.entries = new Map(); }
+  take(key: string, limit: number, windowMs = 60_000): void {
     const now = this.now();
     for (const [id, row] of this.entries) if (row.expires <= now) this.entries.delete(id);
     let row = this.entries.get(key);

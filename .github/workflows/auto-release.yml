@@ -141,6 +141,7 @@ jobs:
         run: |
           cd domagent-mcp
           npm ci --ignore-scripts
+          npm run build:service
           npm pack
           mv domagent-*.tgz "../domagent-mcp-${{ steps.version.outputs.new }}.tgz"
           echo "Packaged MCP server:"
@@ -290,7 +291,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: cd domagent-mcp && npm ci --ignore-scripts
+        run: cd domagent-mcp && npm ci --ignore-scripts && npm run build:service
 
       - name: Publish to npm
         run: |

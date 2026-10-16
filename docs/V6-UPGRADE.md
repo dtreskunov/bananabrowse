@@ -64,3 +64,8 @@ order.
 - **Snapshots.** Links include `href`; decorative SVG is skipped; interactive
   elements are kept first when truncating. Refs never repeat across documents
   in a tab.
+- **Stale browsers (6.1.0-beta.3).** Paired browsers offline for 30 days are
+  deleted with their pairings and sessions. New tool `unpair_browser` lets an
+  agent drop its own pairing; `list_browsers` adds `last_seen` and `paired_at`;
+  pairing renames a browser to `name (n)` if the agent already has a browser
+  with that name. Remove existing orphans with `admin.js browser-revoke`.

@@ -340,11 +340,12 @@ export class Hub {
       this.codes.delete(key);
       const { agent_id, waiters } = entry.proposal;
       if (m.approved && this.agents.has(agent_id)) {
-        this.store.pair(agent_id, conn.browser_id);
+        const before = this.store.browser(conn.browser_id).name;
+        const name = this.store.pair(agent_id, conn.browser_id);
         audit('browser_paired', { browser_id: conn.browser_id, agent_id });
+        if (name !== before) this.send(conn, { type: 'browser', name });
         this.pushAgents(conn);
-        const browser = this.store.browser(conn.browser_id);
-        for (const waiter of [...waiters]) waiter(null, { browser_id: browser.id, name: browser.name, paired: true });
+        for (const waiter of [...waiters]) waiter(null, { browser_id: conn.browser_id, name, paired: true });
       } else for (const waiter of [...waiters]) waiter(new Fault('ACTION_DECLINED'));
       return;
     }
@@ -405,8 +406,15 @@ export class Hub {
   listBrowsers(agentId) {
     return this.store.browsersForAgent(agentId).map(row => {
       const conn = this.online(row.id);
-      return { browser_id: row.id, name: row.name, online: Boolean(conn), browser_info: conn?.browser_info || null };
+      return { browser_id: row.id, name: row.name, online: Boolean(conn), browser_info: conn?.browser_info || null,
+        last_seen: new Date(conn ? this.now() : row.last_seen).toISOString(), paired_at: new Date(row.paired_at).toISOString() };
     });
+  }
+  unpairBrowser(agentId, browserId) {
+    requireValue(this.store.unpair(agentId, browserId), 'NOT_FOUND', 404);
+    audit('browser_unpaired', { browser_id: browserId, agent_id: agentId });
+    this.reconcile();
+    return { browser_id: browserId, unpaired: true };
   }
   listSessions(agentId) {
     return this.store.sessionsForAgent(agentId).filter(row => this.store.paired(agentId, row.browser_id))
@@ -711,7 +719,7 @@ export class Hub {
     for (const [id, row] of this.tombstones) if (row.expires <= this.now()) this.tombstones.delete(id);
     if (this.now() - this.lastStoreSweep >= 5_000) {
       this.lastStoreSweep = this.now();
-      this.store.sweep();
+      for (const id of this.store.sweep().browsers) audit('browser_pruned', { browser_id: id });
       this.artifacts.sweep();
       this.reconcile();
     }

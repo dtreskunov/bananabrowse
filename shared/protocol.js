@@ -6,6 +6,7 @@ export const LIVENESS_MS = 90_000;
 export const ACCESS_TOKEN_MS = 600_000;
 export const PAIRING_CODE_MS = 300_000;
 export const UNPAIRED_BROWSER_MS = 86_400_000;
+export const PAIRED_BROWSER_MS = 30 * 86_400_000;
 export const SESSION_RETENTION_MS = 7 * 86_400_000;
 export const HUMAN_WAIT_MS = 600_000;
 export const DEFAULT_HUMAN_WAIT_MS = 300_000;

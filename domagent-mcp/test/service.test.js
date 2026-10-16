@@ -7,7 +7,7 @@ import { tools } from '../mcp.js';
 
 const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
 
-test('public metadata and the 26-tool catalogue', async t => {
+test('public metadata and the 27-tool catalogue', async t => {
   const fixture = await start(); t.after(() => fixture.close());
   const health = await (await fetch(`${fixture.base}/health`)).json();
   assert.equal(health.protocol_version, 6);
@@ -15,10 +15,10 @@ test('public metadata and the 26-tool catalogue', async t => {
   assert.deepEqual([metadata.service, metadata.origin], ['domagent', ORIGIN]);
   const agent = await fixture.mcp();
   const listed = await agent.client.listTools();
-  assert.equal(listed.tools.length, 26);
-  assert.deepEqual(listed.tools.slice(0, 9).map(tool => tool.name), ['pair_browser', 'list_browsers', 'request_session',
-    'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'report_progress', 'request_handoff']);
-  assert.equal(tools.length, 26);
+  assert.equal(listed.tools.length, 27);
+  assert.deepEqual(listed.tools.slice(0, 10).map(tool => tool.name), ['pair_browser', 'list_browsers', 'unpair_browser',
+    'request_session', 'list_sessions', 'end_session', 'list_tabs', 'create_tab', 'report_progress', 'request_handoff']);
+  assert.equal(tools.length, 27);
 });
 
 test('agent authentication uses the path ID and a hashed bearer key', async t => {
@@ -98,8 +98,11 @@ test('pairing: extension code, agent proposal, local approval, decline and non-e
   const fixture = await start(); t.after(() => fixture.close());
   const { extension, agent } = await paired(fixture);
   assert.deepEqual((await extension.next('agents')).agents.map(a => a.id), ['atlas']);
-  assert.deepEqual(await agent.call('list_browsers'), [{ browser_id: extension.browser_id, name: "Bob's Chrome",
-    online: true, browser_info: { extension_version: '6.0.0', browser_name: 'chrome', browser_version: '150.0' } }]);
+  const [listed] = await agent.call('list_browsers');
+  assert.deepEqual({ ...listed, last_seen: undefined, paired_at: undefined }, { browser_id: extension.browser_id,
+    name: "Bob's Chrome", online: true, last_seen: undefined, paired_at: undefined,
+    browser_info: { extension_version: '6.0.0', browser_name: 'chrome', browser_version: '150.0' } });
+  assert.ok(Date.parse(listed.last_seen) >= Date.parse(listed.paired_at));
   await assert.rejects(agent.call('pair_browser', { code: 'ZZZZ-ZZZZ' }), /PAIRING_UNAVAILABLE/);
   const other = await fixture.mcp('orion', OTHER_KEY);
   const code = await extension.pairingCode('AB12-CD34');
@@ -314,6 +317,39 @@ test('sessions expire after 7 days without the extension reporting the group ali
   fixture.store.sweep();
   assert.deepEqual(await agent.call('list_sessions'), []);
   assert.equal(fixture.store.session(session.session_id), undefined);
+});
+
+test('re-pairing a same-named browser gets a unique name; agents unpair stale browsers themselves', async t => {
+  const fixture = await start(); t.after(() => fixture.close());
+  const old = await paired(fixture);
+  old.extension.close();
+  const fresh = await paired(fixture);
+  assert.equal((await fresh.extension.next('browser')).name, "Bob's Chrome (2)");
+  const listed = await fresh.agent.call('list_browsers');
+  assert.deepEqual(listed.map(b => [b.browser_id, b.name, b.online]), [[old.extension.browser_id, "Bob's Chrome", false],
+    [fresh.extension.browser_id, "Bob's Chrome (2)", true]]);
+  // Other agents' pairings and unknown IDs are indistinguishable.
+  const other = await fixture.mcp('orion', OTHER_KEY);
+  await assert.rejects(other.call('unpair_browser', { browser_id: old.extension.browser_id }), /NOT_FOUND/);
+  assert.deepEqual(await fresh.agent.call('unpair_browser', { browser_id: old.extension.browser_id }),
+    { browser_id: old.extension.browser_id, unpaired: true });
+  assert.deepEqual((await fresh.agent.call('list_browsers')).map(b => b.browser_id), [fresh.extension.browser_id]);
+  await assert.rejects(fresh.agent.call('unpair_browser', { browser_id: old.extension.browser_id }), /NOT_FOUND/);
+  fresh.extension.close();
+});
+
+test('paired browsers offline for 30 days are removed with their pairings and sessions', async t => {
+  let now = 1_800_000_000_000;
+  const fixture = await start({ now: () => now }); t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  extension.close();
+  await delay(50);
+  now += 29 * 86_400_000;
+  assert.deepEqual(fixture.store.sweep().browsers, []);
+  now += 2 * 86_400_000;
+  assert.deepEqual(fixture.store.sweep().browsers, [extension.browser_id]);
+  assert.deepEqual(await agent.call('list_browsers'), []);
+  assert.deepEqual(fixture.store.listPairings(), []);
 });
 
 test('approved groups announced before commit survive; unknown groups are reported for cleanup', async t => {

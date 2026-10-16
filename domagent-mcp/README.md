@@ -1,6 +1,6 @@
 # DomAgent service (v6)
 
-Self-hosted MCP server and browser hub. Service **6.1.0-beta.2**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **6.1.0-beta.3**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -48,8 +48,9 @@ disconnects revoked browsers.
 | `GET`/`HEAD`/`DELETE /mcp/<agent-id>?artifact=<artifact_id>` | Download (`X-Content-SHA256`, `Content-Disposition: attachment`) or delete one of the agent's artifacts; same bearer key as MCP; foreign/expired IDs are `404` |
 
 Registration is open and rate-limited. A registered browser can do nothing
-until a person pairs an agent in its window, and unpaired browsers are deleted
-after 24 hours offline. Refresh tokens rotate on every use. Reusing a superseded
+until a person pairs an agent in its window. Unpaired browsers are deleted
+after 24 hours offline, paired ones after 30 days offline (with their pairings
+and sessions); agents can drop a stale pairing themselves with `unpair_browser`. Refresh tokens rotate on every use. Reusing a superseded
 token within 5 minutes is tolerated (lost responses); after that it revokes the
 browser. Every refresh also needs a fresh signature from the browser's
 non-extractable key.

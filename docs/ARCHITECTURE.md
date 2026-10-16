@@ -1,6 +1,6 @@
 # DomAgent v6 architecture
 
-Status: implemented in service 6.1.0-beta.2 / extension 6.1.1 (wire v6, DB
+Status: implemented in service 6.1.0-beta.3 / extension 6.1.1 (wire v6, DB
 schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -42,7 +42,8 @@ its pairings and sessions.
 
 **Browsers** self-register. Anyone who can reach the server can register a
 browser (rate-limited); a registered browser has no authority until paired.
-Unpaired registrations expire after 24 hours.
+Unpaired registrations expire after 24 hours offline; paired browsers after 30
+days offline, together with their pairings and sessions.
 
 1. The user enters the server domain. The extension checks `/.well-known/domagent` and
    requests host permission for that origin only.
@@ -167,12 +168,13 @@ notifications have no buttons, so all decisions happen in the window.
 
 ## 7. MCP surface (`/mcp/<agent-id>`, API key in the Authorization header)
 
-26 tools: the 11 below plus the 15 page operations.
+27 tools: the 12 below plus the 15 page operations.
 
 | Tool | Contract |
 | --- | --- |
 | `pair_browser({code, timeout_seconds?})` | Bounded wait for local Approve; returns `browser_id`, `name` |
-| `list_browsers()` | Paired browsers: `browser_id`, `name`, `online`, self-reported `browser_info` |
+| `list_browsers()` | Paired browsers: `browser_id`, `name`, `online`, self-reported `browser_info`, `last_seen`, `paired_at`. Pairing renames a browser to `name (n)` when another of the agent's browsers has the same name |
+| `unpair_browser({browser_id})` | Remove the caller's own pairing (ends its sessions there); `NOT_FOUND` for unknown or foreign IDs |
 | `request_session({browser_id, purpose, urls?, title?, timeout_seconds?})` | Fails at once with `BROWSER_OFFLINE`; waits for Approve/Decline/timeout (default 300 s, max 600 s); returns the session and its tabs |
 | `list_sessions()` | Caller's sessions: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at` |
 | `end_session({session_id})` | Ungroup; tabs remain |

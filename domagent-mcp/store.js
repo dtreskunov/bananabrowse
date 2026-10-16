@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { SESSION_RETENTION_MS, UNPAIRED_BROWSER_MS, validName } from '../shared/protocol.js';
+import { SESSION_RETENTION_MS, UNPAIRED_BROWSER_MS, PAIRED_BROWSER_MS, validName } from '../shared/protocol.js';
 import { requireValue } from './errors.js';
 
 export const SCHEMA_VERSION = 6;
@@ -107,9 +107,21 @@ export class Store {
   touchBrowser(id) { this.db.prepare('UPDATE browsers SET last_seen=? WHERE id=?').run(this.now(), id); }
   deleteBrowser(id) { return this.db.prepare('DELETE FROM browsers WHERE id=?').run(id).changes === 1; }
 
+  /** Pairs and returns the browser's name, suffixed " (n)" if another of the agent's browsers already uses it. */
   pair(agentId, browserId) {
-    this.db.prepare('INSERT OR IGNORE INTO pairings(agent_id,browser_id,created_at) VALUES(?,?,?)')
-      .run(agentId, browserId, this.now());
+    return this.transaction(() => {
+      this.db.prepare('INSERT OR IGNORE INTO pairings(agent_id,browser_id,created_at) VALUES(?,?,?)')
+        .run(agentId, browserId, this.now());
+      const { name } = this.browser(browserId);
+      const taken = new Set(this.db.prepare(`SELECT b.name FROM pairings p JOIN browsers b ON b.id=p.browser_id
+        WHERE p.agent_id=? AND b.id<>?`).all(agentId, browserId).map(row => row.name));
+      if (!taken.has(name)) return name;
+      const base = name.replace(/ \(\d+\)$/, '');
+      let n = 2, unique;
+      do { const suffix = ` (${n++})`; unique = `${base.slice(0, 80 - suffix.length)}${suffix}`; } while (taken.has(unique));
+      this.db.prepare('UPDATE browsers SET name=? WHERE id=?').run(unique, browserId);
+      return unique;
+    });
   }
   unpair(agentId, browserId) {
     return this.db.prepare('DELETE FROM pairings WHERE agent_id=? AND browser_id=?').run(agentId, browserId).changes === 1;
@@ -118,8 +130,8 @@ export class Store {
     return Boolean(this.db.prepare('SELECT 1 FROM pairings WHERE agent_id=? AND browser_id=?').get(agentId, browserId));
   }
   browsersForAgent(agentId) {
-    return this.db.prepare(`SELECT b.id,b.name FROM pairings p JOIN browsers b ON b.id=p.browser_id
-      WHERE p.agent_id=? ORDER BY p.created_at`).all(agentId);
+    return this.db.prepare(`SELECT b.id,b.name,b.last_seen,p.created_at AS paired_at FROM pairings p
+      JOIN browsers b ON b.id=p.browser_id WHERE p.agent_id=? ORDER BY p.created_at`).all(agentId);
   }
   agentsForBrowser(browserId) {
     return this.db.prepare('SELECT agent_id,created_at FROM pairings WHERE browser_id=? ORDER BY created_at').all(browserId);
@@ -177,8 +189,11 @@ export class Store {
     const now = this.now();
     const expired = this.db.prepare('SELECT id FROM sessions WHERE expires_at<=?').all(now).map(row => row.id);
     for (const id of expired) this.deleteSession(id);
-    this.db.prepare(`DELETE FROM browsers WHERE last_seen<=? AND NOT EXISTS
-      (SELECT 1 FROM pairings p WHERE p.browser_id=browsers.id)`).run(now - UNPAIRED_BROWSER_MS);
-    return expired;
+    // Pairings and sessions cascade. Online browsers are touched every heartbeat, so only offline ones age out.
+    const stale = this.db.prepare(`SELECT id FROM browsers WHERE last_seen<=? OR (last_seen<=? AND NOT EXISTS
+      (SELECT 1 FROM pairings p WHERE p.browser_id=browsers.id))`)
+      .all(now - PAIRED_BROWSER_MS, now - UNPAIRED_BROWSER_MS).map(row => row.id);
+    for (const id of stale) this.deleteBrowser(id);
+    return { sessions: expired, browsers: stale };
   }
 }

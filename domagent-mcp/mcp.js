@@ -32,8 +32,10 @@ const session = { ...SESSION_ID_SCHEMA, description: 'Session ID from request_se
 export const tools = [
   { name: 'pair_browser', description: 'Pair this agent with a browser using the 8-character code the user reads from their DomAgent window (for example K7MP-4QTX). Waits until the user approves or declines in that window. Codes expire after five minutes and are single use. Returns the browser_id.',
     inputSchema: schema({ code: { type: 'string', minLength: 8, maxLength: 16 }, timeout_seconds: humanWait }, ['code']) },
-  { name: 'list_browsers', description: 'Browsers paired with this agent: browser_id, user-chosen name and whether its DomAgent window is open (online). Only online browsers can start sessions.',
+  { name: 'list_browsers', description: 'Browsers paired with this agent: browser_id, user-chosen name, whether its DomAgent window is open (online), last_seen and paired_at. Only online browsers can start sessions. A long-offline browser with the same name as a newer one is usually a reinstalled extension; remove it with unpair_browser. Browsers offline for 30 days are removed automatically.',
     inputSchema: schema({}) },
+  { name: 'unpair_browser', description: 'Remove your own pairing with a browser, for example a stale one left behind by a reinstalled extension. Ends your sessions on it; other agents and the browser itself are unaffected. Pair again with pair_browser.',
+    inputSchema: schema({ browser_id: BROWSER_ID_SCHEMA }) },
   { name: 'request_session', description: `Ask the user to open a browser session (a native tab group) for a task. The user sees your purpose and starting URLs and approves or declines in their DomAgent window. Fails immediately with BROWSER_OFFLINE if the browser's window is closed; try another browser from list_browsers. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns the session and its tabs.`,
     inputSchema: schema({ browser_id: BROWSER_ID_SCHEMA,
       purpose: { type: 'string', minLength: 1, maxLength: 500, description: 'Why you need the browser, shown to the user. Plain text.' },
@@ -70,6 +72,7 @@ export const INSTRUCTIONS = 'DomAgent v6 lets you work in the user\'s real brows
   'First use: ask the user to open the DomAgent window (toolbar button), click Pair an agent and tell you the code; call pair_browser. ' +
   'Then: list_browsers -> request_session(browser_id, purpose, urls) -> the user approves -> use tab_ids with page tools. ' +
   'If the browser is offline the user has closed the DomAgent window; ask them to reopen it or choose another browser. ' +
+  'A stale duplicate (e.g. after an extension reinstall) can be removed with unpair_browser. ' +
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
   'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user. ' +
@@ -179,6 +182,7 @@ export async function callTool(name, args, agent, hub, signal) {
     let result;
     if (name === 'pair_browser') result = await hub.pairBrowser(agent.id, args.code, (args.timeout_seconds ?? 300) * 1000, signal);
     else if (name === 'list_browsers') result = hub.listBrowsers(agent.id);
+    else if (name === 'unpair_browser') result = hub.unpairBrowser(agent.id, args.browser_id);
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
     else if (name === 'end_session') result = hub.endSessionByAgent(agent.id, args.session_id);

@@ -1,3 +1,4 @@
+/* global editorState: writable -- page global set in page.evaluate */
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const requireLocal = createRequire(path.join(__dirname, '../../../domagent-mcp/package.json'));

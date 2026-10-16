@@ -309,6 +309,7 @@ export function validOperationArgs(name: string, args: unknown): boolean {
 }
 
 export function validName(value: unknown, max = 80): value is string {
+  // eslint-disable-next-line no-control-regex -- rejects control characters on purpose
   return typeof value === 'string' && value.trim().length > 0 && [...value].length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 }
 

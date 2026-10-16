@@ -30,7 +30,7 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     'user_pref("extensions.webextensions.keepUuidOnUninstall",true);',
   ].join('\n'));
   const port = await freePort();
-  let child, exit, rdp, parent, appConsole, backgroundConsole;
+  let child, exit, rdp, parent, appConsole, _backgroundConsole;
   const launch = () => {
     child = spawn(process.env.DOMAGENT_FIREFOX_BINARY || firefox.executablePath(), ['--headless', '--no-remote',
       '--profile', profile, '--start-debugger-server', String(port), 'about:blank'],
@@ -78,7 +78,7 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
   launch();
   try {
     await install();
-    backgroundConsole = await findTarget('_generated_background_page.html').catch(() => null);
+    _backgroundConsole = await findTarget('_generated_background_page.html').catch(() => null);
     // Installation opens the app window; it is a popup-type window.
     appConsole = await findTarget('/app.html');
     expect(await rdp.evaluate(appConsole, 'browser.windows.getCurrent().then(w => w.type)')).toBe('popup');

@@ -615,7 +615,7 @@ export class Controller {
     }
     session.excluded = excluded;
   }
-  async updateTab(session: Session, tab: Tab, current: Wire, currentUrl: string) {
+  async updateTab(_session: Session, tab: Tab, current: Wire, currentUrl: string) {
     tab.windowId = current.windowId;
     if (!currentUrl) { tab.pageState = 'loading'; return; }
     if (tab.navigation && !/^https?:/.test(currentUrl)) { tab.pageState = 'loading'; return; }

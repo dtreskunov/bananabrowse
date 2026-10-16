@@ -75,6 +75,7 @@ function fakeDocument(spec) {
       hasAttribute(name) { return Object.hasOwn(this.attrs, name) || (name === 'href' && Boolean(node.href)); },
       matches(selector) { return selector.split(',').some(part => part.trim() === node.tag); },
       closest(selector) {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias -- the fake node walks its own ancestors
         for (let at = this; at; at = at.parentElement) if (selector === '[aria-hidden="true"]' && at.attrs['aria-hidden'] === 'true') return at;
         return null;
       },

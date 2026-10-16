@@ -9,6 +9,7 @@ export const SCHEMA_VERSION = 6;
 export const REFRESH_GRACE_MS = 300_000;
 export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+// eslint-disable-next-line no-control-regex -- strips control characters on purpose
 export const cleanText = (value: unknown, max: number) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
 
 export interface BrowserRow {

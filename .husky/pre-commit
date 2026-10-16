@@ -1,0 +1,6 @@
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' '*.css')
+if [ -z "$staged" ]; then
+  exit 0
+fi
+echo "$staged" | xargs npx prettier --write --ignore-unknown --log-level=warn
+echo "$staged" | xargs git add

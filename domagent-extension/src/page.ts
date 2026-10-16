@@ -381,7 +381,7 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
     return null;
   };
   const actions = {
-    click: (element: any, activator: any) => {
+    click: (element: any, _activator: any) => {
       if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
         element.focus({ preventScroll: true });
         if (!element.isConnected) return { error: 'ELEMENT_STALE' };
@@ -396,7 +396,7 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
       return { checked: element.checked, input_mode: 'dom' };
     },
-    select_option: (element: any, activator: any) => {
+    select_option: (element: any, _activator: any) => {
       const options = [...element.options].filter(option => option.value === args.value);
       if (!options.length) return { error: 'OPTION_NOT_FOUND' };
       if (options.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
@@ -410,14 +410,14 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       if (element.value !== args.value) return { error: 'OPERATION_FAILED' };
       return { selected: args.value, input_mode: 'dom' };
     },
-    press_key: (element: any, activator: any) => {
+    press_key: (element: any, _activator: any) => {
       element.focus();
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       element.dispatchEvent(new KeyboardEvent('keydown', { key: args.key, bubbles: true, composed: true, cancelable: true }));
       element.dispatchEvent(new KeyboardEvent('keyup', { key: args.key, bubbles: true, composed: true, cancelable: true }));
       return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
     },
-    type_text: async (element: any, activator: any) => {
+    type_text: async (element: any, _activator: any) => {
       element.focus();
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       let inputMode = 'dom';

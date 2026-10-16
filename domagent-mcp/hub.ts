@@ -65,7 +65,9 @@ function waitFor<T = unknown>(deadline: number, signal: AbortSignal | null | und
     let done = false;
     const finish: Finish<T> = (error, value) => {
       if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
-      cleanup?.(); error ? reject(error) : resolve(value as T);
+      cleanup?.();
+      if (error) reject(error);
+      else resolve(value as T);
     };
     const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
     const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), Math.max(1, deadline - now()));
@@ -696,7 +698,8 @@ export class Hub {
         if (finished) return; finished = true; clearTimeout(timer);
         signal?.removeEventListener('abort', abort); this.calls.delete(requestId);
         if (target) target.execution_state = 'idle';
-        error ? reject(error) : resolve(value);
+        if (error) reject(error);
+        else resolve(value);
       };
       const human = operation === 'request_handoff';
       const call: Call = {

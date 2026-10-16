@@ -1,0 +1,8 @@
+# Code only: docs, manifests, lockfiles and workflows keep their authored layout.
+*.md
+*.json
+*.yml
+*.yaml
+*.html
+**/dist/
+**/.browser-artifacts/

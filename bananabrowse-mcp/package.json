@@ -1,0 +1,64 @@
+{
+    "name": "bananabrowse",
+    "private": true,
+    "version": "1.0.0-beta.1",
+    "description": "MCP server for BananaBrowse — let AI agents control your real browser via Chrome or Firefox extension",
+    "main": "dist/bananabrowse-mcp/index.js",
+    "type": "module",
+    "bin": {
+        "bananabrowse": "./dist/bananabrowse-mcp/index.js"
+    },
+    "scripts": {
+        "start": "node dist/bananabrowse-mcp/index.js",
+        "dev": "tsx index.ts",
+        "typecheck": "tsc -p . --noEmit && tsc -p ../bananabrowse-extension && tsc -p ../bananabrowse-extension/ui --noEmit",
+        "test": "node --import tsx --test test/*.test.js ../bananabrowse-extension/test/*.test.js && npm --prefix ../bananabrowse-extension/ui test",
+        "build:service": "tsc -p .",
+        "build": "npm run build:service && node ../scripts/build-extensions.mjs",
+        "test:browser": "npm run build:service && playwright test --config ../bananabrowse-extension/playwright.config.cjs",
+        "check": "node ../scripts/check.mjs"
+    },
+    "files": [
+        "dist/",
+        "README.md"
+    ],
+    "keywords": [
+        "mcp",
+        "model-context-protocol",
+        "browser-automation",
+        "ai",
+        "chrome",
+        "firefox",
+        "dom",
+        "bananabrowse",
+        "cdp",
+        "devtools-protocol"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/dtreskunov/bananabrowse.git"
+    },
+    "homepage": "https://github.com/dtreskunov/bananabrowse#readme",
+    "bugs": {
+        "url": "https://github.com/dtreskunov/bananabrowse/issues"
+    },
+    "engines": {
+        "node": ">=22.13.0"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "1.32.1",
+        "ws": "8.22.0"
+    },
+    "devDependencies": {
+        "@playwright/test": "1.58.2",
+        "@types/node": "22.20.5",
+        "@types/ws": "8.18.1",
+        "esbuild": "0.25.12",
+        "tsx": "4.21.0",
+        "typescript": "5.9.3"
+    },
+    "publishConfig": {
+        "registry": "https://registry.npmjs.org/"
+    }
+}

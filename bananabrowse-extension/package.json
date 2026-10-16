@@ -1,0 +1,13 @@
+{
+  "name": "@bananabrowse/extension-runtime",
+  "private": true,
+  "version": "1.0.0-beta.1",
+  "type": "module",
+  "description": "Dependencies for the independently bundled browser runtime.",
+  "dependencies": {
+    "acorn": "8.15.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.5"
+  }
+}

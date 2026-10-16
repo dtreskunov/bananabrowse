@@ -1,8 +1,8 @@
 server {
     listen 443 ssl;
-    server_name domagent.example.net;
-    ssl_certificate /etc/letsencrypt/live/domagent.example.net/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/domagent.example.net/privkey.pem;
+    server_name bananabrowse.example.net;
+    ssl_certificate /etc/letsencrypt/live/bananabrowse.example.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bananabrowse.example.net/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     access_log off;
     error_log stderr crit;
@@ -11,7 +11,7 @@ server {
         proxy_pass http://127.0.0.1:18792;
         proxy_http_version 1.1;
         proxy_buffering off;
-        proxy_set_header Host domagent.example.net;
+        proxy_set_header Host bananabrowse.example.net;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 650s;

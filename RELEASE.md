@@ -1,13 +1,17 @@
 # Release Process
 
-This document describes how to cut a versioned release of DOMAgent and what happens automatically as a result.
+This document describes how to cut a versioned release of BananaBrowse and what happens automatically as a result.
 
-## Fork releases (dtreskunov/domagent)
+## Fork releases (dtreskunov/bananabrowse)
 
 The fork publishes tested betas manually: compiled Chrome and Firefox ZIPs, a
-tracked-source service ZIP and `SHA256SUMS`. Asset filenames use the service
-version; manifests carry the extension version (service `6.1.0-beta.6`,
-extension `6.1.4`).
+tracked-source service ZIP and `SHA256SUMS`. The service, packages, tags and
+asset filenames use one semver version (now `1.0.0-beta.1`). Browser manifests
+only accept up to four integers, so they carry `version_name` with the same
+semver string and a numeric `version` that sorts below the final release:
+`1.0.0-beta.N` ships as `0.9.0.N`, and `1.0.0` as `1.0.0`. Bump
+`EXTENSION_FEATURES` in `shared/protocol.ts` to the numeric `version` that
+first supports a new extension capability.
 
 v6 is a clean break (wire v6, schema 6). Follow [the upgrade notes](docs/V6-UPGRADE.md).
 6.1 (artifacts, agent-facing error details) keeps wire v6 and schema 6; see the
@@ -17,7 +21,10 @@ service-only (stale-browser cleanup) and keeps extension 6.1.1. 6.1.0-beta.4
 (extension 6.1.2) added closing tabs; 6.1.0-beta.5 (extension 6.1.3) makes every
 close wait for the user's approval. 6.1.0-beta.6 (extension 6.1.4) moves the
 service, extension and UI to strict TypeScript with no behaviour change; the
-service now runs from `dist/` after `npm run build:service`.
+service now runs from `dist/` after `npm run build:service`. Those were all
+DomAgent releases. BananaBrowse 1.0.0-beta.1 renames the project and restarts
+versioning, with no compatibility for DomAgent installs; see the last section
+of the upgrade notes.
 
 Before tagging, run the unit/MCP tests, build both extensions, run the
 real-browser suite (Chrome and native Firefox) and `npm run check` (formatting, lint,
@@ -28,8 +35,8 @@ profiles or `node_modules`. Publish all assets together, download them again and
 verify their hashes. Firefox ZIPs are unsigned temporary add-ons.
 
 The source ZIP contains TypeScript, not runnable JavaScript. To deploy it, run
-`npm ci && npm run build:service` in `domagent-mcp/` and start
-`dist/domagent-mcp/index.js` (see `deployment/domagent.service`).
+`npm ci && npm run build:service` in `bananabrowse-mcp/` and start
+`dist/bananabrowse-mcp/index.js` (see `deployment/bananabrowse.service`).
 
 Manual checksums verify asset integrity, not SLSA provenance. Never force-update
 an existing release tag.
@@ -42,9 +49,9 @@ Each release produces three artifacts:
 
 | Artifact | Description |
 |----------|-------------|
-| `domagent-chrome-<version>.zip` | Chrome extension archive — load via `chrome://extensions` |
-| `domagent-firefox-<version>.xpi` | Firefox extension archive — load via `about:debugging` |
-| `domagent-mcp-<version>.tgz` | MCP server Node.js package |
+| `bananabrowse-chrome-<version>.zip` | Chrome extension archive — load via `chrome://extensions` |
+| `bananabrowse-firefox-<version>.xpi` | Firefox extension archive — load via `about:debugging` |
+| `bananabrowse-mcp-<version>.tgz` | MCP server Node.js package |
 
 A signed **SLSA Level 3 provenance file** (`multiple.intoto.jsonl`) is also attached to every release. It cryptographically links each artifact to the exact source commit and build workflow that produced it.
 
@@ -80,9 +87,9 @@ Before tagging a release, go through this checklist:
 - [ ] All tests pass (manual test checklist in [CONTRIBUTING.md](CONTRIBUTING.md))
 - [ ] Extension loads without errors in Chrome (latest stable)
 - [ ] Extension loads without errors in Firefox 109+
-- [ ] MCP server starts without errors: `cd domagent-mcp && npm run build:service && npm start`
+- [ ] MCP server starts without errors: `cd bananabrowse-mcp && npm run build:service && npm start`
 - [ ] End-to-end: at least `navigate`, `click`, `get_screenshot` work correctly
-- [ ] **`domagent-mcp/package.json` version is updated** to match the new tag
+- [ ] **`bananabrowse-mcp/package.json` version is updated** to match the new tag
 - [ ] `CHANGELOG.md` is updated (if you maintain one)
 
 ---
@@ -92,14 +99,14 @@ Before tagging a release, go through this checklist:
 ### Step 1 — Update the version in package.json
 
 ```bash
-# Edit domagent-mcp/package.json and set "version" to the new version
+# Edit bananabrowse-mcp/package.json and set "version" to the new version
 # Example: "version": "0.2.0"
 ```
 
 Commit the version bump:
 
 ```bash
-git add domagent-mcp/package.json
+git add bananabrowse-mcp/package.json
 git commit -m "update version to 0.2.0"
 git push origin main
 ```
@@ -128,9 +135,9 @@ Both must complete with a green checkmark. If either fails, see [Troubleshooting
 
 On the **Releases** page, confirm the release has:
 
-- `domagent-chrome-<version>.zip`
-- `domagent-firefox-<version>.xpi`
-- `domagent-mcp-<version>.tgz`
+- `bananabrowse-chrome-<version>.zip`
+- `bananabrowse-firefox-<version>.xpi`
+- `bananabrowse-mcp-<version>.tgz`
 - `multiple.intoto.jsonl` (the SLSA provenance file)
 
 ---
@@ -151,17 +158,17 @@ Or download a pre-built binary from the [slsa-verifier releases page](https://gi
 
 ```bash
 # Download the artifact and provenance from the GitHub release, then:
-slsa-verifier verify-artifact domagent-chrome-0.2.0.zip \
+slsa-verifier verify-artifact bananabrowse-chrome-0.2.0.zip \
   --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/vaishnavucv/domagent
+  --source-uri github.com/dtreskunov/bananabrowse
 
-slsa-verifier verify-artifact domagent-firefox-0.2.0.xpi \
+slsa-verifier verify-artifact bananabrowse-firefox-0.2.0.xpi \
   --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/vaishnavucv/domagent
+  --source-uri github.com/dtreskunov/bananabrowse
 
-slsa-verifier verify-artifact domagent-mcp-0.2.0.tgz \
+slsa-verifier verify-artifact bananabrowse-mcp-0.2.0.tgz \
   --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/vaishnavucv/domagent
+  --source-uri github.com/dtreskunov/bananabrowse
 ```
 
 A successful verification prints:
@@ -172,7 +179,7 @@ PASSED: SLSA verification passed
 ```
 
 This confirms:
-- The artifact was built from the `vaishnavucv/domagent` repository
+- The artifact was built from the `dtreskunov/bananabrowse` repository
 - The build ran on GitHub Actions (not a developer's local machine)
 - The exact source commit is recorded and tamper-evident
 - The provenance was signed with GitHub's OIDC token (not a long-lived secret)
@@ -196,7 +203,7 @@ The `release.yml` workflow automatically marks releases with a hyphen in the tag
 
 ### "version mismatch" error in Release workflow
 
-The git tag version does not match `domagent-mcp/package.json`. Update `package.json` first, push to `main`, then re-create the tag:
+The git tag version does not match `bananabrowse-mcp/package.json`. Update `package.json` first, push to `main`, then re-create the tag:
 
 ```bash
 git tag -d v0.2.0          # delete local tag

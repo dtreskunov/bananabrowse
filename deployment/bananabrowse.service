@@ -1,0 +1,34 @@
+[Unit]
+Description=BananaBrowse authenticated browser service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bananabrowse
+Group=bananabrowse
+WorkingDirectory=/opt/bananabrowse/bananabrowse-mcp
+EnvironmentFile=/etc/bananabrowse/bananabrowse.env
+Environment=BANANABROWSE_DB=/var/lib/bananabrowse/bananabrowse.db
+ExecStart=/usr/bin/node /opt/bananabrowse/bananabrowse-mcp/dist/bananabrowse-mcp/index.js
+Restart=on-failure
+RestartSec=5
+StateDirectory=bananabrowse
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bananabrowse
+
+[Install]
+WantedBy=multi-user.target

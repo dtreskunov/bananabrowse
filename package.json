@@ -1,18 +1,18 @@
 {
-  "name": "domagent-private",
+  "name": "bananabrowse-private",
   "private": true,
   "type": "module",
   "scripts": {
     "prepare": "husky",
-    "build": "npm --prefix domagent-mcp run build",
-    "build:service": "npm --prefix domagent-mcp run build:service",
-    "typecheck": "npm --prefix domagent-mcp run typecheck",
+    "build": "npm --prefix bananabrowse-mcp run build",
+    "build:service": "npm --prefix bananabrowse-mcp run build:service",
+    "typecheck": "npm --prefix bananabrowse-mcp run typecheck",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run lint && npm --prefix domagent-mcp run check",
-    "test": "npm --prefix domagent-mcp test"
+    "check": "npm run format:check && npm run lint && npm --prefix bananabrowse-mcp run check",
+    "test": "npm --prefix bananabrowse-mcp test"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

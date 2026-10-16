@@ -5,9 +5,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const require = createRequire(path.join(root, 'domagent-mcp/package.json'));
+const require = createRequire(path.join(root, 'bananabrowse-mcp/package.json'));
 const { build } = require('esbuild');
-const source = path.join(root, 'domagent-extension');
+const source = path.join(root, 'bananabrowse-extension');
 const typecheck = spawnSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', source], {
   stdio: 'inherit',
 });

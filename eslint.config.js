@@ -8,7 +8,11 @@ export default [
   { files: ['**/*.{js,mjs,cjs,ts,tsx}'] },
   { languageOptions: { globals: globals.node } },
   {
-    files: ['domagent-extension/src/**', 'domagent-extension/ui/src/**', 'domagent-extension/test/browser/**'],
+    files: [
+      'bananabrowse-extension/src/**',
+      'bananabrowse-extension/ui/src/**',
+      'bananabrowse-extension/test/browser/**',
+    ],
     languageOptions: { globals: { ...globals.browser, ...globals.webextensions, ...globals.node } },
   },
   { files: ['**/*.cjs'], languageOptions: { sourceType: 'commonjs' } },

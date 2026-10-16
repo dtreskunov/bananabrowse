@@ -10,16 +10,16 @@
 
 ## Scope
 
-DOMAgent consists of two components. Security reports are accepted for both:
+BananaBrowse consists of two components. Security reports are accepted for both:
 
-- **Browser extension** (`domagent-extension/chrome/` and `domagent-extension/firefox/`) — the extension that runs inside your browser
-- **MCP server** (`domagent-mcp/`) — the local Node.js server that bridges AI agents to the browser
+- **Browser extension** (`bananabrowse-extension/chrome/` and `bananabrowse-extension/firefox/`) — the extension that runs inside your browser
+- **MCP server** (`bananabrowse-mcp/`) — the local Node.js server that bridges AI agents to the browser
 
 ---
 
 ## Security Model
 
-Understanding DOMAgent's threat model helps you make an informed report:
+Understanding BananaBrowse's threat model helps you make an informed report:
 
 ### By design (not vulnerabilities)
 

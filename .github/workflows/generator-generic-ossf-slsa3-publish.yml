@@ -7,7 +7,7 @@
 # Generator:     https://github.com/slsa-framework/slsa-github-generator
 # Verifier:      https://github.com/slsa-framework/slsa-verifier
 #
-# What this workflow does for DOMAgent:
+# What this workflow does for BananaBrowse:
 #   1. Packages the Chrome extension as a ZIP archive
 #   2. Packages the Firefox extension as an XPI archive
 #   3. Packages the MCP server using "npm pack"
@@ -51,22 +51,22 @@ jobs:
       # ── Artifact 1: Chrome extension ZIP ─────────────────────────
       - name: Package Chrome extension
         run: |
-          cd domagent-extension
-          zip -r "../domagent-chrome-${{ steps.version.outputs.version }}.zip" chrome/ \
+          cd bananabrowse-extension
+          zip -r "../bananabrowse-chrome-${{ steps.version.outputs.version }}.zip" chrome/ \
             --exclude "chrome/.DS_Store" \
             --exclude "chrome/__MACOSX"
           echo "Chrome extension packaged:"
-          ls -lh "../domagent-chrome-${{ steps.version.outputs.version }}.zip"
+          ls -lh "../bananabrowse-chrome-${{ steps.version.outputs.version }}.zip"
 
       # ── Artifact 2: Firefox extension XPI ────────────────────────
       - name: Package Firefox extension
         run: |
-          cd domagent-extension
-          zip -r "../domagent-firefox-${{ steps.version.outputs.version }}.xpi" firefox/ \
+          cd bananabrowse-extension
+          zip -r "../bananabrowse-firefox-${{ steps.version.outputs.version }}.xpi" firefox/ \
             --exclude "firefox/.DS_Store" \
             --exclude "firefox/__MACOSX"
           echo "Firefox extension packaged:"
-          ls -lh "../domagent-firefox-${{ steps.version.outputs.version }}.xpi"
+          ls -lh "../bananabrowse-firefox-${{ steps.version.outputs.version }}.xpi"
 
       # ── Artifact 3: MCP server tarball via npm pack ───────────────
       - name: Set up Node.js
@@ -76,15 +76,15 @@ jobs:
 
       - name: Package MCP server
         run: |
-          cd domagent-mcp
+          cd bananabrowse-mcp
           npm ci --ignore-scripts
           npm run build:service
-          # npm pack creates domagent-bridge-<version>.tgz
+          # npm pack creates bananabrowse-bridge-<version>.tgz
           npm pack
           # Move the tarball to the repo root for consistent hashing
-          mv domagent-bridge-*.tgz "../domagent-mcp-${{ steps.version.outputs.version }}.tgz"
+          mv bananabrowse-bridge-*.tgz "../bananabrowse-mcp-${{ steps.version.outputs.version }}.tgz"
           echo "MCP server tarball packaged:"
-          ls -lh "../domagent-mcp-${{ steps.version.outputs.version }}.tgz"
+          ls -lh "../bananabrowse-mcp-${{ steps.version.outputs.version }}.tgz"
 
       # ── Step: Generate SHA-256 digests for all three artifacts ────
       # The SLSA generator requires base64-encoded "file sha256sum" lines.
@@ -95,9 +95,9 @@ jobs:
 
           # Glob all release artifacts in the repo root
           files=$(ls \
-            "domagent-chrome-${{ steps.version.outputs.version }}.zip" \
-            "domagent-firefox-${{ steps.version.outputs.version }}.xpi" \
-            "domagent-mcp-${{ steps.version.outputs.version }}.tgz" \
+            "bananabrowse-chrome-${{ steps.version.outputs.version }}.zip" \
+            "bananabrowse-firefox-${{ steps.version.outputs.version }}.xpi" \
+            "bananabrowse-mcp-${{ steps.version.outputs.version }}.tgz" \
           )
 
           echo "Artifacts being hashed:"
@@ -111,9 +111,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            domagent-chrome-${{ steps.version.outputs.version }}.zip
-            domagent-firefox-${{ steps.version.outputs.version }}.xpi
-            domagent-mcp-${{ steps.version.outputs.version }}.tgz
+            bananabrowse-chrome-${{ steps.version.outputs.version }}.zip
+            bananabrowse-firefox-${{ steps.version.outputs.version }}.xpi
+            bananabrowse-mcp-${{ steps.version.outputs.version }}.tgz
 
   # ──────────────────────────────────────────────────────────────────
   # Job 2: Generate and sign SLSA Level 3 provenance

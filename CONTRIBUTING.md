@@ -1,4 +1,4 @@
-# Contributing to DOMAgent
+# Contributing to BananaBrowse
 
 Thank you for taking the time to contribute. This document covers how to report bugs, suggest features, and submit code changes.
 
@@ -20,14 +20,14 @@ Thank you for taking the time to contribute. This document covers how to report 
 ## Project Structure
 
 ```
-domagent/
-├── domagent-extension/
+bananabrowse/
+├── bananabrowse-extension/
 │   ├── src/            <- Shared secure extension runtime
 │   ├── ui/             <- Packaged trusted approval UI
 │   ├── chrome/         <- Chrome manifest and installation guide
 │   ├── firefox/        <- Firefox manifest and installation guide
 │   └── test/           <- Unit and real-browser tests
-├── domagent-mcp/        <- Local/static operator admin, HTTP MCP, authenticated WSS
+├── bananabrowse-mcp/        <- Local/static operator admin, HTTP MCP, authenticated WSS
 ├── shared/             <- Signing protocol and semantic operations
 ├── deployment/         <- Independent service deployment examples
 └── dist/               <- Generated browser packages (not committed)
@@ -49,8 +49,8 @@ differences belong in the adapter and must be advertised as capabilities.
 ### Local setup
 
 ```bash
-git clone git@github.com:vaishnavucv/domagent.git
-cd domagent
+git clone git@github.com:dtreskunov/bananabrowse.git
+cd bananabrowse
 
 # Lint/format tooling and the pre-commit hook
 npm ci --ignore-scripts
@@ -58,10 +58,10 @@ npx husky
 git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 # Install MCP server dependencies
-cd domagent-mcp
+cd bananabrowse-mcp
 npm ci --ignore-scripts
-npm --prefix ../domagent-extension ci --ignore-scripts
-npm --prefix ../domagent-extension/ui ci --ignore-scripts
+npm --prefix ../bananabrowse-extension ci --ignore-scripts
+npm --prefix ../bananabrowse-extension/ui ci --ignore-scripts
 npm test
 npm run build
 npm run check
@@ -74,9 +74,9 @@ committed as build output (`dist/` is ignored):
 
 | Project | tsconfig | Output |
 | --- | --- | --- |
-| Service (`domagent-mcp/*.ts` + `shared/`) | `domagent-mcp/tsconfig.json` (NodeNext) | `tsc` → `domagent-mcp/dist/` |
-| Extension runtime (`domagent-extension/src/`) | `domagent-extension/tsconfig.json` (bundler, no emit) | esbuild → `dist/<browser>/background.js` |
-| Window UI (`domagent-extension/ui/src/`, Preact TSX) | `domagent-extension/ui/tsconfig.json` (no emit) | esbuild → `ui/dist/ui.js` + `ui.css` |
+| Service (`bananabrowse-mcp/*.ts` + `shared/`) | `bananabrowse-mcp/tsconfig.json` (NodeNext) | `tsc` → `bananabrowse-mcp/dist/` |
+| Extension runtime (`bananabrowse-extension/src/`) | `bananabrowse-extension/tsconfig.json` (bundler, no emit) | esbuild → `dist/<browser>/background.js` |
+| Window UI (`bananabrowse-extension/ui/src/`, Preact TSX) | `bananabrowse-extension/ui/tsconfig.json` (no emit) | esbuild → `ui/dist/ui.js` + `ui.css` |
 
 Relative imports keep the `.js` extension; both `tsc` and esbuild resolve it to
 the `.ts` source. UI components live in `ui/src/components/<Name>.tsx` with a
@@ -93,13 +93,13 @@ Then load the extension for the browser you want to work on:
 - **Chrome:** `chrome://extensions` → Developer mode → Load unpacked → select `dist/chrome/`
 - **Firefox:** `about:debugging` → Load Temporary Add-on → select `dist/firefox/manifest.json`
 
-Do not load unbuilt source directories. Follow [the service guide](domagent-mcp/README.md)
+Do not load unbuilt source directories. Follow [the service guide](bananabrowse-mcp/README.md)
 to configure the HTTPS origin and agent entries before starting the service.
 There is no insecure development login or unauthenticated localhost bridge.
 
 See the browser-specific READMEs for full setup instructions:
-- [Chrome README](domagent-extension/chrome/README.md)
-- [Firefox README](domagent-extension/firefox/README.md)
+- [Chrome README](bananabrowse-extension/chrome/README.md)
+- [Firefox README](bananabrowse-extension/firefox/README.md)
 
 ---
 
@@ -107,7 +107,7 @@ See the browser-specific READMEs for full setup instructions:
 
 Before opening an issue, please:
 
-1. Check that the MCP server is running (`npm run build:service && npm start` in `domagent-mcp/`)
+1. Check that the MCP server is running (`npm run build:service && npm start` in `bananabrowse-mcp/`)
 2. Check the browser extension console for errors (DevTools → Service Worker for Chrome, `about:debugging` → Inspect for Firefox)
 3. Search existing issues to see if the bug has already been reported
 
@@ -153,8 +153,8 @@ For non-trivial changes, open an issue first to discuss the approach. This preve
 1. **Fork** the repository and clone your fork:
 
    ```bash
-   git clone git@github.com:YOUR_USERNAME/domagent.git
-   cd domagent
+   git clone git@github.com:YOUR_USERNAME/bananabrowse.git
+   cd bananabrowse
    ```
 
 2. **Create a branch** from `main` with a descriptive name:
@@ -266,7 +266,7 @@ Formatting and linting match nanoclaw-v2 and are configured at the repository ro
 - Supplied scripts execute only with ordinary page authority. Web pages cannot reach
   the app window or its controller. Keep browser API calls in the adapter.
 
-### MCP server (`domagent-mcp/`)
+### MCP server (`bananabrowse-mcp/`)
 
 - `index.ts` configures and starts the service; `app.ts` owns HTTP routing (registration,
   token refresh, MCP); `hub.ts` owns authenticated WSS, inventory, sessions and commands.
@@ -280,14 +280,14 @@ Formatting and linting match nanoclaw-v2 and are configured at the repository ro
   scoped to its own pairings; unknown and foreign IDs look the same. Human waits must
   not block heartbeat processing.
   Applications maintain their own integration skills and credential workflows;
-  do not add application-specific configuration dependencies to DomAgent.
+  do not add application-specific configuration dependencies to BananaBrowse.
 
 ---
 
 ## Testing Your Changes
 
 From the repository root, run `npm test`, `npm run build`, and `npm run check`.
-For real-browser tests, follow [the browser test guide](domagent-extension/test/README.md):
+For real-browser tests, follow [the browser test guide](bananabrowse-extension/test/README.md):
 Chrome and native Firefox run the full window, pairing and session flows.
 
 Before deployment, also verify TLS, optional-host permission prompts,

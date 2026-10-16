@@ -26,7 +26,7 @@ on:
 
 jobs:
   npm-publish:
-    name: Publish domagent to npm
+    name: Publish bananabrowse to npm
     runs-on: ubuntu-latest
 
     permissions:
@@ -61,7 +61,7 @@ jobs:
       # ── 4. Verify package.json version matches the release tag ────
       - name: Verify version consistency
         run: |
-          PKG_VERSION=$(node -p "require('./domagent-mcp/package.json').version")
+          PKG_VERSION=$(node -p "require('./bananabrowse-mcp/package.json').version")
           TAG_VERSION="${{ steps.version.outputs.version }}"
           echo "package.json version: ${PKG_VERSION}"
           echo "Release tag version:  ${TAG_VERSION}"
@@ -73,7 +73,7 @@ jobs:
       # ── 5. Install dependencies ───────────────────────────────────
       - name: Install dependencies
         run: |
-          cd domagent-mcp
+          cd bananabrowse-mcp
           npm ci --ignore-scripts
           npm run build:service
 
@@ -82,9 +82,9 @@ jobs:
       #   NODE_AUTH_TOKEN  set from the NPM_TOKEN repository secret
       - name: Publish to npm
         run: |
-          cd domagent-mcp
-          echo "Publishing domagent@${{ steps.version.outputs.version }} to npm..."
+          cd bananabrowse-mcp
+          echo "Publishing bananabrowse@${{ steps.version.outputs.version }} to npm..."
           npm publish --access public --provenance
-          echo "Published: https://www.npmjs.com/package/domagent"
+          echo "Published: https://www.npmjs.com/package/bananabrowse"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,8 +1,11 @@
-# DomAgent
+# BananaBrowse
 
 Let your AI agent work in your real browser, inside tab groups you approve.
 
-DomAgent is a self-hosted MCP server plus a Chrome/Firefox extension. The
+BananaBrowse was called DomAgent until 6.2. It started as a fork of
+[vaishnavucv/domagent](https://github.com/vaishnavucv/domagent).
+
+BananaBrowse is a self-hosted MCP server plus a Chrome/Firefox extension. The
 extension runs in a small app window: while that window is open, paired agents
 can ask to open a **session**, which is a native tab group in your browser.
 You approve each session, and every tab in that group is in scope, so you can
@@ -14,17 +17,18 @@ browser profile.
 
 ## Version
 
-Service **6.1.0-beta.6**, extension **6.1.4**, browser wire **v6**, DB schema **6**.
-v6 is a clean break from v5: use a new database, re-register browsers and
-re-pair agents. See [the v6 upgrade notes](docs/V6-UPGRADE.md) and
-[architecture](docs/ARCHITECTURE.md).
+**1.0.0-beta.1** (service and extension), browser wire **v6**, DB schema **6**.
+BananaBrowse restarts versioning at 1.0.0; the last DomAgent release was
+6.1.0-beta.6. It accepts no DomAgent extension: install BananaBrowse,
+re-register browsers and re-pair agents. See [the upgrade notes](docs/V6-UPGRADE.md)
+and [architecture](docs/ARCHITECTURE.md).
 
 Chrome **145+** and Firefox **153+**. Release ZIPs are unpacked Chrome
 extensions and unsigned temporary Firefox add-ons.
 
-## Using DomAgent
+## Using BananaBrowse
 
-1. Click the DomAgent toolbar button. A DomAgent window opens (one at a time).
+1. Click the BananaBrowse toolbar button. A BananaBrowse window opens (one at a time).
 2. **First run:** enter your server's domain and a name for this browser, such as
    “Bob's Firefox on Mac”, then click **Connect**.
 3. **Pair an agent:** click **Pair an agent** and tell your agent the 8-character
@@ -38,22 +42,22 @@ extensions and unsigned temporary Firefox add-ons.
    requests also flash the tab group and show a notification. Click **Done** when
    finished.
 6. **Stop:** close or ungroup the tab group to end that session (tabs stay open),
-   or close the DomAgent window to disconnect everything. The window asks first.
+   or close the BananaBrowse window to disconnect everything. The window asks first.
    Reopening it reconnects live sessions automatically.
 
 | You do | Effect |
 | --- | --- |
-| Drag a tab into a session group, or right-click → *Add tab to DomAgent session* | The agent can use it |
-| Drag a tab out, or right-click → *Remove tab from DomAgent session* | The agent loses it |
+| Drag a tab into a session group, or right-click → *Add tab to BananaBrowse session* | The agent can use it |
+| Drag a tab out, or right-click → *Remove tab from BananaBrowse session* | The agent loses it |
 | Close or ungroup the group | Session ends; tabs stay open |
-| Close the DomAgent window | Agents see the browser as offline; sessions resume when you reopen it |
+| Close the BananaBrowse window | Agents see the browser as offline; sessions resume when you reopen it |
 | Settings → Unpair | That agent's sessions end and it can no longer ask |
 
 The window stays quiet while connected. It shows each agent with a one-word
 status (Needs you, Working, n sessions, Idle) and only mentions the connection
-when something is wrong. The window title shows `DomAgent (n)` when n items are
-waiting and `DomAgent: offline` when disconnected. Settings (the gear) holds
-the browser name, the server, paired agents, **Open DomAgent when the browser
+when something is wrong. The window title shows `BananaBrowse (n)` when n items are
+waiting and `BananaBrowse: offline` when disconnected. Settings (the gear) holds
+the browser name, the server, paired agents, **Open BananaBrowse when the browser
 starts** (off by default), Firefox page-script permission and **Forget this
 browser**.
 
@@ -68,9 +72,9 @@ Agents authenticate with an API key at `https://<server>/mcp/<agent-id>`. The
 operator generates the key and adds one line to the service environment:
 
 ```sh
-node domagent-mcp/dist/domagent-mcp/admin.js agent-key atlas "Atlas" https://atlas.example
+node bananabrowse-mcp/dist/bananabrowse-mcp/admin.js agent-key atlas "Atlas" https://atlas.example
 # prints the key once, plus:
-# DOMAGENT_AGENT_ATLAS="Atlas|https://atlas.example/|sha256:<hex>"
+# BANANABROWSE_AGENT_ATLAS="Atlas|https://atlas.example/|sha256:<hex>"
 ```
 
 Restart the service after changing agents. Configure the agent's MCP client
@@ -96,20 +100,20 @@ is closed; pick another browser from `list_browsers`.
 
 ## Self-hosting
 
-Node 22.13+. See [service configuration and CLI](domagent-mcp/README.md) and
+Node 22.13+. See [service configuration and CLI](bananabrowse-mcp/README.md) and
 [deployment examples](deployment/).
 
 ```sh
-npm --prefix domagent-mcp ci --ignore-scripts
-npm --prefix domagent-extension ci --ignore-scripts
-npm --prefix domagent-extension/ui ci --ignore-scripts
-npm --prefix domagent-mcp test           # server, extension and UI unit tests
-npm --prefix domagent-mcp run build      # dist/chrome and dist/firefox
-npm --prefix domagent-mcp run check      # JavaScript syntax
+npm --prefix bananabrowse-mcp ci --ignore-scripts
+npm --prefix bananabrowse-extension ci --ignore-scripts
+npm --prefix bananabrowse-extension/ui ci --ignore-scripts
+npm --prefix bananabrowse-mcp test           # server, extension and UI unit tests
+npm --prefix bananabrowse-mcp run build      # dist/chrome and dist/firefox
+npm --prefix bananabrowse-mcp run check      # JavaScript syntax
 ```
 
 Real-browser tests run in the Playwright container; see
-[the test README](domagent-extension/test/README.md).
+[the test README](bananabrowse-extension/test/README.md).
 
 ## Security model in brief
 
@@ -120,7 +124,7 @@ Real-browser tests run in the Playwright container; see
   operator-configured agent name. Every session needs another local approval.
 - Agents only ever see their own browsers, sessions and tabs. Unknown and
   foreign IDs both return `NOT_FOUND`.
-- Tabs at protected origins (the DomAgent server plus `DOMAGENT_PROTECTED_ORIGINS`)
+- Tabs at protected origins (the BananaBrowse server plus `BANANABROWSE_PROTECTED_ORIGINS`)
   are never shared, and navigation to them is blocked.
 - Closing the window disconnects, then detaches the debugger and removes
   protection rules.

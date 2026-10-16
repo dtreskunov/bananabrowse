@@ -1,7 +1,7 @@
-# DomAgent v6 architecture
+# BananaBrowse architecture
 
-Status: implemented in service 6.1.0-beta.6 / extension 6.1.4 (wire v6, DB
-schema 6), 2026-10-14. Clean break from v5: no DB migration, browsers
+Status: implemented in BananaBrowse 1.0.0-beta.1 (wire v6, DB schema 6),
+2026-10-16; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
 ## 1. Goals
@@ -17,7 +17,7 @@ re-register and agents re-pair.
 
 | Component | Role |
 | --- | --- |
-| DomAgent server | MCP endpoint per agent, browser registration/token endpoint, WSS hub, SQLite store |
+| BananaBrowse server | MCP endpoint per agent, browser registration/token endpoint, WSS hub, SQLite store |
 | Extension window | Single-instance popup window. Owns the WebSocket, controller, tab/group reconciliation and all UI |
 | Extension background | Thin: toolbar click, tab context menu, notification click, optional open-at-startup. Focuses/opens the window |
 | Agent | MCP client authenticated by API key at `/mcp/<agent-id>` |
@@ -31,7 +31,7 @@ construction and Chrome service-worker lifetime is irrelevant.
 **Agents** are configured in `.env`, one variable per agent:
 
 ```sh
-DOMAGENT_AGENT_ATLAS="Atlas|https://atlas.example|sha256:<hex of API key>"
+BANANABROWSE_AGENT_ATLAS="Atlas|https://atlas.example|sha256:<hex of API key>"
 ```
 
 The agent ID (`atlas`, `[a-z0-9-]{1,32}`) is operator-chosen, human-readable,
@@ -45,7 +45,7 @@ browser (rate-limited); a registered browser has no authority until paired.
 Unpaired registrations expire after 24 hours offline; paired browsers after 30
 days offline, together with their pairings and sessions.
 
-1. The user enters the server domain. The extension checks `/.well-known/domagent` and
+1. The user enters the server domain. The extension checks `/.well-known/bananabrowse` and
    requests host permission for that origin only.
 2. The extension generates a nonextractable P-256 key in IndexedDB and registers
    `{name, public_key}` with a key proof. The server returns `browser_id` and a
@@ -140,7 +140,7 @@ position. The toolbar button focuses it. It uses system fonts and colors, light
 and dark themes, and is sparse.
 
 A healthy connection is silent: there is no header. The window title is
-`DomAgent`, `DomAgent (n)` when n items are waiting, or `DomAgent: offline`.
+`BananaBrowse`, `BananaBrowse (n)` when n items are waiting, or `BananaBrowse: offline`.
 
 - **Connection strip:** only when not connected. "Connecting…" on first start;
   otherwise an amber strip, "Offline: can't reach <server>. Agents can't reach
@@ -196,8 +196,8 @@ handle (`artifact_id`, `name`, `mime`, `bytes`, `sha256`, `expires_at`,
 `download_url`), a JSON `shape` summary and a 600-byte text preview, so bulk
 data never passes through the model. Limits: 8 MiB − 64 KiB per artifact (the
 browser message cap is 8 MiB), 24 h TTL, 64 MiB / 100 artifacts per agent with
-oldest-first eviction. Artifacts are files under `DOMAGENT_ARTIFACTS_DIR`
-(default `<dir of DOMAGENT_DB>/artifacts`, 0700/0600; in memory for `:memory:`)
+oldest-first eviction. Artifacts are files under `BANANABROWSE_ARTIFACTS_DIR`
+(default `<dir of BANANABROWSE_DB>/artifacts`, 0700/0600; in memory for `:memory:`)
 and survive restarts; artifacts of agents removed from the config are pruned.
 Requires extension 6.1.0+; older extensions get `CAPABILITY_UNAVAILABLE` with
 `required_extension_version` before dispatch.
@@ -274,7 +274,7 @@ These carry over from v5, with one deliberate change: website-created tabs that
 inherit group membership are no longer excluded (see section 5).
 
 - Protected origins are enforced, now configured explicitly with
-  `DOMAGENT_PROTECTED_ORIGINS` (replacing the v5 `DOMAGENT_OIDC_ISSUER` carry-over).
+  `BANANABROWSE_PROTECTED_ORIGINS` (replacing the v5 `BANANABROWSE_OIDC_ISSUER` carry-over).
 - Navigation-only handling for refused or browser-owned documents.
 - 8 tabs and 2 concurrent executions per session; one command per tab.
 - DOM-only input, script worlds, output caps, and redacted diagnostics.
@@ -301,7 +301,7 @@ allow | deny | ask`, default `allow`.
 - Sidebar, toolbar popup and the Start/Continue/Pause/Resume state machine.
 - Per-window workspaces and the task-group selector.
 - Viewport frame and the Diagnostics page.
-- Operator dashboard and `DOMAGENT_OPERATOR_SECRET`.
+- Operator dashboard and `BANANABROWSE_OPERATOR_SECRET`.
 - DB-provisioned clients, tenants and namespaces.
 - Saved connections (multiple servers per install).
 - `adopt_browser` and `wait_for_workspace`, replaced by `pair_browser` and

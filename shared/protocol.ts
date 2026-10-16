@@ -4,7 +4,7 @@
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Wire = Record<string, any>;
-/** An Error carrying a stable DomAgent error code plus value-free details. */
+/** An Error carrying a stable BananaBrowse error code plus value-free details. */
 export interface CodedError extends Error {
   code: string;
   [detail: string]: unknown;
@@ -80,7 +80,7 @@ export const ARTIFACT_MIME_TYPES = Object.freeze([
 export const ARTIFACT_TEXT_MIME = /^(?:text\/|application\/(?:json|x-ndjson)$)/;
 export const ARTIFACT_ID_PATTERN = /^a[0-9A-Za-z_-]{22}$/;
 /** Lowest extension version that understands each optional capability. */
-export const EXTENSION_FEATURES = Object.freeze({ artifacts: '6.1.0', close_tabs: '6.1.3' });
+export const EXTENSION_FEATURES = Object.freeze({ artifacts: '0.9.0.1', close_tabs: '0.9.0.1' });
 export function versionAtLeast(version: unknown, minimum: string): boolean {
   const parts = (value: unknown) =>
     String(value || '0')
@@ -338,7 +338,7 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
         enum: ['value', 'artifact'],
         default: 'value',
         description:
-          'value: return the JSON result inline (16 KiB default, 64 KiB hard cap). artifact: store the full result (up to ~8 MiB) on the DomAgent service and return only a handle with bytes, sha256, a preview and a download_url. Use artifact for bulk data; never transcribe large results through the conversation.',
+          'value: return the JSON result inline (16 KiB default, 64 KiB hard cap). artifact: store the full result (up to ~8 MiB) on the BananaBrowse service and return only a handle with bytes, sha256, a preview and a download_url. Use artifact for bulk data; never transcribe large results through the conversation.',
       },
       artifact_name: {
         type: 'string',
@@ -614,15 +614,15 @@ export async function keyId(jwk: Wire | null | undefined): Promise<string> {
 
 // Domain-separated proof transcripts. Each binds the service origin and a fresh server nonce.
 export function registerPayload(c: Wire): Uint8Array<ArrayBuffer> {
-  return encode(['domagent.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]);
+  return encode(['bananabrowse.v6', 'register', c.origin, c.nonce, c.key_id, c.extension_origin, c.name]);
 }
 
 export function tokenPayload(c: Wire): Uint8Array<ArrayBuffer> {
-  return encode(['domagent.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]);
+  return encode(['bananabrowse.v6', 'token', c.origin, c.nonce, c.browser_id, c.key_id]);
 }
 
 export function connectPayload(c: Wire): Uint8Array<ArrayBuffer> {
-  return encode(['domagent.v6', 'connect', c.origin, c.nonce, c.browser_id, c.connection_id]);
+  return encode(['bananabrowse.v6', 'connect', c.origin, c.nonce, c.browser_id, c.connection_id]);
 }
 
 export function normalizePairingCode(value: unknown): string {

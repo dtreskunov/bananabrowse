@@ -3,12 +3,12 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 const root = resolve(import.meta.dirname, '..');
-const tsc = createRequire(resolve(root, 'domagent-mcp/package.json')).resolve('typescript/bin/tsc');
+const tsc = createRequire(resolve(root, 'bananabrowse-mcp/package.json')).resolve('typescript/bin/tsc');
 function run(args) {
   const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
   if (result.status !== 0) process.exit(result.status || 1);
 }
-for (const project of ['domagent-mcp', 'domagent-extension', 'domagent-extension/ui']) {
+for (const project of ['bananabrowse-mcp', 'bananabrowse-extension', 'bananabrowse-extension/ui']) {
   run([tsc, '-p', resolve(root, project), '--noEmit']);
 }
 function check(directory) {
@@ -22,5 +22,6 @@ function check(directory) {
     if (entry.isFile() && /\.(js|mjs|cjs)$/.test(entry.name)) run(['--check', path]);
   }
 }
-for (const directory of ['shared', 'domagent-mcp', 'domagent-extension', 'scripts']) check(resolve(root, directory));
+for (const directory of ['shared', 'bananabrowse-mcp', 'bananabrowse-extension', 'scripts'])
+  check(resolve(root, directory));
 console.log('TypeScript and JavaScript checks passed.');

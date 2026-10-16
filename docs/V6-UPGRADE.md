@@ -3,16 +3,19 @@
 v6 is a clean break: wire v6, DB schema 6, new MCP tools. Nothing migrates.
 Browsers register again and agents pair again.
 
+These notes cover DomAgent 6.x and the move to BananaBrowse 1.0. The DomAgent
+sections use today's BananaBrowse names for settings and files.
+
 ## Service
 
 1. Stop the v5 service and keep its database file as a private backup (v6 refuses
    to open it: `SCHEMA_VERSION_UNSUPPORTED`).
-2. Point `DOMAGENT_DB` at a new path.
-3. Remove `DOMAGENT_OIDC_*` and `DOMAGENT_OPERATOR_SECRET*`. Put any origins that
+2. Point `BANANABROWSE_DB` at a new path.
+3. Remove `BANANABROWSE_OIDC_*` and `BANANABROWSE_OPERATOR_SECRET*`. Put any origins that
    must stay off-limits (for example a former identity provider) in
-   `DOMAGENT_PROTECTED_ORIGINS`.
-4. Add one `DOMAGENT_AGENT_<ID>="Name|homepage|sha256:<hex>"` line per agent.
-   Generate new keys with `node domagent-mcp/dist/domagent-mcp/admin.js agent-key <id> "<Name>"`.
+   `BANANABROWSE_PROTECTED_ORIGINS`.
+4. Add one `BANANABROWSE_AGENT_<ID>="Name|homepage|sha256:<hex>"` line per agent.
+   Generate new keys with `node bananabrowse-mcp/dist/bananabrowse-mcp/admin.js agent-key <id> "<Name>"`.
    To keep a v5 client's existing credential, reuse its stored SHA-256 hash
    (`clients.credential_hash` in the old DB) as the `sha256:` value, so no secret
    changes hands.
@@ -31,7 +34,7 @@ Browsers register again and agents pair again.
 
 ## Browsers
 
-Install extension 6.0.0 over 5.x. The toolbar button now opens the DomAgent
+Install extension 6.0.0 over 5.x. The toolbar button now opens the BananaBrowse
 window. Enter the server and a browser name, then pair each agent again with a
 new code. Old tab groups are left alone and are not adopted.
 
@@ -52,8 +55,8 @@ order.
   shares the MCP path, so credential injectors that match `/mcp/<agent-id>`
   exactly need no change. Artifacts need extension 6.1.0; older
   extensions answer `CAPABILITY_UNAVAILABLE` with `required_extension_version`.
-- **Storage.** Artifacts live in `DOMAGENT_ARTIFACTS_DIR` (default
-  `<dir of DOMAGENT_DB>/artifacts`). Under systemd hardening the directory must
+- **Storage.** Artifacts live in `BANANABROWSE_ARTIFACTS_DIR` (default
+  `<dir of BANANABROWSE_DB>/artifacts`). Under systemd hardening the directory must
   be inside `ReadWritePaths`.
 - **Limits.** Browser messages may be up to 8 MiB (was 4 MiB). Reverse proxies
   that cap WebSocket frames must allow this.
@@ -81,7 +84,27 @@ order.
   `required_extension_version` before anything is sent to the browser.
 - **TypeScript build (6.1.0-beta.6, extension 6.1.4).** No protocol, schema or
   behaviour change. The service is now TypeScript and must be built before it
-  runs: in `domagent-mcp/` run `npm ci && npm run build:service` after every
-  update, and start `dist/domagent-mcp/index.js` instead of `index.js` (update
-  systemd `ExecStart`; see `deployment/domagent.service`). The operator CLI is
-  `dist/domagent-mcp/admin.js`. The Docker image builds this itself.
+  runs: in `bananabrowse-mcp/` run `npm ci && npm run build:service` after every
+  update, and start `dist/bananabrowse-mcp/index.js` instead of `index.js` (update
+  systemd `ExecStart`; see `deployment/bananabrowse.service`). The operator CLI is
+  `dist/bananabrowse-mcp/admin.js`. The Docker image builds this itself.
+
+## DomAgent 6.1 → BananaBrowse 1.0
+
+BananaBrowse 1.0.0-beta.1 renames the project and restarts versioning at 1.0.0
+(extension manifests: `version` 0.9.0.1, `version_name` 1.0.0-beta.1). Wire v6
+and schema 6 are unchanged, but nothing named DomAgent is accepted any more:
+
+- **Extension.** The Firefox add-on ID is now `bananabrowse-secure@bananabrowse`
+  and the browser key store is `bananabrowse-v6`. Remove the DomAgent extension,
+  install BananaBrowse 1.0.0-beta.1, register the browser again and re-pair agents.
+- **Wire names.** Setup reads `/.well-known/bananabrowse`, the service reports
+  `service: "bananabrowse"`, the extension sends `X-BananaBrowse-Extension-Origin`,
+  and the MCP server is named `bananabrowse`, so agent tools are
+  `mcp__bananabrowse__*`.
+- **Configuration.** Every `DOMAGENT_*` variable is now `BANANABROWSE_*`, including
+  agent keys (`BANANABROWSE_AGENT_<ID>`). Existing key values keep working; new
+  keys start with `bb_`. The default database is `./data/bananabrowse.db`.
+- **Layout.** The packages live in `bananabrowse-mcp/` and
+  `bananabrowse-extension/`; the service starts `dist/bananabrowse-mcp/index.js`
+  (see `deployment/bananabrowse.service`).

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DomAgent",
-  "version": "6.1.0",
+  "version": "6.1.1",
   "minimum_chrome_version": "145",
   "description": "Let your AI agent work in browser tab groups you approve, from a small DomAgent window.",
   "permissions": [

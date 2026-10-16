@@ -18,6 +18,27 @@ export function injectionReason(error) {
   return 'unknown';
 }
 
+const POLICY_MESSAGE = /unsafe-eval|content security policy|csp|code generation/i;
+function scriptFailureCode(native) {
+  if (native?.name === 'SyntaxError') return 'SCRIPT_SYNTAX_ERROR';
+  if (native?.name === 'EvalError' && POLICY_MESSAGE.test(native.message || '')) return 'SCRIPT_POLICY_BLOCKED';
+  return 'SCRIPT_RUNTIME_ERROR';
+}
+function scriptError(code, native, phase, world, script, located, layer = 'browser') {
+  return locateScriptError(Object.assign(new Error(code), { code,
+    ...diagnosticDetails(native, { layer, phase, execution_world: world }) }), script, located?.line, located?.column);
+}
+// Artifacts are stored by the service; only the transport bound applies to them here.
+function evaluationResult(evaluated, args, onSerializationError) {
+  if (args.return_as === 'artifact') return evaluated;
+  try {
+    return compactResult('evaluate_script', evaluated, args);
+  } catch (error) {
+    if (error.code === 'RESULT_TOO_LARGE') throw error;
+    return onSerializationError(error);
+  }
+}
+
 export class BrowserAdapter {
   constructor(api, browserName) {
     this.api = api;
@@ -342,6 +363,93 @@ export class BrowserAdapter {
     }
   }
 
+  async evaluateScript(grant, document, args, checkCurrent) {
+    const world = args.world || 'MAIN';
+    if (this.browserName === 'chrome' && world !== 'USER_SCRIPT') {
+      const tree = await this.api.debugger.sendCommand({ tabId: grant.tabId }, 'Page.getFrameTree');
+      const context = this.contexts.get(grant.tabId)?.get(tree.frameTree?.frame.id);
+      if (!context?.uniqueId) fail('TARGET_STALE');
+      checkCurrent();
+      return this.evaluateWithDebugger(grant.tabId, context, args);
+    }
+    return this.evaluateWithUserScripts(grant, document, args, world);
+  }
+
+  async evaluateWithDebugger(tabId, context, args) {
+    // The remote caller chooses only page source, never a CDP method/target/context.
+    const prepared = prepareEvaluateExpression(args.script);
+    const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+      expression: prepared.expression, awaitPromise: true, returnByValue: true,
+      userGesture: false, timeout: 10_000, uniqueContextId: context.uniqueId,
+    });
+    const details = response.exceptionDetails;
+    if (details || response.result?.subtype === 'error') {
+      const exception = details?.exception || response.result;
+      const code = exception?.className === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR';
+      const native = Object.assign(new Error(exception?.description || code), {
+        name: exception?.className || 'Error', native: details,
+      });
+      const located = stackLocation(exception?.description, prepared.marker) ||
+        (code === 'SCRIPT_SYNTAX_ERROR' && !prepared.async && Number.isSafeInteger(details?.lineNumber)
+          ? { line: details.lineNumber + 1, column: (details.columnNumber ?? -1) + 1 } : null);
+      throw scriptError(code, native, 'execution', 'MAIN', args.script, located);
+    }
+    if (response.result?.unserializableValue !== undefined || response.result?.type === 'function') {
+      fail('SCRIPT_SERIALIZATION_ERROR');
+    }
+    return evaluationResult({ value: response.result?.value ?? null, execution_world: 'MAIN' }, args,
+      () => fail('SCRIPT_SERIALIZATION_ERROR'));
+  }
+
+  async evaluateWithUserScripts(grant, document, args, world) {
+    const tabId = grant.tabId;
+    let compiled;
+    try { compiled = compileScriptSource(args.script); }
+    catch (error) {
+      const failure = scriptError('SCRIPT_SYNTAX_ERROR', error, 'validation', world, args.script,
+        { line: error.line, column: error.column }, 'extension');
+      throw Object.assign(failure, { dispatch_status: 'not_dispatched' });
+    }
+    let responses;
+    try {
+      if (!this.api.userScripts?.execute) throw new Error('Native user-script API is unavailable or not enabled.');
+      const worldId = grant.scriptWorldId || 'domagent';
+      if (world === 'USER_SCRIPT') {
+        await this.api.userScripts.configureWorld({
+          worldId, csp: "script-src 'self' 'unsafe-eval'; object-src 'none'", messaging: false,
+        });
+      }
+      responses = await this.api.userScripts.execute({
+        target: document.document_id ? { tabId, documentIds: [document.document_id] } : { tabId, frameIds: [0] },
+        world, ...(world === 'USER_SCRIPT' ? { worldId } : {}),
+        js: [{ code: compiled.code }],
+      });
+    } catch (error) {
+      const failure = Object.assign(new Error('SCRIPT_EXECUTION_UNAVAILABLE'), {
+        code: 'SCRIPT_EXECUTION_UNAVAILABLE',
+        ...diagnosticDetails(error, { layer: 'browser', phase: 'dispatch', execution_world: world }),
+      });
+      this.onWarning(failure);
+      throw failure;
+    }
+    const response = responses?.[0];
+    if (!response) fail('SCRIPT_EXECUTION_UNAVAILABLE');
+    const caught = response.result?.__domagent_script_failure === compiled.marker;
+    if (caught || response.error !== undefined) {
+      const native = caught ? response.result.details : response.error;
+      const code = caught && response.result.serialization_error ? 'SCRIPT_SERIALIZATION_ERROR' : scriptFailureCode(native);
+      const located = stackLocation(native?.stack, compiled.marker, compiled.wrapper_line_offset);
+      // Wrapper text shifts columns on the first and last lines, so runtime errors report the line only.
+      throw scriptError(code, native, 'execution', world, args.script, { line: located?.line });
+    }
+    if (document.document_id && response.documentId !== document.document_id) fail('TARGET_STALE');
+    if (typeof response.result === 'function' || typeof response.result === 'symbol') fail('SCRIPT_SERIALIZATION_ERROR');
+    return evaluationResult({ value: response.result ?? null, execution_world: world }, args, error => {
+      throw Object.assign(new Error('SCRIPT_SERIALIZATION_ERROR'), { code: 'SCRIPT_SERIALIZATION_ERROR',
+        ...diagnosticDetails(error, { layer: 'browser', phase: 'serialization', execution_world: world }) });
+    });
+  }
+
   async prepareAction(grant, operation, args, check = () => {}) {
     await this.assertWorkspace(grant);
     if (operation === 'navigate') {
@@ -416,13 +524,6 @@ export class BrowserAdapter {
     if (preview?.document_nonce && preview.document_nonce !== document.document_nonce) {
       throw Object.assign(new Error('TARGET_STALE'), { code: 'TARGET_STALE', inspection_stage: 'document_changed' });
     }
-    let context;
-    if (operation === 'evaluate_script' && this.browserName === 'chrome' && args.world !== 'USER_SCRIPT') {
-      const tree = await this.api.debugger.sendCommand({ tabId }, 'Page.getFrameTree');
-      context = this.contexts.get(tabId)?.get(tree.frameTree?.frame.id);
-      if (!context?.uniqueId) fail('TARGET_STALE');
-      checkCurrent();
-    }
     if (operation === 'navigate') {
       const url = navigationUrl(args.url, grant.protected_origins);
       grant.blankAllowed = false;
@@ -430,112 +531,7 @@ export class BrowserAdapter {
       await this.api.tabs.update(tabId, { url });
       return { url, navigation_started: true };
     }
-    if (operation === 'evaluate_script') {
-      if (this.browserName === 'chrome' && args.world !== 'USER_SCRIPT') {
-        // The remote caller chooses only page source, never a CDP method/target/context.
-        const prepared = prepareEvaluateExpression(args.script);
-        const response = await this.api.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-          expression: prepared.expression, awaitPromise: true, returnByValue: true,
-          userGesture: false, timeout: 10_000, uniqueContextId: context.uniqueId,
-        });
-        if (response.exceptionDetails || response.result?.subtype === 'error') {
-          const exception = response.exceptionDetails?.exception || response.result;
-          const code = exception?.className === 'SyntaxError' ? 'SCRIPT_SYNTAX_ERROR' : 'SCRIPT_RUNTIME_ERROR';
-          const native = Object.assign(new Error(exception?.description || code), {
-            name: exception?.className || 'Error', native: response.exceptionDetails,
-          });
-          const details = response.exceptionDetails;
-          const located = stackLocation(exception?.description, prepared.marker) ||
-            (code === 'SCRIPT_SYNTAX_ERROR' && !prepared.async && Number.isSafeInteger(details?.lineNumber)
-              ? { line: details.lineNumber + 1, column: (details.columnNumber ?? -1) + 1 } : null);
-          throw locateScriptError(Object.assign(new Error(code), { code,
-            ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: 'MAIN' }) }),
-          args.script, located?.line, located?.column);
-        }
-        if (response.result?.unserializableValue !== undefined || response.result?.type === 'function') {
-          fail('SCRIPT_SERIALIZATION_ERROR');
-        }
-        const evaluated = { value: response.result?.value ?? null, execution_world: 'MAIN' };
-        // Artifacts are stored by the service; only the transport bound applies here.
-        if (args.return_as === 'artifact') return evaluated;
-        try {
-          return compactResult(operation, evaluated, args);
-        } catch (error) {
-          if (error.code === 'RESULT_TOO_LARGE') throw error;
-          fail('SCRIPT_SERIALIZATION_ERROR');
-        }
-      }
-      let responses;
-      let compiled;
-      try { compiled = compileScriptSource(args.script); }
-      catch (error) {
-        throw locateScriptError(Object.assign(new Error('SCRIPT_SYNTAX_ERROR'), { code: 'SCRIPT_SYNTAX_ERROR',
-          dispatch_status: 'not_dispatched',
-          ...diagnosticDetails(error, { layer: 'extension', phase: 'validation', execution_world: args.world || 'MAIN' }) }),
-        args.script, error.line, error.column);
-      }
-      try {
-        if (!this.api.userScripts?.execute) throw new Error('Native user-script API is unavailable or not enabled.');
-        const world = args.world || 'MAIN';
-        if (world === 'USER_SCRIPT') {
-          await this.api.userScripts.configureWorld({
-            worldId: grant.scriptWorldId || 'domagent',
-            csp: "script-src 'self' 'unsafe-eval'; object-src 'none'",
-            messaging: false,
-          });
-        }
-        responses = await this.api.userScripts.execute({
-          target: document.document_id ? { tabId, documentIds: [document.document_id] } : { tabId, frameIds: [0] },
-          world, ...(world === 'USER_SCRIPT' ? { worldId: grant.scriptWorldId || 'domagent' } : {}),
-          js: [{ code: compiled.code }],
-        });
-      } catch (error) {
-        const failure = Object.assign(new Error('SCRIPT_EXECUTION_UNAVAILABLE'), {
-          code: 'SCRIPT_EXECUTION_UNAVAILABLE',
-          ...diagnosticDetails(error, { layer: 'browser', phase: 'dispatch', execution_world: args.world || 'MAIN' }),
-        });
-        this.onWarning(failure);
-        throw failure;
-      }
-      const response = responses?.[0];
-      if (!response) fail('SCRIPT_EXECUTION_UNAVAILABLE');
-      if (response.result?.__domagent_script_failure === compiled.marker) {
-        const details = response.result.details;
-        let code = 'SCRIPT_RUNTIME_ERROR';
-        if (response.result.serialization_error) code = 'SCRIPT_SERIALIZATION_ERROR';
-        else if (details.name === 'SyntaxError') code = 'SCRIPT_SYNTAX_ERROR';
-        else if (details.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(details.message || '')) {
-          code = 'SCRIPT_POLICY_BLOCKED';
-        }
-        const located = stackLocation(details.stack, compiled.marker, compiled.wrapper_line_offset);
-        throw locateScriptError(Object.assign(new Error(code), { code, ...diagnosticDetails(details, {
-          layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN',
-        }) }), args.script, located?.line);
-      }
-      if (response.error !== undefined) {
-        const native = response.error;
-        let code = 'SCRIPT_RUNTIME_ERROR';
-        if (native?.name === 'SyntaxError') code = 'SCRIPT_SYNTAX_ERROR';
-        else if (native?.name === 'EvalError' && /unsafe-eval|content security policy|csp|code generation/i.test(native.message || '')) {
-          code = 'SCRIPT_POLICY_BLOCKED';
-        }
-        const located = stackLocation(native?.stack, compiled.marker, compiled.wrapper_line_offset);
-        throw locateScriptError(Object.assign(new Error(code), { code,
-          ...diagnosticDetails(native, { layer: 'browser', phase: 'execution', execution_world: args.world || 'MAIN' }) }),
-        args.script, located?.line);
-      }
-      if (document.document_id && response.documentId !== document.document_id) fail('TARGET_STALE');
-      if (typeof response.result === 'function' || typeof response.result === 'symbol') fail('SCRIPT_SERIALIZATION_ERROR');
-      const evaluated = { value: response.result ?? null, execution_world: args.world || 'MAIN' };
-      if (args.return_as === 'artifact') return evaluated;
-      try {
-        return compactResult(operation, evaluated, args);
-      } catch (error) {
-        if (error.code === 'RESULT_TOO_LARGE') throw error;
-        throw Object.assign(new Error('SCRIPT_SERIALIZATION_ERROR'), { code: 'SCRIPT_SERIALIZATION_ERROR',
-          ...diagnosticDetails(error, { layer: 'browser', phase: 'serialization', execution_world: args.world || 'MAIN' }) });
-      }
-    }
+    if (operation === 'evaluate_script') return this.evaluateScript(grant, document, args, checkCurrent);
     if (operation === 'get_screenshot') {
       if (this.browserName === 'chrome') {
         const screenshot = await this.api.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {

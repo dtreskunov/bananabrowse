@@ -1,7 +1,7 @@
 {
   "name": "@domagent/extension-runtime",
   "private": true,
-  "version": "6.1.0",
+  "version": "6.1.1",
   "type": "module",
   "description": "Dependencies for the independently bundled browser runtime.",
   "dependencies": {

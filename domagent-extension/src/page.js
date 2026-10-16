@@ -169,7 +169,7 @@ export async function pageHelper(operation, args = {}) {
       ...(activation.label ? { activation: { ...metadata(activation.label), kind: 'associated_label' } } : {}),
     };
   };
-  if (operation === 'get_page_snapshot') {
+  const snapshot = () => {
     let scope = document.body;
     if (args.selector) {
       let matches;
@@ -237,8 +237,8 @@ export async function pageHelper(operation, args = {}) {
     return { document: globalThis[documentKey], url: location.href, title: document.title.slice(0, 500),
       ...text, elements, elements_truncated: elementsTruncated, next_ref: state.next, truncated: elementsTruncated || text.text_truncated,
       scope: 'top-level-and-open-shadow-roots', input_mode: 'dom', viewport };
-  }
-  if (operation === 'get_interactive_elements') {
+  };
+  const interactiveElements = () => {
     const candidates = all.filter(element => element.matches('a,button,input,textarea,select,[role="button"]') &&
       !element.matches('input[type="hidden"]') && visible(element));
     const elements = candidates.slice(0, args.max_elements ?? 50).map(element => {
@@ -249,13 +249,8 @@ export async function pageHelper(operation, args = {}) {
     });
     return { coordinate_system: 'viewport', elements,
       truncated: candidates.length > elements.length, elements_truncated: candidates.length > elements.length };
-  }
-  if (operation === 'clear_overlays') {
-    all.filter(element => element.matches('[data-domagent-overlay]') && !element.querySelector(marker))
-      .forEach(element => element.remove());
-    return { cleared: true };
-  }
-  if (operation === 'content_readiness') {
+  };
+  const contentReadiness = () => {
     try {
       const matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]);
       return { ready: matches.some(element => !ignored(element) && visible(element)) };
@@ -263,61 +258,55 @@ export async function pageHelper(operation, args = {}) {
       if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
       throw error;
     }
-  }
-  let element;
-  let activator;
-  if (args.approval_token && operation !== 'prepare_action') {
-    const binding = bindings.get(args.approval_token);
-    if (!binding || binding.operation !== operation) return { error: 'ELEMENT_STALE' };
-    element = binding.element;
-    activator = binding.activator;
-    if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
-      return { error: 'ELEMENT_STALE' };
-    }
-    if (activator && activator !== element && (!activator.isConnected || activator.control !== element || ignored(activator))) {
-      return { error: 'ELEMENT_STALE' };
-    }
-  } else if (args.ref) {
-    element = state.entries.get(args.ref);
+  };
+  const resolveTarget = () => {
+    let element;
+    let activator;
+    if (args.approval_token && operation !== 'prepare_action') {
+      const binding = bindings.get(args.approval_token);
+      if (!binding || binding.operation !== operation) return { error: 'ELEMENT_STALE' };
+      element = binding.element;
+      activator = binding.activator;
+      if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+        return { error: 'ELEMENT_STALE' };
+      }
+      if (activator && activator !== element && (!activator.isConnected || activator.control !== element || ignored(activator))) {
+        return { error: 'ELEMENT_STALE' };
+      }
+    } else if (args.ref) {
+      element = state.entries.get(args.ref);
+      if (!element) {
+        const number = Number(args.ref.slice(1));
+        const stale_reason = state.first === null || number < state.first || number >= state.next
+          ? 'ref_from_other_document' : 'ref_superseded';
+        return { error: 'ELEMENT_STALE', stale_reason, current_document: globalThis[documentKey] };
+      }
+      if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
+        return { error: 'ELEMENT_STALE', stale_reason: 'element_detached', current_document: globalThis[documentKey] };
+      }
+    } else if (args.selector) {
+      let matches;
+      try {
+        matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
+      } catch (error) {
+        if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+        throw error;
+      }
+      if (matches.length > 1) {
+        if (operation === 'inspect_element') return { matches: matches.length, state: 'ambiguous', reason: 'ELEMENT_AMBIGUOUS', viewport };
+        return { error: 'ELEMENT_AMBIGUOUS' };
+      }
+      element = matches[0];
+    } else element = operation === 'scroll' ? document.scrollingElement : document.body;
     if (!element) {
-      const number = Number(args.ref.slice(1));
-      const stale_reason = state.first === null || number < state.first || number >= state.next
-        ? 'ref_from_other_document' : 'ref_superseded';
-      return { error: 'ELEMENT_STALE', stale_reason, current_document: globalThis[documentKey] };
+      if (['inspect_element', 'prepare_action'].includes(operation)) {
+        return { matches: 0, state: 'missing', reason: 'ELEMENT_NOT_FOUND', viewport };
+      }
+      return { error: 'ELEMENT_NOT_FOUND' };
     }
-    if (!element.isConnected || element.getRootNode({ composed: true }) !== document || ignored(element)) {
-      return { error: 'ELEMENT_STALE', stale_reason: 'element_detached', current_document: globalThis[documentKey] };
-    }
-  } else if (args.selector) {
-    let matches;
-    try {
-      matches = roots.flatMap(root => [...root.querySelectorAll(args.selector)]).filter(element => !ignored(element));
-    } catch (error) {
-      if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
-      throw error;
-    }
-    if (matches.length > 1) {
-      if (operation === 'inspect_element') return { matches: matches.length, state: 'ambiguous', reason: 'ELEMENT_AMBIGUOUS', viewport };
-      return { error: 'ELEMENT_AMBIGUOUS' };
-    }
-    element = matches[0];
-  } else element = operation === 'scroll' ? document.scrollingElement : document.body;
-  if (!element) {
-    if (['inspect_element', 'prepare_action'].includes(operation)) {
-      return { matches: 0, state: 'missing', reason: 'ELEMENT_NOT_FOUND', viewport };
-    }
-    return { error: 'ELEMENT_NOT_FOUND' };
-  }
-  if (operation === 'inspect_element') return diagnostic(element);
-  if (operation === 'prepare_action') {
-    if (bindings.size >= 32) return { error: 'QUEUE_FULL' };
-    const activation = args.action === 'set_checked' ? activationLabel(element) : {};
-    if (activation.error) return { error: activation.error };
-    const token = nonce();
-    bindings.set(token, { element, activator: activation.label || element, operation: args.action });
-    return { ...diagnostic(element), approval_token: token };
-  }
-  if (operation === 'get_text') {
+    return { found: true, element, activator };
+  };
+  const readText = element => {
     if (element.tagName === 'TITLE' && element.parentElement?.tagName === 'HEAD') {
       const limit = args.max_text_chars ?? 4000;
       const value = document.title;
@@ -330,137 +319,172 @@ export async function pageHelper(operation, args = {}) {
     }
     const text = textData(element);
     return { ...text, truncated: text.text_truncated, rendered: true, text_source: 'rendered' };
+  };
+  const actionBlocker = (element, activator) => {
+    if (!visible(activator)) return { error: 'ELEMENT_NOT_VISIBLE' };
+    if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
+    if (operation === 'type_text' && (!editable(element) || element.matches('input[type="file"]'))) {
+      return { error: 'ELEMENT_NOT_EDITABLE' };
+    }
+    if (operation === 'type_text' && readonly(element)) return { error: 'ELEMENT_READONLY' };
+    if (operation === 'select_option' && !element.matches('select')) return { error: 'ELEMENT_NOT_EDITABLE' };
+    if (operation === 'set_checked' && !element.matches('input[type="checkbox"],input[type="radio"]')) {
+      return { error: 'ELEMENT_NOT_EDITABLE' };
+    }
+    if (operation === 'set_checked' && element.type === 'radio' && !args.checked) return { error: 'HANDOFF_REQUIRED' };
+    return null;
+  };
+  const hitBlocker = (element, activator) => {
+    const link = element.closest('a[href]');
+    const labelControl = element.closest('label')?.control;
+    if (element.matches('input[type="file"]') || labelControl?.matches('input[type="file"]') ||
+        (link && (link.hasAttribute('download') || link.target === '_blank'))) return { error: 'HANDOFF_REQUIRED' };
+    activator.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+    const rect = activator.getBoundingClientRect();
+    const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+    const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+    if (right <= left || bottom <= top) return { error: 'ELEMENT_NOT_VISIBLE' };
+    const x = (left + right) / 2, y = (top + bottom) / 2;
+    const hitAtPoint = () => {
+      let hit = document.elementFromPoint(x, y);
+      while (hit?.shadowRoot) {
+        const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
+        if (!deeper || deeper === hit) break;
+        hit = deeper;
+      }
+      return hit;
+    };
+    let hit = hitAtPoint();
+    const indicator = globalThis.__domagentSharingHost;
+    if (indicator?.isConnected && ignored(hit)) {
+      // Ignore only our own cosmetic banner, never a site's blocking overlay.
+      const display = indicator.style.getPropertyValue('display');
+      const priority = indicator.style.getPropertyPriority('display');
+      try {
+        indicator.style.setProperty('display', 'none', 'important');
+        hit = hitAtPoint();
+      } finally {
+        if (display) indicator.style.setProperty('display', display, priority);
+        else indicator.style.removeProperty('display');
+      }
+    }
+    let reached = false;
+    for (let node = hit; node; node = parent(node)) {
+      if (node === activator) { reached = true; break; }
+    }
+    if (!reached && activator.matches('label') && hit === activator.control &&
+        hit?.matches('input[type="checkbox"],input[type="radio"]')) reached = true;
+    if (!reached) return { error: 'ELEMENT_OBSCURED' };
+    return null;
+  };
+  const actions = {
+    click: (element, activator) => {
+      if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
+        element.focus({ preventScroll: true });
+        if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+        if (disabled(element)) return { error: 'OPERATION_FAILED' };
+      }
+      element.click();
+      return { clicked: true, input_mode: 'dom' };
+    },
+    set_checked: (element, activator) => {
+      if (element.checked !== args.checked) activator.click();
+      if (!element.isConnected || (activator !== element && activator.control !== element)) return { error: 'ELEMENT_STALE' };
+      if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
+      return { checked: element.checked, input_mode: 'dom' };
+    },
+    select_option: (element, activator) => {
+      const options = [...element.options].filter(option => option.value === args.value);
+      if (!options.length) return { error: 'OPTION_NOT_FOUND' };
+      if (options.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
+      if (options[0].disabled || options[0].parentElement?.matches('optgroup:disabled')) {
+        return { error: 'ELEMENT_DISABLED' };
+      }
+      if (element.multiple) return { error: 'HANDOFF_REQUIRED' };
+      element.value = args.value;
+      element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      if (element.value !== args.value) return { error: 'OPERATION_FAILED' };
+      return { selected: args.value, input_mode: 'dom' };
+    },
+    press_key: (element, activator) => {
+      element.focus();
+      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: args.key, bubbles: true, composed: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: args.key, bubbles: true, composed: true, cancelable: true }));
+      return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
+    },
+    type_text: async (element, activator) => {
+      element.focus();
+      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+      let inputMode = 'dom';
+      if (element.isContentEditable) {
+        const selection = document.getSelection();
+        if (!selection || typeof document.execCommand !== 'function') return { error: 'INPUT_REJECTED' };
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        selection.removeAllRanges(); selection.addRange(range);
+        const accepted = document.execCommand('insertText', false, args.text);
+        if (!accepted && element.textContent !== args.text) return { error: 'INPUT_REJECTED' };
+        inputMode = 'dom_editing';
+      } else {
+        const before = new InputEvent('beforeinput', {
+          bubbles: true, composed: true, cancelable: true, inputType: 'insertReplacementText', data: args.text,
+        });
+        if (!element.dispatchEvent(before)) return { error: 'INPUT_REJECTED' };
+        if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+        const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, args.text);
+        element.dispatchEvent(new InputEvent('input', {
+          bubbles: true, composed: true, inputType: 'insertReplacementText', data: args.text,
+        }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
+      if ((element.isContentEditable ? element.textContent : element.value) !== args.text) {
+        return { error: 'INPUT_NOT_APPLIED' };
+      }
+      return { typed: true, input_mode: inputMode, verification: 'dom_after_reconciliation' };
+    },
+  };
+  if (operation === 'get_page_snapshot') return snapshot();
+  if (operation === 'get_interactive_elements') return interactiveElements();
+  if (operation === 'clear_overlays') {
+    all.filter(element => element.matches('[data-domagent-overlay]') && !element.querySelector(marker))
+      .forEach(element => element.remove());
+    return { cleared: true };
   }
+  if (operation === 'content_readiness') return contentReadiness();
+  const resolved = resolveTarget();
+  if (!resolved.found) return resolved;
+  const { element } = resolved;
+  let { activator } = resolved;
+  if (operation === 'inspect_element') return diagnostic(element);
+  if (operation === 'prepare_action') {
+    if (bindings.size >= 32) return { error: 'QUEUE_FULL' };
+    const activation = args.action === 'set_checked' ? activationLabel(element) : {};
+    if (activation.error) return { error: activation.error };
+    const token = nonce();
+    bindings.set(token, { element, activator: activation.label || element, operation: args.action });
+    return { ...diagnostic(element), approval_token: token };
+  }
+  if (operation === 'get_text') return readText(element);
   if (!activator && operation === 'set_checked') {
     const activation = activationLabel(element);
     if (activation.error) return { error: activation.error };
     activator = activation.label;
   }
   activator ||= element;
-  if (!visible(activator)) return { error: 'ELEMENT_NOT_VISIBLE' };
-  if (disabled(element)) return { error: 'ELEMENT_DISABLED' };
-  if (operation === 'type_text' && (!editable(element) || element.matches('input[type="file"]'))) {
-    return { error: 'ELEMENT_NOT_EDITABLE' };
-  }
-  if (operation === 'type_text' && readonly(element)) return { error: 'ELEMENT_READONLY' };
-  if (operation === 'select_option' && !element.matches('select')) return { error: 'ELEMENT_NOT_EDITABLE' };
-  if (operation === 'set_checked' && !element.matches('input[type="checkbox"],input[type="radio"]')) {
-    return { error: 'ELEMENT_NOT_EDITABLE' };
-  }
-  if (operation === 'set_checked' && element.type === 'radio' && !args.checked) return { error: 'HANDOFF_REQUIRED' };
+  const blocked = actionBlocker(element, activator);
+  if (blocked) return blocked;
   if (operation === 'scroll') {
     element.scrollBy({ left: args.delta_x || 0, top: args.delta_y, behavior: 'instant' });
     return { x: element.scrollLeft, y: element.scrollTop };
   }
-  const link = element.closest('a[href]');
-  const labelControl = element.closest('label')?.control;
-  if (element.matches('input[type="file"]') || labelControl?.matches('input[type="file"]') ||
-      (link && (link.hasAttribute('download') || link.target === '_blank'))) return { error: 'HANDOFF_REQUIRED' };
-  activator.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-  const rect = activator.getBoundingClientRect();
-  const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
-  const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
-  if (right <= left || bottom <= top) return { error: 'ELEMENT_NOT_VISIBLE' };
-  const x = (left + right) / 2, y = (top + bottom) / 2;
-  const hitAtPoint = () => {
-    let hit = document.elementFromPoint(x, y);
-    while (hit?.shadowRoot) {
-      const deeper = hit.shadowRoot.elementFromPoint?.(x, y);
-      if (!deeper || deeper === hit) break;
-      hit = deeper;
-    }
-    return hit;
-  };
-  let hit = hitAtPoint();
-  const indicator = globalThis.__domagentSharingHost;
-  if (indicator?.isConnected && ignored(hit)) {
-    // Ignore only our own cosmetic banner, never a site's blocking overlay.
-    const display = indicator.style.getPropertyValue('display');
-    const priority = indicator.style.getPropertyPriority('display');
-    try {
-      indicator.style.setProperty('display', 'none', 'important');
-      hit = hitAtPoint();
-    } finally {
-      if (display) indicator.style.setProperty('display', display, priority);
-      else indicator.style.removeProperty('display');
-    }
-  }
-  let reached = false;
-  for (let node = hit; node; node = parent(node)) {
-    if (node === activator) { reached = true; break; }
-  }
-  if (!reached && activator.matches('label') && hit === activator.control &&
-      hit?.matches('input[type="checkbox"],input[type="radio"]')) reached = true;
-  if (!reached) return { error: 'ELEMENT_OBSCURED' };
-  if (operation === 'click') {
-    if (element.matches('input,textarea,select,button,a[href],[tabindex]')) {
-      element.focus({ preventScroll: true });
-      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-      if (disabled(element)) return { error: 'OPERATION_FAILED' };
-    }
-    element.click();
-    return { clicked: true, input_mode: 'dom' };
-  }
-  if (operation === 'set_checked') {
-    if (element.checked !== args.checked) activator.click();
-    if (!element.isConnected || (activator !== element && activator.control !== element)) return { error: 'ELEMENT_STALE' };
-    if (element.checked !== args.checked) return { error: 'OPERATION_FAILED' };
-    return { checked: element.checked, input_mode: 'dom' };
-  }
-  if (operation === 'select_option') {
-    const options = [...element.options].filter(option => option.value === args.value);
-    if (!options.length) return { error: 'OPTION_NOT_FOUND' };
-    if (options.length > 1) return { error: 'ELEMENT_AMBIGUOUS' };
-    if (options[0].disabled || options[0].parentElement?.matches('optgroup:disabled')) {
-      return { error: 'ELEMENT_DISABLED' };
-    }
-    if (element.multiple) return { error: 'HANDOFF_REQUIRED' };
-    element.value = args.value;
-    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-    if (element.value !== args.value) return { error: 'OPERATION_FAILED' };
-    return { selected: args.value, input_mode: 'dom' };
-  }
-  if (operation === 'press_key') {
-    element.focus();
-    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-    element.dispatchEvent(new KeyboardEvent('keydown', { key: args.key, bubbles: true, composed: true, cancelable: true }));
-    element.dispatchEvent(new KeyboardEvent('keyup', { key: args.key, bubbles: true, composed: true, cancelable: true }));
-    return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
-  }
-  if (operation === 'type_text') {
-    element.focus();
-    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-    let inputMode = 'dom';
-    if (element.isContentEditable) {
-      const selection = document.getSelection();
-      if (!selection || typeof document.execCommand !== 'function') return { error: 'INPUT_REJECTED' };
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      selection.removeAllRanges(); selection.addRange(range);
-      const accepted = document.execCommand('insertText', false, args.text);
-      if (!accepted && element.textContent !== args.text) return { error: 'INPUT_REJECTED' };
-      inputMode = 'dom_editing';
-    } else {
-      const before = new InputEvent('beforeinput', {
-        bubbles: true, composed: true, cancelable: true, inputType: 'insertReplacementText', data: args.text,
-      });
-      if (!element.dispatchEvent(before)) return { error: 'INPUT_REJECTED' };
-      if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-      const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, args.text);
-      element.dispatchEvent(new InputEvent('input', {
-        bubbles: true, composed: true, inputType: 'insertReplacementText', data: args.text,
-      }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-    await new Promise(resolve => setTimeout(resolve, 150));
-    if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-    if ((element.isContentEditable ? element.textContent : element.value) !== args.text) {
-      return { error: 'INPUT_NOT_APPLIED' };
-    }
-    return { typed: true, input_mode: inputMode, verification: 'dom_after_reconciliation' };
-  }
+  const obstruction = hitBlocker(element, activator);
+  if (obstruction) return obstruction;
+  if (Object.hasOwn(actions, operation)) return actions[operation](element, activator);
   return { error: 'CAPABILITY_UNAVAILABLE' };
 }

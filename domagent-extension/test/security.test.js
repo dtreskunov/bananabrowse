@@ -34,7 +34,7 @@ test('manifests open the app window from the toolbar and keep site access option
     assert.equal(manifest.sidebar_action, undefined);
     assert.equal(manifest.host_permissions, undefined);
     assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
-    assert.equal(manifest.version, '6.1.0');
+    assert.equal(manifest.version, '6.1.1');
   }
   const manifest = JSON.parse(readFileSync(new URL('../firefox/manifest.json', import.meta.url), 'utf8'));
   assert(manifest.permissions.includes('sessions'));

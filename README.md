@@ -14,7 +14,7 @@ browser profile.
 
 ## Version
 
-Service **6.1.0-beta.1**, extension **6.1.0**, browser wire **v6**, DB schema **6**.
+Service **6.1.0-beta.2**, extension **6.1.1**, browser wire **v6**, DB schema **6**.
 v6 is a clean break from v5: use a new database, re-register browsers and
 re-pair agents. See [the v6 upgrade notes](docs/V6-UPGRADE.md) and
 [architecture](docs/ARCHITECTURE.md).

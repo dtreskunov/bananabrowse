@@ -112,27 +112,26 @@ function shapeOf(value) {
   }
   return { type: value === null ? 'null' : typeof value };
 }
-function storeArtifact(hub, agentId, result, args) {
-  const value = result?.value ?? null;
-  const extension = args.artifact_name?.split('.').pop()?.toLowerCase();
-  let data, mime, shape;
-  if (typeof value === 'string' && (args.artifact_encoding ?? 'utf8') === 'base64') {
+function encodeArtifact(value, args) {
+  const encoding = args.artifact_encoding ?? 'utf8';
+  const mimeOr = fallback => args.artifact_mime || MIME_BY_EXTENSION[args.artifact_name?.split('.').pop()?.toLowerCase()] || fallback;
+  if (typeof value !== 'string') {
+    requireValue(encoding === 'utf8', 'INVALID_RESULT');
+    return { data: Buffer.from(JSON.stringify(value), 'utf8'), mime: args.artifact_mime || 'application/json', shape: shapeOf(value) };
+  }
+  if (encoding === 'base64') {
     const compact = value.replace(/\s+/g, '');
     requireValue(/^[A-Za-z0-9+/]*={0,2}$/.test(compact) && compact.length % 4 !== 1, 'INVALID_RESULT');
-    data = Buffer.from(compact, 'base64');
-    mime = args.artifact_mime || MIME_BY_EXTENSION[extension] || 'application/octet-stream';
-  } else if (typeof value === 'string') {
-    data = Buffer.from(value, 'utf8');
-    mime = args.artifact_mime || MIME_BY_EXTENSION[extension] || 'text/plain';
-    if (mime === 'application/json') {
-      try { shape = shapeOf(JSON.parse(value)); } catch { /* the page chose the bytes; shape is best effort */ }
-    }
-  } else {
-    requireValue((args.artifact_encoding ?? 'utf8') === 'utf8', 'INVALID_RESULT');
-    data = Buffer.from(JSON.stringify(value), 'utf8');
-    mime = args.artifact_mime || 'application/json';
-    shape = shapeOf(value);
+    return { data: Buffer.from(compact, 'base64'), mime: mimeOr('application/octet-stream') };
   }
+  const mime = mimeOr('text/plain');
+  return { data: Buffer.from(value, 'utf8'), mime, shape: mime === 'application/json' ? jsonShape(value) : undefined };
+}
+function jsonShape(text) {
+  try { return shapeOf(JSON.parse(text)); } catch { return undefined; /* the page chose the bytes; shape is best effort */ }
+}
+function storeArtifact(hub, agentId, result, args) {
+  const { data, mime, shape } = encodeArtifact(result?.value ?? null, args);
   const meta = hub.artifacts.put(agentId, data, { mime, name: args.artifact_name || null, source: 'evaluate_script' });
   return { artifact: publicArtifact(hub, meta), ...(shape ? { shape } : {}),
     ...(ARTIFACT_TEXT_MIME.test(mime) ? { preview: data.subarray(0, 600).toString('utf8').replace(/\uFFFD+$/, '') } : {}),

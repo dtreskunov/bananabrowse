@@ -20,8 +20,8 @@ service, extension and UI to strict TypeScript with no behaviour change; the
 service now runs from `dist/` after `npm run build:service`.
 
 Before tagging, run the unit/MCP tests, build both extensions, run the
-real-browser suite (Chrome and native Firefox) and `npm run check` (typecheck plus
-syntax check), then commit
+real-browser suite (Chrome and native Firefox) and `npm run check` (formatting, lint,
+typecheck and syntax check), then commit
 and tag the exact tested revision. Package only the built extension directories
 and `git archive` source; never include runtime state, credentials, browser test
 profiles or `node_modules`. Publish all assets together, download them again and

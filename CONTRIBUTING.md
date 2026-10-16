@@ -52,6 +52,11 @@ differences belong in the adapter and must be advertised as capabilities.
 git clone git@github.com:vaishnavucv/domagent.git
 cd domagent
 
+# Lint/format tooling and the pre-commit hook
+npm ci --ignore-scripts
+npx husky
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+
 # Install MCP server dependencies
 cd domagent-mcp
 npm ci --ignore-scripts
@@ -79,8 +84,9 @@ colocated `<Name>.css` that the component imports; global resets and shared
 classes live in `ui/src/styles/global.css` and design tokens in
 `ui/src/styles/themes/default.css`. Tests stay JavaScript and run against the
 sources through `tsx`; the real-browser suite runs against the compiled service.
-`npm run typecheck` checks all three projects; `npm run check` adds syntax
-checks for the remaining JavaScript.
+`npm run typecheck` checks all three projects. From the repository root,
+`npm run check` runs `format:check`, `lint`, the typechecks and syntax checks for
+the remaining JavaScript.
 
 Then load the extension for the browser you want to work on:
 
@@ -180,6 +186,7 @@ For non-trivial changes, open an issue first to discuss the approach. This preve
 - [ ] Changes work in the target browser(s)
 - [ ] MCP server starts without errors after the change
 - [ ] Extension loads without errors in the browser console
+- [ ] `npm run check` passes (formatting, lint, types)
 - [ ] Commit messages follow the guidelines below
 - [ ] No `console.log` debug statements left in production code (use `console.error` for intentional logs, consistent with existing code)
 
@@ -227,12 +234,20 @@ refactor: simplify tab resolution logic in Chrome background script
 
 ## Code Style
 
-There is no automated linter configured yet. Follow the patterns already present in the file you are editing.
+Formatting and linting match nanoclaw-v2 and are configured at the repository root:
+
+- **Prettier** (`.prettierrc`: single quotes, 120 columns) formats TypeScript,
+  JavaScript and CSS. Docs, JSON, YAML and HTML keep their authored layout
+  (`.prettierignore`). `npm run format` rewrites; the husky pre-commit hook
+  formats staged code files automatically.
+- **ESLint** (`eslint.config.js`): `@eslint/js` and `typescript-eslint`
+  recommended rules. Unused variables are errors unless prefixed with `_`;
+  explicit `any` and catch-all `catch` blocks are warnings. `npm run lint:fix`
+  applies safe fixes. Disable a rule only inline, with a `-- reason`.
+- The Prettier reformat commit is listed in `.git-blame-ignore-revs`.
 
 ### General rules
 
-- **Indentation:** 2 spaces (no tabs)
-- **Quotes:** Single quotes for strings in TypeScript and JavaScript
 - **Semicolons:** Use semicolons, consistent with the secure-pairing runtime
 - **Comments:** Use plain English; comment the *why*, not the *what*
 - **Error handling:** Return explicit typed failures and metadata-only diagnostics;

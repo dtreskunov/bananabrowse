@@ -126,6 +126,72 @@ function fixture(browser = 'chrome') {
   return { api, calls, adapter };
 }
 
+test('query_all is a bounded read with optional row waits, artifacts and field diagnostics', async () => {
+  const f = fixture('firefox');
+  const grant = { tabId: 100, windowId: 10, protected_origins: [] };
+  const args = { selector: '.row', fields: { title: { selector: '.title' } }, max_output_bytes: 1024 };
+  const rows = Array.from({ length: 3 }, () => ({ title: 'x'.repeat(400) }));
+  const extracted = {
+    document: 'fixture-document',
+    scope: 'top-level-and-open-shadow-roots',
+    rows,
+    matched_count: 3,
+    returned_count: 3,
+    rows_truncated: false,
+    field_issues: [],
+    truncated: false,
+  };
+  const operations = [];
+  let attempts = 0;
+  let mode = 'delayed';
+  f.api.scripting.executeScript = async ({ args: [operation] }) => {
+    operations.push(operation);
+    if (operation === 'inspect')
+      return [
+        { result: { url: 'https://site.example/', document_nonce: 'fixture-document', ready_state: 'complete' } },
+      ];
+    assert.equal(operation, 'query_all');
+    attempts++;
+    if (mode === 'missing' || (mode === 'delayed' && attempts === 1))
+      return [{ result: { error: 'ELEMENT_NOT_FOUND' } }];
+    if (mode === 'ambiguous')
+      return [{ result: { error: 'ELEMENT_AMBIGUOUS', query_field: 'title', row_index: 0, secret: 'private' } }];
+    return [{ result: extracted }];
+  };
+  assert(f.adapter.capabilities().includes('query_all'));
+  const preview = await f.adapter.prepareAction(grant, 'query_all', args);
+  assert.equal(preview.approval_token, undefined);
+  assert(!operations.includes('prepare_action'));
+  const compact = await f.adapter.execute(grant, 'query_all', { ...args, timeout_ms: 100 }, () => {}, preview);
+  assert.equal(attempts, 2);
+  assert.equal(compact.returned_count, 1);
+  assert.equal(compact.matched_count, 3);
+  assert.equal(compact.rows_truncated, true);
+  assert.deepEqual(
+    await f.adapter.execute(grant, 'query_all', { ...args, return_as: 'artifact' }, () => {}),
+    extracted,
+  );
+  mode = 'ambiguous';
+  const beforeAmbiguous = attempts;
+  await assert.rejects(
+    f.adapter.execute(grant, 'query_all', { ...args, timeout_ms: 1000 }, () => {}),
+    (error) =>
+      error.code === 'ELEMENT_AMBIGUOUS' && error.query_field === 'title' && error.row_index === 0 && !error.secret,
+  );
+  assert.equal(attempts, beforeAmbiguous + 1);
+  mode = 'missing';
+  await assert.rejects(
+    f.adapter.execute(grant, 'query_all', args, () => {}),
+    /ELEMENT_NOT_FOUND/,
+  );
+  await assert.rejects(
+    f.adapter.execute(grant, 'query_all', { ...args, timeout_ms: 1 }, () => {}),
+    (error) => error.code === 'WAIT_TIMEOUT' && error.last_error === 'ELEMENT_NOT_FOUND',
+  );
+  assert(!operations.includes('prepare_action'));
+  assert(!f.calls.some(([operation]) => ['update', 'move', 'sidebar', 'panel'].includes(operation)));
+});
+
 test('inspection refusal diagnostics are fixed codes and never expose raw browser URLs or errors', async () => {
   const cases = [
     ['Missing host permission for the tab https://private.example/?secret=yes', 'permission_denied'],

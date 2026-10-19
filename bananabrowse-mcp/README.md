@@ -1,6 +1,6 @@
 # BananaBrowse service (v6)
 
-Self-hosted MCP server and browser hub. Service **1.0.0-beta.1**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **1.0.0-beta.2**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -73,13 +73,108 @@ Proxy idle timeouts must exceed 30 s. Long MCP calls (`pair_browser`,
 `request_session`, `request_handoff`) stream SSE keepalives every 15 s and can
 wait up to 600 s.
 
+## Agent workflow and recovery
+
+Check `list_sessions` before `request_session`: an appropriate attached session
+can be reused, while every `request_session` asks for a new tab group.
+`list_browsers.online` is a point-in-time connection check, not a reservation.
+`BROWSER_OFFLINE` can mean either a closed window or connection loss; check
+sessions before retrying a failed request so an approved group is not duplicated.
+`SESSION_DETACHED` means the existing session is not yet usable, for example
+while reconnecting or awaiting Chrome reattachment confirmation.
+Session-request offline failures include `offline_reason` when observed:
+`graceful_disconnect`, `connection_lost`, `heartbeat_timeout`,
+`connection_replaced`, `service_stopped`, or `unknown`. Recent observations
+expire after 90 seconds; they are not a claim about the current window state.
+An approved request that disconnects before inventory returns its committed
+detached session, rather than inviting a retry that creates another group.
+
+Start with `get_page_snapshot`. `inspect_element` is an immediate read-only
+selector/readiness probe: zero matches are missing, one has readiness details,
+and multiple matches are ambiguous. It does not focus or scroll. A successful
+DOM action receipt is not proof of the application's intended outcome; inspect
+the resulting page. After `OUTCOME_UNKNOWN`, never blindly replay the mutation.
+
+Check `list_tabs.capabilities` before optional operations. Chrome supports
+screenshots; Firefox requires `tabs.captureTab`, which may be unavailable.
+Use a DOM snapshot when screenshots are unsupported. `max_output_bytes` bounds
+serialized MCP output including its wrapper; `max_text_chars` applies only to
+text-extraction tools, not arbitrary script results. For bulk script data,
+use `return_as: "artifact"` and download the result.
+
+Common page failures include `INVALID_SELECTOR` (fix CSS syntax),
+`ELEMENT_AMBIGUOUS` (narrow the selector or use a snapshot ref),
+`ELEMENT_NOT_FOUND` (probe or wait for content), and visibility/obstruction
+errors (diagnose with `inspect_element`). `WAIT_TIMEOUT.last_error` identifies
+the readiness condition that did not resolve. Tool errors include recovery
+hints where applicable.
+
+## Structured extraction
+
+`query_all` reads rendered rows without arbitrary scripts, scrolling, focus
+changes or other mutations. It uses the current document and open shadow roots;
+iframes, closed shadow roots and extension controls are excluded.
+
+```json
+{
+  "tab_id": "t12",
+  "description": "Read listing titles, prices, and links to compare the available items.",
+  "selector": ".listing",
+  "fields": {
+    "title": { "selector": ".title" },
+    "price": { "selector": ".price" },
+    "href": { "selector": "a", "attribute": "href" }
+  },
+  "limit": 50,
+  "timeout_ms": 0,
+  "max_text_chars": 4000,
+  "max_output_bytes": 16384,
+  "return_as": "value"
+}
+```
+
+Selectors are site-specific; use a snapshot or read-only inspection to discover
+them. Field selectors are relative to each row, including its open shadow roots;
+`:scope` selects the row itself. Each field must match at most one rendered
+element. Omit `attribute` for rendered text, with editable values and hidden
+content redacted. Attributes are limited to `href`, `src`, `title`, `alt`,
+`datetime`, and `aria-label`; form values and HTML are not exposed. `href`/`src`
+are resolved against the element's base URL and restricted to HTTP(S).
+
+Results contain `document`, `scope`, `rows`, `matched_count`, `returned_count`,
+`rows_truncated`, `field_issues` and `truncated`. Counts cover rendered,
+in-scope rows present at extraction time, not the site's total dataset.
+`field_issues` names the zero-based row, field, and reason (`missing`,
+`redacted`, `unsupported_url`, or `text_truncated`). Unavailable values are
+`null`; empty rendered text is `""`. Missing fields are not mistaken for
+complete extraction. Multiple matches fail with `ELEMENT_AMBIGUOUS`, including
+`query_field` and `row_index`; invalid field selectors report the same location
+with `INVALID_SELECTOR`. No rows yields `ELEMENT_NOT_FOUND`, or `WAIT_TIMEOUT`
+with `last_error` after a positive wait.
+
+Limits: 1–20 fields, 50 rows by default (maximum 100), and 4000 characters per
+text field (maximum 16000). Field names are 1–40 ASCII letters/digits/underscores,
+start with a letter, and cannot be `constructor` or `prototype`. Text truncation
+never splits a surrogate pair. `timeout_ms` defaults to 0 for row readiness and
+is capped at 10000; existing document-readiness checks still apply.
+
+Inline output uses the normal 16 KiB budget (maximum 64 KiB), including the MCP
+wrapper. Only complete rows are removed to meet it; if one row cannot fit,
+`RESULT_TOO_LARGE` is returned. `return_as: "artifact"` with optional
+`artifact_name: "listings.json"` stores the JSON result through the existing
+artifact system, bypassing inline trimming but not the requested row/text
+limits or transport/artifact caps. It does not collect additional pages.
+Check tab capabilities first: `query_all` requires extension 1.0.0-beta.2
+(numeric version 0.9.0.2). Older extensions return `CAPABILITY_UNAVAILABLE`
+before dispatch, with no script fallback.
+
 ## State
 
 SQLite holds browsers (public key, hashed refresh tokens), pairings, sessions
 and tab ID rows. Sessions last 7 days from the last time the browser reported
 their group alive, and are deleted as soon as an inventory shows the group gone.
 No commands or activity history is stored on the server. Page content is
-stored only as artifacts an agent explicitly creates (`evaluate_script` with
+stored only as artifacts an agent explicitly creates (`evaluate_script` or `query_all` with
 `return_as: "artifact"`): agent-scoped, 24 h TTL, 64 MiB / 100 per agent, oldest
 evicted first, pruned when the agent is removed from the configuration. Access
 tokens, pairing codes, pending requests and live tab state are in memory, so a

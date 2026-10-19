@@ -9,8 +9,23 @@ npm --prefix bananabrowse-mcp run build
 npm --prefix bananabrowse-mcp run check
 ```
 
-Real-browser tests run in the Playwright container. Native Firefox needs an
-official Firefox 153+ build mounted into it:
+Use Podman with the Playwright image to test in real browsers, even when no
+browser is installed on the host. The image includes Chromium and Firefox for
+page-helper tests and Chromium for extension end-to-end tests. From the
+repository root, after building:
+
+```sh
+podman run --rm --userns=keep-id --ipc=host \
+  -v "$PWD:/work:rw" -w /work/bananabrowse-mcp \
+  mcr.microsoft.com/playwright:v1.58.2-noble \
+  node node_modules/@playwright/test/cli.js test \
+  --config ../bananabrowse-extension/playwright.config.cjs \
+  query-all.spec.cjs app-window.spec.cjs
+```
+
+Native Firefox extension end-to-end tests require an official Firefox 153+
+build mounted into the container; the bundled Playwright Firefox is sufficient
+for page-helper tests, not a substitute for that extension test:
 
 ```sh
 podman run --rm --userns=keep-id --ipc=host \
@@ -38,6 +53,10 @@ What they cover, against the real service over TLS with a real MCP client:
   tab IDs.
 - `page-actions.spec.cjs`, `readiness-editing.spec.cjs`: page helper behavior
   in both engines.
+- `query-all.spec.cjs`: structured extraction in both engines, including scoped
+  open shadow roots, redaction, URL handling, Unicode limits, field errors and
+  preservation of focus, scrolling and snapshot refs. The app-window fixtures
+  also exercise `query_all` through the real MCP service and extension.
 
 Permission prompts are pre-granted in disposable profiles (Chrome manifest
 `host_permissions`, Firefox's permission store). Physical permission dialogs,

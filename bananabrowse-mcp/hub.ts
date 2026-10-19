@@ -194,6 +194,8 @@ function waitFor<T = unknown>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let done = false;
+    // Registration can settle synchronously before returning its cleanup.
+    let cleanup: (() => unknown) | void = undefined;
     const finish: Finish<T> = (error, value) => {
       if (done) return;
       done = true;
@@ -206,7 +208,8 @@ function waitFor<T = unknown>(
     const abort = () => finish(signal?.reason instanceof Fault ? signal.reason : new Fault('COMMAND_CANCELLED'));
     const timer = setTimeout(() => finish(new Fault('COMMAND_EXPIRED')), Math.max(1, deadline - now()));
     signal?.addEventListener('abort', abort, { once: true });
-    const cleanup = register(finish);
+    cleanup = register(finish);
+    if (done) cleanup?.();
     if (signal?.aborted) abort();
   });
 }
@@ -227,6 +230,7 @@ export class Hub {
   agents: Map<string, Agent>;
   artifacts: ArtifactStore;
   connections: Map<string, Conn>;
+  recentDisconnects: Map<string, { reason: string; at: number }>;
   sockets: Set<WebSocket>;
   live: Map<string, Live>;
   calls: Map<string, Call>;
@@ -248,6 +252,7 @@ export class Hub {
     this.artifacts = new ArtifactStore({ directory: config.artifacts ?? null, now: this.now });
     this.artifacts.prune([...this.agents.keys()]);
     this.connections = new Map();
+    this.recentDisconnects = new Map();
     this.sockets = new Set();
     this.live = new Map();
     this.calls = new Map();
@@ -337,14 +342,14 @@ export class Hub {
         });
     });
     // Let already-received frames (typically a final `bye`) finish before tearing the connection down.
-    ws.on('close', () => {
+    ws.on('close', (closeCode) => {
       clearTimeout(timeout);
       this.sockets.delete(ws);
-      void conn.processing.finally(() => this.disconnected(conn));
+      void conn.processing.finally(() => this.disconnected(conn, 'BROWSER_OFFLINE', closeCode));
     });
     ws.on('error', () => {
       audit('ws_failure', { code: 'CONNECTION_ERROR' });
-      this.disconnected(conn);
+      this.disconnected(conn, 'CONNECTION_ERROR');
       ws.terminate();
     });
   }
@@ -364,6 +369,12 @@ export class Hub {
   online(browserId: string): Conn | null | undefined {
     const conn = this.connections.get(browserId);
     return this.current(conn) ? conn : null;
+  }
+  offlineFault(browserId: string): Fault {
+    const recent = this.recentDisconnects.get(browserId);
+    return Object.assign(new Fault('BROWSER_OFFLINE'), {
+      offline_reason: recent && this.now() - recent.at < LIVENESS_MS ? recent.reason : 'unknown',
+    });
   }
   agentsFor(browserId: string): (AgentInfo | undefined)[] {
     return this.store
@@ -430,6 +441,7 @@ export class Hub {
       conn.browser_id = browser.id;
       conn.lastSeen = this.now();
       this.connections.set(browser.id, conn);
+      this.recentDisconnects.delete(browser.id);
       this.store.touchBrowser(browser.id);
       conn.agentsSignature = JSON.stringify(this.agentsFor(browser.id));
       this.send(conn, {
@@ -441,7 +453,7 @@ export class Hub {
         agents: JSON.parse(conn.agentsSignature),
         sessions: this.sessionsFor(browser.id),
       });
-      audit('browser_connected', { browser_id: browser.id });
+      audit('browser_connected', { browser_id: browser.id, connection_id: conn.connection_id });
       return;
     }
     if (m.type === 'bye') {
@@ -809,7 +821,7 @@ export class Hub {
   async requestSession(agentId: string, args: Wire, signal?: AbortSignal): Promise<Wire> {
     requireValue(validShortId('b', args.browser_id) && this.store.paired(agentId, args.browser_id), 'NOT_FOUND', 404);
     const conn = this.online(args.browser_id);
-    requireValue(conn, 'BROWSER_OFFLINE');
+    if (!conn) throw Object.assign(this.offlineFault(args.browser_id), { dispatch_status: 'not_dispatched' });
     const urls = args.urls || [];
     for (const url of urls) {
       try {
@@ -839,6 +851,13 @@ export class Hub {
     };
     const deadline = this.now() + (args.timeout_seconds ?? 300) * 1000;
     this.sessionRequests.set(request.id, request);
+    audit('session_requested', {
+      browser_id: args.browser_id,
+      agent_id: agentId,
+      request_id: request.id,
+      connection_id: conn.connection_id,
+      request_phase: 'awaiting_approval',
+    });
     this.send(conn, {
       type: 'session.request',
       request_id: request.id,
@@ -873,7 +892,7 @@ export class Hub {
         signal,
         (finish) => {
           request.check = () => {
-            if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId)) finish();
+            if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId) || !this.current(conn)) finish();
           };
           request.check();
           return () => {
@@ -919,7 +938,14 @@ export class Hub {
       title: request.title,
     });
     request.session_id = row.id;
-    audit('session_created', { browser_id: conn.browser_id, agent_id: request.agent_id, session_id: row.id });
+    audit('session_created', {
+      browser_id: conn.browser_id,
+      agent_id: request.agent_id,
+      session_id: row.id,
+      request_id: request.id,
+      connection_id: conn.connection_id,
+      request_phase: 'approved',
+    });
     this.send(conn, {
       type: 'session.created',
       request_id: request.id,
@@ -1059,6 +1085,7 @@ export class Hub {
     const target = this.findTarget(agentId, tabId);
     const live = target.live;
     const probe = { live, target, operation };
+    if (operation === 'query_all') requireExtension(live.conn, 'query_all');
     this.checkAuthority(probe);
     if (operation === 'navigate') {
       try {
@@ -1305,21 +1332,40 @@ export class Hub {
   }
 
   // ---------- lifecycle ----------
-  disconnected(conn: Conn, code = 'BROWSER_OFFLINE'): void {
+  disconnected(conn: Conn, code = 'BROWSER_OFFLINE', closeCode?: number): void {
     if (!conn.browser_id || conn.closed) return;
     conn.closed = true;
     conn.authenticated = false;
-    if (this.connections.get(conn.browser_id) === conn) this.connections.delete(conn.browser_id);
+    if (this.connections.get(conn.browser_id) === conn) {
+      this.connections.delete(conn.browser_id);
+      const reasons: Record<string, string> = {
+        REPLACED: 'connection_replaced',
+        HEARTBEAT_TIMEOUT: 'heartbeat_timeout',
+        SERVICE_STOPPED: 'service_stopped',
+        BROWSER_OFFLINE: 'connection_lost',
+        CONNECTION_ERROR: 'connection_lost',
+      };
+      const reason = conn.graceful ? 'graceful_disconnect' : (reasons[code] ?? 'unknown');
+      this.recentDisconnects.set(conn.browser_id, { reason, at: this.now() });
+    }
     for (const live of [...this.live.values()]) {
       if (live.conn !== conn) continue;
       this.invalidate(live, 'BROWSER_OFFLINE');
       this.live.delete(live.session_id);
     }
     for (const request of this.sessionRequests.values()) {
-      if (request.conn === conn && !request.session_id) request.finish?.(new Fault('BROWSER_OFFLINE'));
+      if (request.conn === conn) {
+        if (request.session_id) request.check?.();
+        else request.finish?.(this.offlineFault(conn.browser_id));
+      }
     }
     this.dropCodes(conn.browser_id, 'BROWSER_OFFLINE');
-    audit('browser_disconnected', { browser_id: conn.browser_id, code: conn.graceful ? 'GRACEFUL' : code });
+    audit('browser_disconnected', {
+      browser_id: conn.browser_id,
+      connection_id: conn.connection_id,
+      code: conn.graceful ? 'GRACEFUL' : code,
+      ...(closeCode === undefined ? {} : { close_code: closeCode }),
+    });
   }
   reconcile(): void {
     for (const conn of [...this.connections.values()]) {
@@ -1337,6 +1383,8 @@ export class Hub {
     }
   }
   sweep(): void {
+    for (const [id, recent] of this.recentDisconnects)
+      if (this.now() - recent.at >= LIVENESS_MS) this.recentDisconnects.delete(id);
     for (const [key, entry] of this.codes)
       if (entry.expires <= this.now()) {
         this.codes.delete(key);
@@ -1351,7 +1399,7 @@ export class Hub {
     }
     for (const conn of [...this.connections.values()]) {
       if (this.now() - conn.lastSeen >= LIVENESS_MS) {
-        this.disconnected(conn);
+        this.disconnected(conn, 'HEARTBEAT_TIMEOUT');
         conn.ws.terminate();
       } else if (this.now() - conn.lastPing >= HEARTBEAT_MS) {
         conn.lastPing = this.now();

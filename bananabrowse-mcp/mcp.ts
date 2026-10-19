@@ -35,7 +35,7 @@ import {
   failureCode,
   audit,
 } from './errors.js';
-import { compactResult, textResult } from '../shared/results.js';
+import { compactResult, queryResult, textResult } from '../shared/results.js';
 import { SERVICE_VERSION } from './version.js';
 import type { Hub } from './hub.js';
 import type { Agent } from './config.js';
@@ -54,10 +54,14 @@ const NOTES: Record<string, string> = {
     'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
   get_interactive_elements:
     'Prefer snapshots for actionable refs. Geometry is viewport-relative. Hidden inputs are excluded. Explicit truncation.',
+  query_all:
+    'Read structured rows using known CSS selectors, without scripting, focus, scrolling or mutations. Fields select a single rendered descendant per row (or :scope for the row), including open shadow roots; no iframes/closed roots. Missing/redacted fields are null with field_issues; multiple field matches fail ELEMENT_AMBIGUOUS. No matching rows: ELEMENT_NOT_FOUND, or WAIT_TIMEOUT after a positive timeout_ms (default 0). max_text_chars applies per text field. Returns matched_count, returned_count and explicit row/text truncation. Inline budgets retain complete rows; use return_as:"artifact" for bulk extraction. Check tab capabilities; older extensions may not support query_all.',
   click:
-    'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events. A click may only open a menu or change the page: take a new snapshot before the next ref-based action. For links, navigating to the snapshot href is often more reliable.',
+    'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events. clicked:true confirms dispatch, not the intended application outcome: inspect the resulting page. Take a new snapshot before the next ref-based action. For links, navigating to the snapshot href is often more reliable.',
   inspect_element:
-    'Immediate read-only readiness diagnosis; no timeout_ms. Does not focus/scroll/mutate. Hard output cap 4 KiB.',
+    'Immediate read-only selector/readiness probe; no timeout_ms. Returns matches:0/state:missing, matches:1 with readiness details, or matches>1/state:ambiguous. Does not focus, scroll or mutate. Readiness is not proof an action will achieve its intended outcome. Hard output cap 4 KiB.',
+  get_screenshot:
+    "Check this tab's capabilities from list_tabs first. Available on Chrome; Firefox requires tabs.captureTab, which some environments lack. CAPABILITY_UNAVAILABLE has no automatic screenshot fallback; use a DOM snapshot instead.",
   type_text: 'Replace an editable value; dispatch DOM input/change, not native keystrokes.',
   set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
@@ -96,7 +100,7 @@ export const tools: Tool[] = [
   {
     name: 'list_browsers',
     description:
-      'Browsers paired with this agent: browser_id, user-chosen name, whether its BananaBrowse window is open (online), last_seen and paired_at. Only online browsers can start sessions. A long-offline browser with the same name as a newer one is usually a reinstalled extension; remove it with unpair_browser. Browsers offline for 30 days are removed automatically.',
+      'Browsers paired with this agent: browser_id, user-chosen name, live connection availability (online), last_seen and paired_at. online is a point-in-time observation, not a reservation; a connection may drop before the next call. Offline can mean a closed window or a connection problem. A long-offline browser with the same name as a newer one is usually a reinstalled extension; remove it with unpair_browser. Browsers offline for 30 days are removed automatically.',
     inputSchema: schema({}),
   },
   {
@@ -107,7 +111,7 @@ export const tools: Tool[] = [
   },
   {
     name: 'request_session',
-    description: `Ask the user to open a browser session (a native tab group) for a task. The user sees your purpose and starting URLs and approves or declines in their BananaBrowse window. Fails immediately with BROWSER_OFFLINE if the browser's window is closed; try another browser from list_browsers. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns the session and its tabs.`,
+    description: `Create a new browser session (a native tab group); this does not reuse an existing session. First check list_sessions for an appropriate attached session. The user sees your purpose and starting URLs and approves or declines in their BananaBrowse window. Fails with BROWSER_OFFLINE if no live connection is available, including transient connection loss. Check list_sessions before retrying a failed request to avoid duplicate groups. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns the session and its tabs.`,
     inputSchema: schema(
       {
         browser_id: BROWSER_ID_SCHEMA,
@@ -183,7 +187,7 @@ export const tools: Tool[] = [
   {
     name: 'list_artifacts',
     description:
-      'Artifacts you created with evaluate_script return_as:"artifact" that have not expired (24 hours) or been evicted (quota 64 MiB / 100 per agent, oldest first).',
+      'Artifacts you created with evaluate_script or query_all return_as:"artifact" that have not expired (24 hours) or been evicted (quota 64 MiB / 100 per agent, oldest first).',
     inputSchema: schema({}),
   },
   {
@@ -219,17 +223,37 @@ export const tools: Tool[] = [
 export const INSTRUCTIONS =
   "BananaBrowse lets you work in the user's real browser inside tab groups they approve. " +
   'First use: ask the user to open the BananaBrowse window (toolbar button), click Pair an agent and tell you the code; call pair_browser. ' +
-  'Then: list_browsers -> request_session(browser_id, purpose, urls) -> the user approves -> use tab_ids with page tools. ' +
-  'If the browser is offline the user has closed the BananaBrowse window; ask them to reopen it or choose another browser. ' +
+  'Then: list_sessions -> reuse an appropriate attached session, or list_browsers -> request_session(browser_id, purpose, urls) -> the user approves -> use tab_ids with page tools. request_session always creates a new group. ' +
+  'BROWSER_OFFLINE means no live connection: the window may be closed or reconnecting. Check sessions before retrying a session request; ask the user to check the window/connection or choose another browser if it stays offline. ' +
   'A stale duplicate (e.g. after an extension reinstall) can be removed with unpair_browser. ' +
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
+  'Start with get_page_snapshot; inspect_element is a read-only selector/readiness probe without focus or scrolling. Action receipts confirm dispatch, not application success: verify the resulting page. ' +
+  'For structured DOM data with known selectors, use query_all; use evaluate_script for data not available through DOM extraction. ' +
+  'Check list_tabs capabilities before optional operations such as get_screenshot. max_output_bytes bounds serialized output; max_text_chars is only for text-extraction tools, not evaluate_script. ' +
   'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user. ' +
-  'For bulk data use evaluate_script with return_as:"artifact" and download the artifact; never copy large results through the conversation.';
+  'For bulk data use query_all or evaluate_script with return_as:"artifact" and download the artifact; never copy large results through the conversation.';
 
 const HINTS: Record<string, string> = {
+  BROWSER_OFFLINE:
+    'No live browser connection is available; the window may be closed or reconnecting. Check list_sessions before retrying request_session to avoid duplicate groups. If it stays offline, ask the user to check the window and connection.',
+  SESSION_DETACHED:
+    'The session is not ready to use. Recheck list_sessions after the browser reconnects or the user confirms Chrome reattachment; do not create a duplicate group.',
+  CAPABILITY_UNAVAILABLE:
+    'Check the tab capabilities from list_tabs. Screenshots require Chrome or Firefox tabs.captureTab; use get_page_snapshot when screenshots are unavailable.',
+  ELEMENT_NOT_FOUND:
+    'Check the selector with inspect_element or take a focused snapshot. If content is still loading, use a bounded readiness wait.',
+  ELEMENT_AMBIGUOUS:
+    'The selector matched multiple elements. Narrow it or use a current snapshot ref/document; do not guess which control to activate.',
+  ELEMENT_NOT_VISIBLE:
+    'Use inspect_element to diagnose hidden content; reveal it through an appropriate visible control.',
+  ELEMENT_OBSCURED: 'Use inspect_element to identify an obstruction before taking another action.',
+  ELEMENT_DISABLED: 'Inspect the control and its prerequisites; do not repeatedly click a disabled element.',
+  INVALID_SELECTOR: 'Correct the CSS selector syntax; inspect_element can probe it without mutating the page.',
+  WAIT_TIMEOUT:
+    'Read last_error and readiness details. Inspect the current page before adjusting the selector or wait; do not blindly repeat a mutation.',
   RESULT_TOO_LARGE:
-    'Narrow the request (selector, max_elements, fewer fields). For evaluate_script, pass return_as:"artifact" to store the full result and download it instead of reading it inline.',
+    'Narrow the request (selector, max_elements, limit, fewer fields). For evaluate_script or query_all, pass return_as:"artifact" to store the result and download it instead of reading it inline.',
   ELEMENT_STALE:
     'Refs are valid only for the latest get_page_snapshot of the same document. Take a new snapshot and use its ref and document.',
   TARGET_STALE: 'The page navigated or is still loading. Call wait_for_page, then take a new snapshot.',
@@ -311,9 +335,10 @@ function jsonShape(text: string): Wire | undefined {
     return undefined;
   }
 }
-function storeArtifact(hub: Hub, agentId: string, result: Wire | undefined, args: Wire): Wire {
-  const { data, mime, shape } = encodeArtifact(result?.value ?? null, args);
-  const meta = hub.artifacts.put(agentId, data, { mime, name: args.artifact_name || null, source: 'evaluate_script' });
+function storeArtifact(hub: Hub, agentId: string, result: Wire | undefined, args: Wire, source: string): Wire {
+  const extracted = source === 'query_all' ? queryResult(result) : undefined;
+  const { data, mime, shape } = encodeArtifact(extracted ?? result?.value ?? null, args);
+  const meta = hub.artifacts.put(agentId, data, { mime, name: args.artifact_name || null, source });
   return {
     artifact: publicArtifact(hub, meta),
     ...(shape ? { shape } : {}),
@@ -325,7 +350,13 @@ function storeArtifact(hub: Hub, agentId: string, result: Wire | undefined, args
             .replace(/\uFFFD+$/, ''),
         }
       : {}),
-    execution_world: result?.execution_world,
+    ...(extracted
+      ? {
+          matched_count: extracted.matched_count,
+          returned_count: extracted.returned_count,
+          truncated: extracted.truncated,
+        }
+      : { execution_world: result?.execution_world }),
   };
 }
 export function publicArtifact(hub: Hub, meta: ArtifactMeta): Wire {
@@ -449,11 +480,11 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       );
       return { content: [{ type: 'image', data: result.data, mimeType: 'image/png' }] };
     }
-    if (name === 'evaluate_script' && args.return_as === 'artifact') {
-      return textResult(storeArtifact(hub, agent.id, result, args));
-    }
     if (['read_artifact', 'list_artifacts'].includes(name)) return textResult(result);
     try {
+      if (['evaluate_script', 'query_all'].includes(name) && args.return_as === 'artifact') {
+        return textResult(storeArtifact(hub, agent.id, result, args, name));
+      }
       return textResult(compactResult(name, result, args));
     } catch (error) {
       if (['RESULT_TOO_LARGE', 'INVALID_RESULT', 'INVALID_ARGUMENT'].includes((error as CodedError).code)) {

@@ -1,7 +1,7 @@
 # BananaBrowse architecture
 
-Status: implemented in BananaBrowse 1.0.0-beta.1 (wire v6, DB schema 6),
-2026-10-16; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
+Status: implemented in BananaBrowse 1.0.0-beta.2 (wire v6, DB schema 6),
+2026-10-19; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
 ## 1. Goals
@@ -169,7 +169,7 @@ notifications have no buttons, so all decisions happen in the window.
 
 ## 7. MCP surface (`/mcp/<agent-id>`, API key in the Authorization header)
 
-28 tools: the 13 below plus the 15 page operations.
+29 tools: the 13 below plus the 16 page operations.
 
 | Tool | Contract |
 | --- | --- |
@@ -185,11 +185,21 @@ notifications have no buttons, so all decisions happen in the window.
 | `request_handoff({tab_id, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
 | `list_artifacts()` | Caller's unexpired artifacts (metadata only) |
 | `read_artifact({artifact_id, offset?, max_bytes?})` | Byte range (default 16 KiB, max 48 KiB); UTF-8 text never split mid-character, binary as base64; `next_offset`/`eof` |
-| 15 page operations | `tab_id` plus a 40–500 character `description` shown in the feed; v5 semantics, limits and errors |
+| 16 page operations | `tab_id` plus a 40–500 character `description` shown in the feed; existing operations plus read-only `query_all` |
+
+`query_all` is a capability-advertised structured read, not script evaluation.
+It selects rendered rows and single-valued text/allowlisted-attribute fields,
+including open shadow roots within each row. It preserves redaction and
+snapshot refs, never focuses/scrolls, and does not traverse iframes or closed
+shadow roots. Missing fields are null with row/field issues; ambiguous fields
+fail. Limits are 20 fields, 100 rows and the existing text/output budgets.
+Inline compaction retains complete rows and explicit counts/truncation; artifact
+delivery stores the JSON extraction result without inline trimming. See the
+[full extraction contract](../bananabrowse-mcp/README.md#structured-extraction).
 
 ### Artifacts (6.1)
 
-`evaluate_script` with `return_as: "artifact"` stores the script result on the
+`evaluate_script` or `query_all` with `return_as: "artifact"` stores the result on the
 service instead of returning it. Strings are stored as UTF-8 (or decoded with
 `artifact_encoding: "base64"`); other values as JSON. The tool returns only a
 handle (`artifact_id`, `name`, `mime`, `bytes`, `sha256`, `expires_at`,
@@ -237,6 +247,14 @@ Errors: `NOT_FOUND` (unknown or foreign IDs), `BROWSER_OFFLINE`,
 `SESSION_DETACHED` (Chrome reattach pending), `SESSION_ENDED`,
 `TAB_NOT_IN_SESSION`, `ACTION_DECLINED`, `PAIRING_UNAVAILABLE`, plus the v5
 page errors (`DOCUMENT_NOT_CONTROLLABLE`, `OUTCOME_UNKNOWN`, ...).
+
+`BROWSER_OFFLINE` describes connection availability, not a proven window-close
+decision. `list_browsers.online` is a point-in-time observation and cannot
+guarantee the next call succeeds. Agents check `list_sessions` before requesting
+or retrying a new session: `request_session` always creates a new group.
+`inspect_element` is already a no-focus, no-scroll selector/readiness probe,
+including missing and ambiguous matches. Action receipts do not assert that
+the application achieved the agent's intended outcome.
 
 ## 8. Browser wire protocol (v6, JSON over WSS)
 

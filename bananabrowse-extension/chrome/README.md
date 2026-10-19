@@ -1,4 +1,4 @@
-# BananaBrowse for Chrome (1.0.0-beta.1)
+# BananaBrowse for Chrome (1.0.0-beta.2)
 
 Build with `npm --prefix bananabrowse-mcp run build` and load `dist/chrome` with
 **Load unpacked** (`chrome://extensions`, Developer mode). Minimum Chrome **145**.

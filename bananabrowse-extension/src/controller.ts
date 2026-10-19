@@ -132,6 +132,7 @@ const READ_OPERATIONS = [
   'get_interactive_elements',
   'inspect_element',
   'get_screenshot',
+  'query_all',
 ];
 // Tab closing waits for an explicit user approval in the BananaBrowse window; nothing closes tabs automatically.
 const CLOSE_OPERATIONS = ['close_tab', 'close_session'];

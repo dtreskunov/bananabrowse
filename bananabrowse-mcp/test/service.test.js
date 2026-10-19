@@ -13,11 +13,11 @@ import {
 } from './helpers.js';
 import { parseAgents, loadConfig } from '../config.js';
 import { hash } from '../store.js';
-import { tools } from '../mcp.js';
+import { tools, INSTRUCTIONS } from '../mcp.js';
 
 const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
 
-test('public metadata and the 28-tool catalogue', async (t) => {
+test('public metadata and the 29-tool catalogue', async (t) => {
   const fixture = await start();
   t.after(() => fixture.close());
   const health = await (await fetch(`${fixture.base}/health`)).json();
@@ -26,7 +26,7 @@ test('public metadata and the 28-tool catalogue', async (t) => {
   assert.deepEqual([metadata.service, metadata.origin], ['bananabrowse', ORIGIN]);
   const agent = await fixture.mcp();
   const listed = await agent.client.listTools();
-  assert.equal(listed.tools.length, 28);
+  assert.equal(listed.tools.length, 29);
   assert.deepEqual(
     listed.tools.slice(0, 11).map((tool) => tool.name),
     [
@@ -43,7 +43,7 @@ test('public metadata and the 28-tool catalogue', async (t) => {
       'request_handoff',
     ],
   );
-  assert.equal(tools.length, 28);
+  assert.equal(tools.length, 29);
 });
 
 test('agent authentication uses the path ID and a hashed bearer key', async (t) => {
@@ -59,10 +59,26 @@ test('agent authentication uses the path ID and a hashed bearer key', async (t) 
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
     });
+
   assert.equal((await post('/mcp/atlas', AGENT_KEY)).status, 200);
   assert.equal((await post('/mcp/atlas', OTHER_KEY)).status, 401);
   assert.equal((await post('/mcp/nobody', AGENT_KEY)).status, 401);
   assert.equal((await post('/mcp/atlas', '')).status, 401);
+});
+
+test('agent guidance explains reuse, connection uncertainty, probes and capabilities', () => {
+  const descriptions = Object.fromEntries(tools.map((tool) => [tool.name, tool.description]));
+  assert.match(INSTRUCTIONS, /list_sessions -> reuse/);
+  assert.match(INSTRUCTIONS, /window may be closed or reconnecting/);
+  assert.match(INSTRUCTIONS, /OUTCOME_UNKNOWN.*inspect before retrying/);
+  assert.match(INSTRUCTIONS, /max_text_chars.*not evaluate_script/);
+  assert.match(descriptions.request_session, /does not reuse an existing session/);
+  assert.match(descriptions.list_browsers, /point-in-time observation/);
+  assert.match(descriptions.inspect_element, /matches:0.*matches:1.*matches>1/);
+  assert.match(descriptions.inspect_element, /Does not focus, scroll or mutate/);
+  assert.match(descriptions.get_screenshot, /capabilities.*Firefox requires tabs.captureTab/);
+  assert.match(descriptions.click, /confirms dispatch, not the intended application outcome/);
+  assert.match(descriptions.evaluate_script, /return_as:"artifact"/);
 });
 
 test('agent configuration parses env entries and rejects malformed ones', () => {
@@ -243,6 +259,165 @@ test('sessions: offline fails fast, approval creates a session with server-issue
     agent.call('get_text', { tab_id: session.tabs[0].tab_id, description: DESCRIPTION }),
     /BROWSER_OFFLINE/,
   );
+});
+
+test('session approval and inventory in the same turn return the starting tabs', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension } = await paired(fixture);
+  const conn = fixture.hub.online(extension.browser_id);
+  const pending = fixture.hub.requestSession('atlas', {
+    browser_id: extension.browser_id,
+    purpose: 'Immediate inventory',
+  });
+  const request = [...fixture.hub.sessionRequests.values()][0];
+  const client_id = crypto.randomUUID();
+  fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id });
+  extension.groups.set(client_id, { client_id, title: 'Atlas', tabs: [page(22)] });
+  fixture.hub.sync(conn, { groups: extension.inventory() });
+  assert.equal((await pending).tabs.length, 1);
+  assert.equal(fixture.hub.sessionRequests.size, 0);
+});
+
+test('connection loss after listing reports an observed reason without replaying approval', async (t) => {
+  for (const graceful of [false, true]) {
+    const fixture = await start();
+    t.after(() => fixture.close());
+    const { extension, agent } = await paired(fixture);
+    assert.equal((await agent.call('list_browsers'))[0].online, true);
+    const conn = fixture.hub.online(extension.browser_id);
+    conn.graceful = graceful;
+    fixture.hub.disconnected(conn);
+    await assert.rejects(
+      agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Connection check' }),
+      (error) =>
+        error.code === 'BROWSER_OFFLINE' &&
+        error.details.offline_reason === (graceful ? 'graceful_disconnect' : 'connection_lost') &&
+        error.details.dispatch_status === 'not_dispatched' &&
+        /No live browser connection/.test(error.details.hint),
+    );
+    assert.equal(fixture.hub.sessionRequests.size, 0);
+    assert.equal(extension.messages.filter((m) => m.type === 'session.request').length, 0);
+  }
+});
+
+test('disconnect reasons expire at 90 seconds and heartbeat timeouts are distinguished', async (t) => {
+  let now = 1_800_000_000_000;
+  const fixture = await start({ now: () => now });
+  t.after(() => fixture.close());
+  const { extension } = await paired(fixture);
+  const conn = fixture.hub.online(extension.browser_id);
+  conn.graceful = true;
+  fixture.hub.disconnected(conn);
+  now += 89_999;
+  assert.equal(fixture.hub.offlineFault(extension.browser_id).offline_reason, 'graceful_disconnect');
+  now++;
+  assert.equal(fixture.hub.offlineFault(extension.browser_id).offline_reason, 'unknown');
+  fixture.hub.sweep();
+  assert.equal(fixture.hub.recentDisconnects.has(extension.browser_id), false);
+  await extension.refresh();
+  await extension.connect();
+  now += 90_000;
+  fixture.hub.sweep();
+  assert.equal(fixture.hub.online(extension.browser_id), null);
+  assert.equal(fixture.hub.offlineFault(extension.browser_id).offline_reason, 'heartbeat_timeout');
+});
+
+test('disconnect before approval rejects and a late approval cannot create a session', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension } = await paired(fixture);
+  const conn = fixture.hub.online(extension.browser_id);
+  const pending = fixture.hub.requestSession('atlas', { browser_id: extension.browser_id, purpose: 'Disconnect' });
+  const request = [...fixture.hub.sessionRequests.values()][0];
+  fixture.hub.disconnected(conn);
+  await assert.rejects(
+    pending,
+    (error) => error.code === 'BROWSER_OFFLINE' && error.offline_reason === 'connection_lost',
+  );
+  fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
+  assert.equal(fixture.hub.sessionRequests.size, 0);
+  assert.deepEqual(fixture.hub.listSessions('atlas'), []);
+});
+
+test('disconnect after approval returns the committed detached session without waiting for inventory', async (t) => {
+  for (const afterWaitRegistration of [false, true]) {
+    const fixture = await start();
+    t.after(() => fixture.close());
+    const { extension } = await paired(fixture);
+    const conn = fixture.hub.online(extension.browser_id);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const pending = fixture.hub.requestSession('atlas', { browser_id: extension.browser_id, purpose: 'Approved' });
+    const request = [...fixture.hub.sessionRequests.values()][0];
+    fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
+    if (afterWaitRegistration) await Promise.resolve();
+    fixture.hub.disconnected(conn);
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise(setImmediate);
+    assert.equal(settled, true, 'approved disconnect must settle without advancing the inventory timer');
+    const session = await pending;
+    t.mock.timers.reset();
+    assert.equal(session.state, 'detached');
+    assert.deepEqual(session.tabs, []);
+    assert.equal(fixture.hub.listSessions('atlas')[0].session_id, session.session_id);
+    assert.equal(fixture.hub.sessionRequests.size, 0);
+  }
+});
+
+test('replacement connection survives old-socket cleanup and can approve a new request', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture);
+  const previous = fixture.hub.online(extension.browser_id);
+  await extension.refresh();
+  await extension.connect();
+  const current = fixture.hub.online(extension.browser_id);
+  assert.notEqual(previous.connection_id, current.connection_id);
+  fixture.hub.disconnected(previous);
+  assert.equal(fixture.hub.online(extension.browser_id), current);
+  assert.equal(fixture.hub.recentDisconnects.has(extension.browser_id), false);
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Replacement' });
+  await extension.approveNext([page(23)]);
+  assert.equal((await pending).tabs.length, 1);
+  assert.equal(fixture.hub.listSessions('atlas').length, 1);
+});
+
+test('cancelled and timed-out session requests discard late approvals', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension } = await paired(fixture);
+  const conn = fixture.hub.online(extension.browser_id);
+  const abort = new AbortController();
+  let pending = fixture.hub.requestSession(
+    'atlas',
+    { browser_id: extension.browser_id, purpose: 'Cancel' },
+    abort.signal,
+  );
+  let request = [...fixture.hub.sessionRequests.values()][0];
+  abort.abort();
+  await assert.rejects(pending, /COMMAND_CANCELLED/);
+  fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  pending = fixture.hub.requestSession('atlas', {
+    browser_id: extension.browser_id,
+    purpose: 'Timeout',
+    timeout_seconds: 1,
+  });
+  request = [...fixture.hub.sessionRequests.values()][0];
+  t.mock.timers.tick(1000);
+  await assert.rejects(pending, /COMMAND_EXPIRED/);
+  fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
+  t.mock.timers.reset();
+  assert.equal(fixture.hub.sessionRequests.size, 0);
+  assert.deepEqual(fixture.hub.listSessions('atlas'), []);
 });
 
 test('page operations use the ready/execute handshake and stay caller-scoped', async (t) => {

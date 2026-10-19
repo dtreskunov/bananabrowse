@@ -1,4 +1,4 @@
-import type { Wire } from '../../shared/protocol.js';
+import type { QueryAllResult, QueryFieldIssue, Wire } from '../../shared/protocol.js';
 
 // This packaged helper runs in an isolated world. No remote source is evaluated here.
 export async function pageHelper(operation: string, args: Wire = {}): Promise<any> {
@@ -396,6 +396,93 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       throw error;
     }
   };
+  const queryAll = () => {
+    let matches: Element[];
+    try {
+      matches = roots
+        .flatMap((root) => [...root.querySelectorAll(args.selector)])
+        .filter((element) => !ignored(element) && visible(element));
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+      throw error;
+    }
+    if (!matches.length) return { error: 'ELEMENT_NOT_FOUND' };
+    const rows: QueryAllResult['rows'] = [];
+    const fieldIssues: QueryFieldIssue[] = [];
+    const fields = Object.entries(args.fields as Record<string, { selector: string; attribute?: string }>);
+    for (const row of matches.slice(0, args.limit ?? 50)) {
+      const rowIndex = rows.length;
+      const values: Record<string, string | null> = {};
+      const rowRoots: (Element | ShadowRoot)[] = [
+        row,
+        ...roots.filter((root): root is ShadowRoot => {
+          if (!('host' in root)) return false;
+          for (let at = root.host; at; at = parent(at)) if (at === row) return true;
+          return false;
+        }),
+      ];
+      for (const [name, field] of fields) {
+        let targets: Element[];
+        try {
+          targets = (
+            field.selector === ':scope' ? [row] : rowRoots.flatMap((root) => [...root.querySelectorAll(field.selector)])
+          ).filter((element) => !ignored(element) && visible(element));
+        } catch (error) {
+          if (error instanceof Error && error.name === 'SyntaxError')
+            return { error: 'INVALID_SELECTOR', query_field: name, row_index: rowIndex };
+          throw error;
+        }
+        if (targets.length > 1) return { error: 'ELEMENT_AMBIGUOUS', query_field: name, row_index: rowIndex };
+        const target = targets[0];
+        const issue = (reason: QueryFieldIssue['reason']) => {
+          values[name] = null;
+          fieldIssues.push({ row: rowIndex, field: name, reason });
+        };
+        if (!target) {
+          issue('missing');
+        } else if (
+          target.matches('input,textarea,select') ||
+          ('isContentEditable' in target && target.isContentEditable)
+        ) {
+          issue('redacted');
+        } else if (field.attribute) {
+          const raw = target.getAttribute(field.attribute);
+          if (raw === null) issue('missing');
+          else if (['href', 'src'].includes(field.attribute)) {
+            let url: URL;
+            try {
+              url = new URL(raw, target.baseURI);
+            } catch (error) {
+              if (!(error instanceof TypeError)) throw error;
+              issue('unsupported_url');
+              continue;
+            }
+            if (['http:', 'https:'].includes(url.protocol)) values[name] = url.href;
+            else issue('unsupported_url');
+          } else values[name] = raw;
+        } else {
+          const limit = args.max_text_chars ?? 4000;
+          const sample = textOf(target, limit + 1, true);
+          let text = sample.slice(0, limit);
+          if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+          values[name] = text;
+          if (sample.length > text.length) fieldIssues.push({ row: rowIndex, field: name, reason: 'text_truncated' });
+        }
+      }
+      rows.push(values);
+    }
+    const rowsTruncated = matches.length > rows.length;
+    return {
+      document: (globalThis as any)[documentKey],
+      scope: 'top-level-and-open-shadow-roots',
+      rows,
+      matched_count: matches.length,
+      returned_count: rows.length,
+      rows_truncated: rowsTruncated,
+      field_issues: fieldIssues,
+      truncated: rowsTruncated || fieldIssues.some((issue) => issue.reason === 'text_truncated'),
+    } satisfies QueryAllResult;
+  };
   const resolveTarget = () => {
     let element;
     let activator;
@@ -643,6 +730,7 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
   };
   if (operation === 'get_page_snapshot') return snapshot();
   if (operation === 'get_interactive_elements') return interactiveElements();
+  if (operation === 'query_all') return queryAll();
   if (operation === 'clear_overlays') {
     all
       .filter((element) => element.matches('[data-bananabrowse-overlay]') && !element.querySelector(marker))

@@ -17,11 +17,15 @@ browser profile.
 
 ## Version
 
-**1.0.0-beta.1** (service and extension), browser wire **v6**, DB schema **6**.
+**1.0.0-beta.2** (service and extension), browser wire **v6**, DB schema **6**.
 BananaBrowse restarts versioning at 1.0.0; the last DomAgent release was
 6.1.0-beta.6. It accepts no DomAgent extension: install BananaBrowse,
 re-register browsers and re-pair agents. See [the upgrade notes](docs/V6-UPGRADE.md)
 and [architecture](docs/ARCHITECTURE.md).
+
+Beta 2 adds `query_all` structured extraction, clearer agent guidance, and
+session-connection lifecycle fixes. Existing BananaBrowse pairings and sessions
+are preserved; update the extension to use `query_all`.
 
 Chrome **145+** and Firefox **153+**. Release ZIPs are unpacked Chrome
 extensions and unsigned temporary Firefox add-ons.
@@ -84,10 +88,11 @@ wait for a person.
 
 ## MCP tools
 
-24 tools: `pair_browser`, `list_browsers`, `request_session`, `list_sessions`,
-`end_session`, `list_tabs`, `create_tab`, `report_progress`,
-`request_handoff`, and 15 page operations (`get_page_snapshot`, `get_text`,
-`get_interactive_elements`, `inspect_element`, `click`, `type_text`,
+Tools include `pair_browser`, `list_browsers`, `unpair_browser`, `request_session`,
+`list_sessions`, `end_session`, `list_tabs`, `create_tab`, `close_tab`,
+`report_progress`, `request_handoff`, `list_artifacts`, `read_artifact`,
+and page operations (`get_page_snapshot`, `get_text`,
+`get_interactive_elements`, `inspect_element`, `query_all`, `click`, `type_text`,
 `select_option`, `set_checked`, `press_key`, `scroll`, `navigate`,
 `wait_for_page`, `evaluate_script`, `get_screenshot`, `clear_overlays`).
 
@@ -95,8 +100,22 @@ Page operations take a server-issued `tab_id` (such as `t12`) and a 40–500
 character `description` that the user sees in the activity feed. Output limits,
 DOM-only input, script worlds (`MAIN`/`USER_SCRIPT`), protected origins and
 "never replay an uncertain mutation" (`OUTCOME_UNKNOWN`) carry over from v5.
-`request_session` fails immediately with `BROWSER_OFFLINE` if the browser's window
-is closed; pick another browser from `list_browsers`.
+Check `list_sessions` first and reuse an appropriate attached session:
+`request_session` always requests a new group. `BROWSER_OFFLINE` means no live
+connection, not necessarily a closed window; it can also mean connection loss.
+Check sessions before retrying a failed request to avoid duplicate groups.
+
+Start with `get_page_snapshot`. Use `inspect_element` to probe a selector without
+scrolling, focusing or mutating; it reports missing, unique or ambiguous matches.
+Action receipts confirm dispatch, not application success: verify the resulting
+page. Check `list_tabs` capabilities before screenshots (Firefox environments
+without `tabs.captureTab` cannot capture them). Use
+`query_all` for structured DOM data with known row/field selectors, or
+`evaluate_script` for data absent from the DOM. Both support
+`return_as: "artifact"` for bulk data instead of copying
+large results through the conversation. `max_output_bytes` limits serialized
+output; `max_text_chars` applies only to text-extraction tools (per field for
+`query_all`). See [the extraction contract](bananabrowse-mcp/README.md#structured-extraction).
 
 ## Self-hosting
 
@@ -112,8 +131,11 @@ npm --prefix bananabrowse-mcp run build      # dist/chrome and dist/firefox
 npm --prefix bananabrowse-mcp run check      # JavaScript syntax
 ```
 
-Real-browser tests run in the Playwright container; see
-[the test README](bananabrowse-extension/test/README.md).
+Real-browser tests can run with Podman using
+`mcr.microsoft.com/playwright:v1.58.2-noble`, which includes Chromium and Firefox;
+no host browser installation is needed for page-helper tests or Chrome extension
+tests. See [the test README](bananabrowse-extension/test/README.md) for commands
+and the separate native Firefox extension requirement.
 
 ## Security model in brief
 

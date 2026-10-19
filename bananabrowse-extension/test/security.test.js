@@ -64,7 +64,7 @@ test('manifests open the app window from the toolbar and keep site access option
     assert.equal(manifest.sidebar_action, undefined);
     assert.equal(manifest.host_permissions, undefined);
     assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
-    assert.equal(manifest.version, '0.9.0.1');
+    assert.equal(manifest.version, '0.9.0.2');
     // Firefox rejects version_name; its window shows the package version instead.
     assert.equal(manifest.version_name, browser === 'chrome' ? version : undefined);
   }

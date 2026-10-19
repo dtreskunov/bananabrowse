@@ -50,6 +50,47 @@ test('beta7 optional world, content readiness and manual handoff schemas remain 
   assert.deepEqual(Object.keys(HANDOFF_SCHEMA.properties), ['instructions']);
 });
 
+test('query_all validates bounded nested field specifications without echoing values', () => {
+  const base = {
+    selector: '.row',
+    fields: { title: { selector: ':scope' }, href: { selector: 'a', attribute: 'href' } },
+  };
+  assert(validOperationArgs('query_all', base));
+  assert(
+    validOperationArgs('query_all', {
+      ...base,
+      limit: 100,
+      timeout_ms: 10000,
+      max_text_chars: 0,
+      return_as: 'artifact',
+    }),
+  );
+  for (const fields of [null, [], {}, false, { title: null }, { title: [] }, { title: {} }]) {
+    assert(!validOperationArgs('query_all', { ...base, fields }));
+  }
+  for (const args of [
+    { limit: 0 },
+    { limit: 101 },
+    { timeout_ms: 10001 },
+    { max_text_chars: 16001 },
+    { max_output_bytes: 1023 },
+    { fields: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`f${i}`, { selector: 'a' }])) },
+    { fields: JSON.parse('{"__proto__":{"selector":"a"}}') },
+    { fields: { constructor: { selector: 'a' } } },
+    { fields: { title: { selector: 'a', attribute: 'value' } } },
+    { fields: { title: { selector: 'a', script: 'private-value' } } },
+  ]) {
+    const errors = operationArgumentErrors('query_all', { ...base, ...args });
+    assert(errors.length > 0);
+    assert(!JSON.stringify(errors).includes('private-value'));
+  }
+  const unknown = operationArgumentErrors('query_all', {
+    ...base,
+    fields: { title: { selector: 'a', attribut: 'private-value' } },
+  });
+  assert(unknown.some((error) => error.field === 'fields.title.attribut' && error.did_you_mean === 'attribute'));
+});
+
 test('beta7 field errors distinguish type, required, bounds and target conflicts without values', () => {
   const invalid = [
     ['click', {}, 'selector', 'required_selector_or_ref_document'],

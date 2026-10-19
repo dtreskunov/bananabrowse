@@ -55,6 +55,8 @@ const FIELDS = new Set([
   'code',
   'duration_ms',
   'close_code',
+  'connection_id',
+  'request_phase',
 ]);
 
 export function audit(event: string, fields: Wire = {}): void {

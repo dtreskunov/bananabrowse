@@ -57,7 +57,7 @@ test('missing elements and invalid CSS selectors are distinct from a stale targe
     },
   };
   try {
-    for (const operation of ['click', 'type_text', 'get_text']) {
+    for (const operation of ['click', 'type_text', 'get_text', 'query_all']) {
       assert.deepEqual(await pageHelper(operation, { selector: 'button[type="submit"]' }), {
         error: 'ELEMENT_NOT_FOUND',
       });

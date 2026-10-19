@@ -4,6 +4,7 @@ import {
   READINESS_ERRORS,
   navigationUrl,
   validOperationArgs,
+  errorDetails,
 } from '../../shared/protocol.js';
 import { boundedResult, fail, failure, protectedRegex } from './security.js';
 import { compactResult } from '../../shared/results.js';
@@ -380,19 +381,25 @@ export class BrowserAdapter {
     }
     if (response.result.error) {
       const { stale_reason, snapshot_document, current_document } = response.result;
-      fail(
-        response.result.error,
-        Object.fromEntries(
+      fail(response.result.error, {
+        ...Object.fromEntries(
           Object.entries({ stale_reason, snapshot_document, current_document }).filter(
             ([, value]) => typeof value === 'string',
           ),
         ),
-      );
+        ...errorDetails({ ...response.result, code: response.result.error }),
+      });
     }
     if (operation === 'get_page_snapshot') {
       const { next_ref, ...snapshot } = response.result;
       if (Number.isSafeInteger(next_ref)) this.refBases.set(tabId, next_ref);
       response.result = snapshot;
+    }
+    if (operation === 'query_all') {
+      response.result =
+        args.return_as === 'artifact'
+          ? boundedResult(compactResult(operation, response.result, args))
+          : compactResult(operation, response.result, args);
     }
     return {
       ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
@@ -610,7 +617,7 @@ export class BrowserAdapter {
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
     let target: any;
-    if (operation !== 'inspect_element' && (args.selector || args.ref)) {
+    if (!['inspect_element', 'query_all'].includes(operation) && (args.selector || args.ref)) {
       target = await this.helper(grant.tabId, 'prepare_action', {
         ...args,
         action: operation,
@@ -729,10 +736,17 @@ export class BrowserAdapter {
       }
       return boundedResult({ mimeType: 'image/png', data: screenshot.split(',')[1] });
     }
-    const waitable = ['click', 'type_text', 'get_text', 'select_option', 'set_checked', 'press_key', 'scroll'].includes(
-      operation,
-    );
-    const timeoutMs = args.timeout_ms ?? (waitable ? 3000 : 0);
+    const waitable = [
+      'click',
+      'type_text',
+      'get_text',
+      'query_all',
+      'select_option',
+      'set_checked',
+      'press_key',
+      'scroll',
+    ].includes(operation);
+    const timeoutMs = args.timeout_ms ?? (waitable && operation !== 'query_all' ? 3000 : 0);
     const deadline = Date.now() + timeoutMs;
     while (true) {
       checkCurrent();
@@ -745,7 +759,7 @@ export class BrowserAdapter {
         });
       } catch (error: any) {
         const retryable = READINESS_ERRORS.includes(error.code);
-        if (!waitable || !retryable || args.timeout_ms === 0) throw error;
+        if (!waitable || !retryable || timeoutMs === 0) throw error;
         if (Date.now() >= deadline) {
           throw Object.assign(new Error('WAIT_TIMEOUT'), {
             code: 'WAIT_TIMEOUT',

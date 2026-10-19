@@ -120,6 +120,10 @@ test('agent-facing diagnostics drop stacks, causes and native objects and bound 
 });
 
 test('errorDetails projects only whitelisted, well-formed details per code', () => {
+  assert.deepEqual(errorDetails({ code: 'BROWSER_OFFLINE', offline_reason: 'connection_lost', private: 'secret' }), {
+    offline_reason: 'connection_lost',
+  });
+  assert.deepEqual(errorDetails({ code: 'BROWSER_OFFLINE', offline_reason: 'secret' }), {});
   assert.deepEqual(
     errorDetails({
       code: 'ELEMENT_STALE',

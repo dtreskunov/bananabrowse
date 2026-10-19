@@ -108,3 +108,24 @@ and schema 6 are unchanged, but nothing named DomAgent is accepted any more:
 - **Layout.** The packages live in `bananabrowse-mcp/` and
   `bananabrowse-extension/`; the service starts `dist/bananabrowse-mcp/index.js`
   (see `deployment/bananabrowse.service`).
+
+## BananaBrowse 1.0.0-beta.1 → beta.2
+
+Wire v6 and schema 6 are unchanged. Update and rebuild the service, then update
+the Chrome/Firefox extension to 1.0.0-beta.2 (numeric manifest 0.9.0.2).
+Existing registrations, pairings and sessions are preserved; no re-pairing or
+database migration is needed.
+
+- **Structured extraction.** `query_all` reads rows with relative field
+  selectors and supports inline JSON or artifacts. It requires extension
+  0.9.0.2; an older extension receives `CAPABILITY_UNAVAILABLE` with
+  `required_extension_version` before dispatch. Existing operations continue
+  to work with beta.1 extensions.
+- **Session reliability.** Fixes synchronous approval/inventory cleanup and
+  returns an already-approved detached session if the connection drops before
+  its first inventory. No automatic session-request replay is introduced.
+  Offline session-request errors now include a recent observed reason when
+  available, rather than assuming the user closed the window.
+- **Agent guidance.** Check existing sessions before requesting another group,
+  use read-only selector probes, verify application outcomes after actions,
+  and check optional capabilities before calling them.

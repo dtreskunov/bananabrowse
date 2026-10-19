@@ -22,6 +22,12 @@ export interface FieldSchema {
   enum?: readonly unknown[];
   unit?: 'unicode_code_points' | 'utf16_code_units';
   trimMinimum?: boolean;
+  properties?: Record<string, FieldSchema>;
+  required?: readonly string[];
+  additionalProperties?: boolean | FieldSchema;
+  minProperties?: number;
+  maxProperties?: number;
+  propertyNames?: { pattern: string };
 }
 export interface OperationSpec {
   properties: Record<string, FieldSchema>;
@@ -32,6 +38,21 @@ export interface ArgumentError {
   field: string;
   reason: string;
   [detail: string]: unknown;
+}
+export interface QueryFieldIssue {
+  row: number;
+  field: string;
+  reason: 'missing' | 'redacted' | 'text_truncated' | 'unsupported_url';
+}
+export interface QueryAllResult {
+  document: string;
+  scope: 'top-level-and-open-shadow-roots';
+  rows: Record<string, string | null>[];
+  matched_count: number;
+  returned_count: number;
+  rows_truncated: boolean;
+  field_issues: QueryFieldIssue[];
+  truncated: boolean;
 }
 
 export const VERSION = 6;
@@ -80,7 +101,11 @@ export const ARTIFACT_MIME_TYPES = Object.freeze([
 export const ARTIFACT_TEXT_MIME = /^(?:text\/|application\/(?:json|x-ndjson)$)/;
 export const ARTIFACT_ID_PATTERN = /^a[0-9A-Za-z_-]{22}$/;
 /** Lowest extension version that understands each optional capability. */
-export const EXTENSION_FEATURES = Object.freeze({ artifacts: '0.9.0.1', close_tabs: '0.9.0.1' });
+export const EXTENSION_FEATURES = Object.freeze({
+  artifacts: '0.9.0.1',
+  close_tabs: '0.9.0.1',
+  query_all: '0.9.0.2',
+});
 export function versionAtLeast(version: unknown, minimum: string): boolean {
   const parts = (value: unknown) =>
     String(value || '0')
@@ -196,6 +221,27 @@ export function errorDetails(error: unknown): Wire {
   if (!error || typeof error !== 'object') return {};
   const e = error as Wire,
     result: Wire = {};
+  if (
+    e.code === 'BROWSER_OFFLINE' &&
+    [
+      'graceful_disconnect',
+      'connection_lost',
+      'heartbeat_timeout',
+      'connection_replaced',
+      'service_stopped',
+      'unknown',
+    ].includes(e.offline_reason)
+  )
+    result.offline_reason = e.offline_reason;
+  if (
+    ['INVALID_SELECTOR', 'ELEMENT_AMBIGUOUS'].includes(e.code) &&
+    typeof e.query_field === 'string' &&
+    new RegExp(QUERY_FIELD_PATTERN).test(e.query_field) &&
+    boundedInteger(e.row_index, MAX_ELEMENTS - 1)
+  ) {
+    result.query_field = e.query_field;
+    result.row_index = e.row_index;
+  }
   if (['ELEMENT_STALE', 'TARGET_STALE'].includes(e.code) && STALE_REASONS.includes(e.stale_reason)) {
     result.stale_reason = e.stale_reason;
     for (const key of ['snapshot_document', 'current_document']) {
@@ -300,6 +346,23 @@ const operation = (
       }
     : {}),
 });
+const artifactOutput: Record<string, FieldSchema> = {
+  return_as: {
+    type: 'string',
+    enum: ['value', 'artifact'],
+    default: 'value',
+    description:
+      'value: return JSON inline (16 KiB default, 64 KiB hard cap). artifact: store the result (up to ~8 MiB) on the service and return a handle with bytes, sha256, preview and download_url. Download bulk data instead of transcribing it through the conversation.',
+  },
+  artifact_name: {
+    type: 'string',
+    minLength: 1,
+    maxLength: 128,
+    pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\\s\\S])',
+    description: 'Optional file name for return_as:"artifact", e.g. activities.json.',
+  },
+};
+export const QUERY_FIELD_PATTERN = '^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,39}(?![\\s\\S])';
 export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object.freeze({
   navigate: operation({ url: { type: 'string', minLength: 1, maxLength: 8192 } }, ['url']),
   click: operation(targeted, [], true),
@@ -333,20 +396,7 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
         description:
           'Execution world. MAIN (default) sees page globals such as framework state; USER_SCRIPT requires native browser support and local enablement, never an isolated-world fallback.',
       },
-      return_as: {
-        type: 'string',
-        enum: ['value', 'artifact'],
-        default: 'value',
-        description:
-          'value: return the JSON result inline (16 KiB default, 64 KiB hard cap). artifact: store the full result (up to ~8 MiB) on the BananaBrowse service and return only a handle with bytes, sha256, a preview and a download_url. Use artifact for bulk data; never transcribe large results through the conversation.',
-      },
-      artifact_name: {
-        type: 'string',
-        minLength: 1,
-        maxLength: 128,
-        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\\s\\S])',
-        description: 'Optional file name for return_as:"artifact", e.g. activities.json.',
-      },
+      ...artifactOutput,
       artifact_mime: {
         type: 'string',
         enum: ARTIFACT_MIME_TYPES,
@@ -367,6 +417,45 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
   get_screenshot: operation({}),
   get_interactive_elements: operation({ ...readElements, ...output }),
   get_page_snapshot: operation({ selector: target.selector, ...readText, ...readElements, ...output }),
+  query_all: operation(
+    {
+      selector: { ...target.selector, description: 'CSS selector for rendered rows in the current document.' },
+      fields: {
+        type: 'object',
+        minProperties: 1,
+        maxProperties: 20,
+        propertyNames: { pattern: QUERY_FIELD_PATTERN },
+        additionalProperties: {
+          type: 'object',
+          properties: {
+            selector: {
+              ...target.selector,
+              description: 'Selector relative to each row, including open shadow roots. :scope selects the row itself.',
+            },
+            attribute: {
+              type: 'string',
+              enum: ['href', 'src', 'title', 'alt', 'datetime', 'aria-label'],
+              description:
+                'Omit for rendered text. href/src are resolved HTTP(S) URLs; form values and HTML are not exposed.',
+            },
+          },
+          required: ['selector'],
+          additionalProperties: false,
+        },
+        description: 'Named, single-valued fields. Missing values are null with field_issues; multiple matches fail.',
+      },
+      limit: { type: 'integer', minimum: 1, maximum: MAX_ELEMENTS, default: DEFAULT_ELEMENTS },
+      ...timeout,
+      timeout_ms: { ...timeout.timeout_ms!, default: 0 },
+      max_text_chars: {
+        ...readText.max_text_chars!,
+        description: 'Maximum characters per extracted text field, default 4000. Field truncation is explicit.',
+      },
+      ...output,
+      ...artifactOutput,
+    },
+    ['selector', 'fields'],
+  ),
   select_option: operation({ ...targeted, value: text }, ['value'], true),
   set_checked: operation({ ...targeted, checked: { type: 'boolean' } }, ['checked'], true),
   press_key: operation(
@@ -488,8 +577,36 @@ export function schemaArgumentErrors(spec: OperationSpec | undefined, args: unkn
         });
       continue;
     }
-    if (typeof value !== field.type) {
+    if (typeof value !== field.type || (field.type === 'object' && (value === null || Array.isArray(value)))) {
       errors.push({ field: key, reason: `expected_${field.type}` });
+      continue;
+    }
+    if (field.type === 'object') {
+      const keys = Object.keys(value);
+      if (
+        (field.minProperties !== undefined && keys.length < field.minProperties) ||
+        (field.maxProperties !== undefined && keys.length > field.maxProperties)
+      ) {
+        errors.push({
+          field: key,
+          reason: 'out_of_range',
+          limits: { minimum: field.minProperties, maximum: field.maxProperties },
+        });
+        continue;
+      }
+      const names = field.propertyNames && new RegExp(field.propertyNames.pattern);
+      for (const name of keys)
+        if (names && !names.test(name)) errors.push({ field: `${key}.${name.slice(0, 64)}`, reason: 'invalid_format' });
+      const nested = typeof field.additionalProperties === 'object' ? field.additionalProperties : undefined;
+      errors.push(
+        ...schemaArgumentErrors(
+          {
+            properties: field.properties ?? (nested ? Object.fromEntries(keys.map((name) => [name, nested])) : {}),
+            required: field.required ?? [],
+          },
+          value,
+        ).map((error) => ({ ...error, field: `${key}.${error.field}` })),
+      );
       continue;
     }
     if (field.type === 'string') {

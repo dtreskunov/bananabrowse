@@ -41,6 +41,49 @@ test('snapshot/list limits preserve document identity and whole rows with explic
   assert.deepEqual(small.elements, [{ ref: 'e1' }]);
 });
 
+test('query_all budgets preserve complete rows, field issues and honest counts', () => {
+  const rows = Array.from({ length: 10 }, () => ({ title: '😀"\\\n'.repeat(20), price: null }));
+  const input = {
+    document: 'fixture-document',
+    scope: 'top-level-and-open-shadow-roots',
+    rows,
+    matched_count: 12,
+    returned_count: 10,
+    rows_truncated: true,
+    field_issues: rows.map((_, row) => ({ row, field: 'price', reason: 'missing' })),
+    truncated: true,
+  };
+  for (const max_output_bytes of [1024, 4096, DEFAULT_OUTPUT_BYTES]) {
+    const output = compactResult('query_all', input, { max_output_bytes });
+    assert(resultBytes(output) <= max_output_bytes);
+    assert(output.rows.length > 0);
+    assert.equal(output.returned_count, output.rows.length);
+    assert.equal(output.matched_count, 12);
+    assert.equal(output.rows_truncated, true);
+    assert.equal(output.truncated, true);
+    assert.deepEqual(output.rows, rows.slice(0, output.rows.length));
+    assert(output.field_issues.every((issue) => issue.row < output.rows.length));
+  }
+  assert.equal(input.rows.length, 10);
+  assert.equal(input.field_issues.length, 10);
+  const limited = compactResult('query_all', input, { limit: 2 });
+  assert.equal(limited.returned_count, 2);
+  assert.deepEqual(
+    limited.field_issues.map((issue) => issue.row),
+    [0, 1],
+  );
+  const enormous = { ...input, rows: [{ title: 'x'.repeat(70000) }], returned_count: 1, field_issues: [] };
+  assert.throws(() => compactResult('query_all', enormous), /RESULT_TOO_LARGE/);
+  assert.deepEqual(compactResult('query_all', enormous, { return_as: 'artifact' }), enormous);
+  for (const value of [
+    null,
+    { ...input, returned_count: 9 },
+    { ...input, field_issues: [{ row: 10, field: 'price', reason: 'missing' }] },
+    { ...input, rows: [{ title: 1 }], returned_count: 1, field_issues: [] },
+  ])
+    assert.throws(() => compactResult('query_all', value), /INVALID_RESULT/);
+});
+
 test('script/mutation values are never truncated into a success-shaped partial result', () => {
   for (const max_output_bytes of [DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES]) {
     const overhead = resultBytes({ value: '' });

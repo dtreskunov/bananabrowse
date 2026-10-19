@@ -22,6 +22,11 @@ const actionHtml = `
 <div id="scrollable" style="overflow:auto;height:80px;width:200px"><div style="height:600px">Scrollable content</div></div>
 <div id="shadow"></div>
 <iframe srcdoc="<button>Unshared iframe control</button>"></iframe>
+<section id="query-fixture">
+  <article class="query-row"><a class="query-title" href="/listing/1">First listing</a><span class="query-price">$10</span></article>
+  <article class="query-row"><a class="query-title" href="/listing/2">Second listing</a></article>
+  <article class="query-row" hidden><a class="query-title" href="/listing/hidden">Hidden listing</a></article>
+</section>
 <p hidden>fixture-hidden-secret</p>
 <input id="truly-hidden" type="hidden" value="fixture-hidden-value">
 <input id="offscreen" aria-label="Off-screen control" style="position:absolute;top:2200px;left:5px;width:3px">
@@ -60,6 +65,48 @@ async function exerciseActions(call) {
   assert.equal(snapshot.scope, 'top-level-and-open-shadow-roots');
   assert.equal(snapshot.input_mode, 'dom');
   assert(snapshot.viewport.width > 0 && snapshot.viewport.height > 0);
+  const queryArgs = {
+    selector: '.query-row',
+    fields: {
+      title: { selector: '.query-title' },
+      price: { selector: '.query-price' },
+      href: { selector: '.query-title', attribute: 'href' },
+    },
+  };
+  const extracted = await result('query_all', queryArgs);
+  assert.equal(extracted.matched_count, 2);
+  assert.equal(extracted.returned_count, 2);
+  assert.equal(extracted.truncated, false);
+  assert.deepEqual(
+    extracted.rows.map(({ title, price }) => ({ title, price })),
+    [
+      { title: 'First listing', price: '$10' },
+      { title: 'Second listing', price: null },
+    ],
+  );
+  assert(extracted.rows[0].href.endsWith('/listing/1'));
+  assert.deepEqual(extracted.field_issues, [{ row: 1, field: 'price', reason: 'missing' }]);
+  const limited = await result('query_all', { ...queryArgs, limit: 1 });
+  assert.equal(limited.matched_count, 2);
+  assert.equal(limited.returned_count, 1);
+  assert.equal(limited.rows_truncated, true);
+  const redacted = await result('query_all', {
+    selector: 'body',
+    fields: { password: { selector: '#private' }, editable: { selector: '[contenteditable]' } },
+  });
+  assert.deepEqual(redacted.rows, [{ password: null, editable: null }]);
+  assert(redacted.field_issues.every((issue) => issue.reason === 'redacted'));
+  await error('query_all', { ...queryArgs, selector: '#absent-row' }, 'ELEMENT_NOT_FOUND');
+  await error('query_all', { ...queryArgs, selector: 'article[' }, 'INVALID_SELECTOR');
+  const ambiguous = await call('query_all', {
+    selector: '#query-fixture',
+    fields: { title: { selector: '.query-title' } },
+  });
+  assert.equal(ambiguous.isError, true);
+  const ambiguousDetails = JSON.parse(ambiguous.content[0].text);
+  assert.equal(ambiguousDetails.error, 'ELEMENT_AMBIGUOUS');
+  assert.equal(ambiguousDetails.query_field, 'title');
+  assert.equal(ambiguousDetails.row_index, 0);
   const inspected = await result('inspect_element', { selector: '#readonly' });
   assert.equal(inspected.reason, 'READONLY');
   assert.equal(inspected.value_redacted, true);

@@ -1,7 +1,7 @@
 {
     "name": "bananabrowse",
     "private": true,
-    "version": "1.0.0-beta.2",
+    "version": "1.0.0-beta.3",
     "description": "MCP server for BananaBrowse — let AI agents control your real browser via Chrome or Firefox extension",
     "main": "dist/bananabrowse-mcp/index.js",
     "type": "module",

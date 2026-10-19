@@ -17,15 +17,17 @@ browser profile.
 
 ## Version
 
-**1.0.0-beta.2** (service and extension), browser wire **v6**, DB schema **6**.
+**1.0.0-beta.3** (service and extension), browser wire **v6**, DB schema **6**.
 BananaBrowse restarts versioning at 1.0.0; the last DomAgent release was
 6.1.0-beta.6. It accepts no DomAgent extension: install BananaBrowse,
 re-register browsers and re-pair agents. See [the upgrade notes](docs/V6-UPGRADE.md)
 and [architecture](docs/ARCHITECTURE.md).
 
-Beta 2 adds `query_all` structured extraction, clearer agent guidance, and
-session-connection lifecycle fixes. Existing BananaBrowse pairings and sessions
-are preserved; update the extension to use `query_all`.
+Beta 3 validates complete browser inventories before publishing changes and
+keeps sessions detached until their first valid sync. Beta 2 added `query_all`
+structured extraction and clearer agent guidance. Existing BananaBrowse pairings
+and sessions are preserved. Upgrade the server before extensions; beta 2
+extensions continue to work with the beta 3 server.
 
 Chrome **145+** and Firefox **153+**. Release ZIPs are unpacked Chrome
 extensions and unsigned temporary Firefox add-ons.

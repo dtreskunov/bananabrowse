@@ -1,6 +1,6 @@
 # BananaBrowse architecture
 
-Status: implemented in BananaBrowse 1.0.0-beta.2 (wire v6, DB schema 6),
+Status: implemented in BananaBrowse 1.0.0-beta.3 (wire v6, DB schema 6),
 2026-10-19; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -280,6 +280,18 @@ which the extension ungroups. A group approved but not yet committed carries its
 `request_id`, so the server doesn't treat it as unknown. Tab ID assignment is
 idempotent per browser tab, so a sync that races ahead of its acknowledgement
 can't renumber tabs. Sessions missing from an inventory are deleted.
+
+The entire inventory is validated before reconciliation changes any live state
+or persisted metadata, including tabs in unknown, pending and unconfirmed
+groups. Group IDs, tab keys and supplied tab IDs must not repeat across the
+inventory. Invalid data returns `INVALID_MESSAGE` without partially applying
+earlier groups. An attached group is reported as a usable attached session only
+after its first successful sync, matching dispatch readiness.
+
+The server is upgraded before extensions. Capability names must be supported
+by the server; unknown names remain invalid. There is no negotiation or fallback
+for a newer extension talking to an older server. Older extensions can continue
+advertising their supported subset to a newer server.
 
 Messages are capped at 8 MiB (6.1; 4 MiB before), results at 8 MiB − 4 KiB.
 

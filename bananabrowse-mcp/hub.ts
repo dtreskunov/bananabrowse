@@ -508,21 +508,51 @@ export class Hub {
   // ---------- inventory ----------
   sync(conn: Conn, m: Wire): void {
     requireValue(Array.isArray(m.groups) && m.groups.length <= 64, 'INVALID_MESSAGE');
+    const clients = new Set<string>(),
+      keys = new Set<number>(),
+      ids = new Set<string>();
+    // Reject the entire inventory before changing sessions, grants or persisted metadata.
+    for (const group of m.groups) {
+      requireValue(
+        group &&
+          typeof group.client_id === 'string' &&
+          UUID.test(group.client_id) &&
+          !clients.has(group.client_id) &&
+          ['attached', 'unconfirmed'].includes(group.state) &&
+          typeof group.title === 'string' &&
+          Array.isArray(group.tabs) &&
+          group.tabs.length <= SESSION_TAB_LIMIT &&
+          (group.request_id === undefined || (typeof group.request_id === 'string' && UUID.test(group.request_id))),
+        'INVALID_MESSAGE',
+      );
+      clients.add(group.client_id);
+      for (const tab of group.tabs) {
+        requireValue(
+          tab &&
+            Number.isSafeInteger(tab.key) &&
+            tab.key >= 0 &&
+            !keys.has(tab.key) &&
+            typeof tab.title === 'string' &&
+            typeof tab.url === 'string' &&
+            tab.url.length <= 8192 &&
+            PAGE_STATES.has(tab.page_state) &&
+            Array.isArray(tab.capabilities) &&
+            tab.capabilities.length <= 128 &&
+            tab.capabilities.every(
+              (operation: unknown) => typeof operation === 'string' && OPERATIONS.includes(operation),
+            ) &&
+            (tab.id === undefined || tab.id === null || (typeof tab.id === 'string' && !ids.has(tab.id))),
+          'INVALID_MESSAGE',
+        );
+        keys.add(tab.key);
+        if (typeof tab.id === 'string') ids.add(tab.id);
+      }
+    }
     const rows = new Map(this.store.sessionsForBrowser(conn.browser_id!).map((row) => [row.group_client_id, row]));
     const seen = new Set<string>(),
       assignments: Wire[] = [],
       unknown: string[] = [];
     for (const group of m.groups) {
-      requireValue(
-        group &&
-          UUID.test(group.client_id || '') &&
-          ['attached', 'unconfirmed'].includes(group.state) &&
-          typeof group.title === 'string' &&
-          Array.isArray(group.tabs) &&
-          group.tabs.length <= SESSION_TAB_LIMIT &&
-          (group.request_id === undefined || UUID.test(group.request_id)),
-        'INVALID_MESSAGE',
-      );
       const row = rows.get(group.client_id);
       if (!row) {
         // Approved-but-uncommitted groups are announced before their session exists.
@@ -530,7 +560,6 @@ export class Hub {
         if (!pending || pending.browser_id !== conn.browser_id) unknown.push(group.client_id);
         continue;
       }
-      requireValue(!seen.has(row.id), 'INVALID_MESSAGE');
       seen.add(row.id);
       // Still awaiting session.created on the browser side: keep it alive, but publish no (empty) state yet.
       if (group.request_id) continue;
@@ -559,31 +588,15 @@ export class Hub {
         continue;
       }
       const stored = new Map(this.store.tabsForSession(row.id).map((tab) => [tab.id, tab]));
-      const next = new Map<string, Target>(),
-        keys = new Set<number>();
+      const next = new Map<string, Target>();
       for (const tab of group.tabs) {
-        requireValue(
-          tab &&
-            Number.isSafeInteger(tab.key) &&
-            tab.key >= 0 &&
-            !keys.has(tab.key) &&
-            typeof tab.title === 'string' &&
-            typeof tab.url === 'string' &&
-            tab.url.length <= 8192 &&
-            PAGE_STATES.has(tab.page_state) &&
-            Array.isArray(tab.capabilities) &&
-            tab.capabilities.every((op: string) => OPERATIONS.includes(op)) &&
-            (tab.id === undefined || tab.id === null || typeof tab.id === 'string'),
-          'INVALID_MESSAGE',
-        );
-        keys.add(tab.key);
         const ordinary = navigableUrl(tab.url, this.config.protectedOrigins) !== null;
         // Non-URL documents are navigation-only; protected origins are not listed at all.
         const origin = ordinary ? null : URL.parse(tab.url)?.origin;
         if (origin && this.config.protectedOrigins.includes(origin)) continue;
         const capabilities =
           ordinary && !['navigation_only', 'unavailable'].includes(tab.page_state)
-            ? [...new Set(tab.capabilities)]
+            ? [...new Set<string>(tab.capabilities)]
             : ['navigate'];
         const page_state = ordinary ? tab.page_state : 'navigation_only';
         let id: string | null = typeof tab.id === 'string' && stored.has(tab.id) && !next.has(tab.id) ? tab.id : null;
@@ -763,7 +776,7 @@ export class Hub {
   sessionState(row: SessionRow): string {
     const conn = this.online(row.browser_id),
       live = this.live.get(row.id);
-    return conn && live?.conn === conn && live.state === 'attached' ? 'attached' : 'detached';
+    return conn && live?.conn === conn && live.state === 'attached' && live.firstSync ? 'attached' : 'detached';
   }
   publicSession(row: SessionRow): Wire {
     const live = this.live.get(row.id);

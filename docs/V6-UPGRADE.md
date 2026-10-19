@@ -129,3 +129,20 @@ database migration is needed.
 - **Agent guidance.** Check existing sessions before requesting another group,
   use read-only selector probes, verify application outcomes after actions,
   and check optional capabilities before calling them.
+
+## BananaBrowse 1.0.0-beta.2 → beta.3
+
+Update and rebuild the service first. Wire v6 and schema 6 are unchanged;
+existing registrations, pairings and sessions are preserved. The extension
+assets carry numeric manifest 0.9.0.3, with no runtime change: beta.2 extensions
+already work with the updated service and do not require replacement for this
+fix. Always upgrade the server before extensions.
+
+- **Inventory validation.** A malformed full inventory is rejected before
+  changing sessions, grants or persisted tab metadata. Validation covers all
+  groups, even unknown/pending/unconfirmed groups, and rejects duplicate group
+  IDs, tab keys and supplied tab IDs.
+- **Readiness reporting.** A session is reported attached only after its first
+  successful inventory sync, so listing and dispatch agree on readiness.
+- **Capabilities.** Unsupported names remain invalid. This release adds no
+  negotiation or newer-extension/older-server compatibility layer.

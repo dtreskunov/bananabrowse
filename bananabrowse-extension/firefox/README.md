@@ -1,4 +1,4 @@
-# BananaBrowse for Firefox (1.0.0-beta.2)
+# BananaBrowse for Firefox (1.0.0-beta.3)
 
 Build with `npm --prefix bananabrowse-mcp run build` and load
 `dist/firefox/manifest.json` from `about:debugging` as a temporary add-on.

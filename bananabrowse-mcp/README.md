@@ -1,6 +1,6 @@
 # BananaBrowse service (v6)
 
-Self-hosted MCP server and browser hub. Service **1.0.0-beta.2**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **1.0.0-beta.3**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -82,6 +82,10 @@ can be reused, while every `request_session` asks for a new tab group.
 sessions before retrying a failed request so an approved group is not duplicated.
 `SESSION_DETACHED` means the existing session is not yet usable, for example
 while reconnecting or awaiting Chrome reattachment confirmation.
+Sessions are reported attached only after their first successful inventory
+sync. A malformed inventory is rejected before changing any session, tab grant
+or persisted inventory metadata. Upgrade the server before extensions;
+unsupported capability names remain invalid rather than being silently ignored.
 Session-request offline failures include `offline_reason` when observed:
 `graceful_disconnect`, `connection_lost`, `heartbeat_timeout`,
 `connection_replaced`, `service_stopped`, or `unknown`. Recent observations

@@ -72,6 +72,37 @@ because Chrome changes group IDs on restart. Firefox reattaches automatically.
 
 ## Agent setup
 
+Agents can use an operator-issued API key or, when enabled, OAuth with dynamic
+client registration (DCR). Both use the same local pairing and session approvals.
+
+### OAuth with DCR
+
+The operator sets `BANANABROWSE_OAUTH_ENABLED=true` and restarts the service.
+Configure an OAuth-capable MCP client with **`https://<server>/mcp`**, without an
+API key or pre-registered client credentials. The client discovers the server,
+registers itself and opens a BananaBrowse authorization page:
+
+1. Open the BananaBrowse extension window and click **Pair an agent**.
+2. Enter its code on the authorization page and click **Connect**.
+3. Return to the extension and **Approve** the OAuth client's request.
+
+Client names and websites are self-reported, so approve only a connection you
+started. Registration alone grants no browser access. Each session still needs
+your approval.
+
+**One OAuth identity can use multiple browser registrations.** After connecting,
+give the agent a pairing code from another browser and approve its `pair_browser`
+request there. It keeps the same identity and can open separate sessions in both.
+Unpairing one browser leaves the others connected; removing the last pairing
+revokes the identity's OAuth tokens. Reauthorizing the same registered client
+through an already-paired browser reuses that identity, with another approval.
+Unrelated users of a shared client registration do not automatically share an
+identity or browser access.
+
+See [OAuth configuration and token lifecycle](bananabrowse-mcp/README.md#oauth-with-dynamic-client-registration).
+
+### API keys
+
 Agents authenticate with an API key at `https://<server>/mcp/<agent-id>`. The
 operator generates the key and adds one line to the service environment:
 
@@ -143,7 +174,9 @@ and the separate native Firefox extension requirement.
   key-bound refresh token yields 10-minute access tokens for the WebSocket.
   Registration alone grants nothing.
 - Pairing requires a code shown in the browser plus a local **Approve** of the
-  operator-configured agent name. Every session needs another local approval.
+  agent. API-key agent names are operator-configured; OAuth client names and
+  websites are self-reported and marked accordingly. Every session needs another
+  local approval.
 - Agents only ever see their own browsers, sessions and tabs. Unknown and
   foreign IDs both return `NOT_FOUND`.
 - Tabs at protected origins (the BananaBrowse server plus `BANANABROWSE_PROTECTED_ORIGINS`)

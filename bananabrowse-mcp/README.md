@@ -15,9 +15,76 @@ SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 | `BANANABROWSE_AGENT_<ID>` | One per agent: `"Name|https://homepage|sha256:<hex of API key>"`. `<ID>` becomes the lowercase agent ID (`_` → `-`), used in `/mcp/<agent-id>`. The homepage may be empty |
 | `BANANABROWSE_ARTIFACTS_DIR` | Artifact blobs (6.1), default `<dir of BANANABROWSE_DB>/artifacts`; created 0700, files 0600. Must be writable (systemd `ReadWritePaths`) |
 | `BANANABROWSE_PAIRING_SECRET` / `_FILE` | Optional HMAC key for in-memory pairing codes; random per process by default |
+| `BANANABROWSE_OAUTH_ENABLED` | `true` enables OAuth authorization-code flow with DCR at `/mcp`; default `false`. Existing API-key endpoints are unchanged |
 
-Changing agents requires a restart. Removing an agent deletes its pairings and
-sessions at startup.
+Changing configured agents requires a restart. Removing a configured agent deletes
+its pairings and sessions at startup. OAuth identities are stored in SQLite and
+do not require environment entries.
+
+## OAuth with dynamic client registration
+
+Enable `BANANABROWSE_OAUTH_ENABLED=true`, rebuild and restart. Set the MCP client's
+server URL to `https://<server>/mcp`; no API key or pre-registered OAuth client is
+needed. Clients discover RFC 9728 protected-resource metadata from the `401`
+`WWW-Authenticate` challenge, then RFC 8414 authorization-server metadata and
+the RFC 7591 registration endpoint.
+
+The browser authorization page asks for a pairing code from **Pair an agent** in
+the extension window. Submitting the form sends a pairing proposal to that
+extension. No authorization code is returned until the person approves there.
+The authorization heading uses the registered name, for example
+“BananaClaw (Denis Treskunov) wants to use BananaBrowse”.
+The page and extension mark OAuth names and websites as self-reported, not
+operator-verified. Keep the extension open while authorizing.
+
+An OAuth identity is distinct from a DCR client registration: a shared client
+registration does not expose all users' browsers to each other. The identity can
+pair additional browser registrations with `pair_browser`, always with local
+approval. The same access token can then request sessions in either browser.
+Reauthorizing that registered client through an already-paired browser reuses
+the identity, but still prompts for approval. Unpairing or forgetting one browser
+removes only its access and sessions; removing the last pairing revokes all
+codes, grants and tokens for that identity.
+
+Protocol and lifecycle:
+
+- Authorization code + **PKCE S256** only. The canonical RFC 8707 resource is
+  `BANANABROWSE_ORIGIN/mcp`; a supplied `resource` must match exactly. The only scope
+  is `mcp`. Omitted resource/scope parameters use these fixed values.
+- Redirect URIs match the registered string exactly. HTTPS is required, except
+  HTTP loopback callbacks (`localhost`, `127.0.0.1`, `[::1]`). Credentials and
+  fragments are rejected; there are no wildcard or arbitrary-port matches.
+- DCR supports public clients (`token_endpoint_auth_method: "none"`) and
+  confidential clients (`client_secret_basic`, the RFC default, or
+  `client_secret_post`). Client secrets are returned only at registration.
+- Consent forms expire after 5 minutes, are single-use and protected by an
+  HttpOnly Secure SameSite cookie, CSRF token and same-origin POST check.
+  Their `strict-origin` referrer policy preserves the browser's form POST
+  Origin header without forwarding authorization URL paths or query strings.
+  Authorization codes expire after 2 minutes and are single-use.
+- Access tokens last 10 minutes. Refresh tokens rotate on every use, with a
+  fixed 30-day authorization lifetime. Refresh-token reuse revokes that entire
+  grant, without the extension refresh endpoint's grace window. Code replay also
+  revokes the grant issued from that code.
+- Revocation at `/oauth/revoke` revokes the matching grant and all its tokens.
+  Other authorizations and pairings remain intact. Unpair all browsers to revoke
+  every authorization of an identity.
+- Registrations, identities and hashed codes/tokens survive service restarts in
+  the existing DB. Pending consent pages do not; restart authorization if needed.
+  Existing schema-6 databases gain additive OAuth tables without losing data.
+- DCR and authorization/token requests are rate-limited. Registrations without an
+  identity expire after 24 hours; the server caps registrations and identities at
+  10,000 each, pending forms at 1,000, and token records at 100,000.
+
+Expose `/.well-known/oauth-*`, `/oauth/*` and `/mcp` through the HTTPS reverse
+proxy; the supplied proxy configuration already forwards them. Do not log request
+bodies or authorization-page query strings (which can include client state), or
+token and authorization-code responses. Metadata, registration, token and revocation
+endpoints support CORS; the MCP endpoint retains the service's same-origin policy
+when an `Origin` header is supplied. Server-side and native MCP clients are unaffected.
+
+OAuth artifact URLs use `/mcp?artifact=<id>` with the same OAuth access token.
+API-key clients continue to use `/mcp/<agent-id>?artifact=<id>` with their API key.
 
 ## Build and run
 
@@ -59,6 +126,14 @@ disconnects revoked browsers.
 | `GET /extension` (WebSocket) | Browser connection: `hello` with access token → `challenge` → `proof` signed by the device key → `welcome` |
 | `POST /mcp/<agent-id>` | Streamable HTTP MCP, `Authorization: Bearer <key>`, stateless |
 | `GET`/`HEAD`/`DELETE /mcp/<agent-id>?artifact=<artifact_id>` | Download (`X-Content-SHA256`, `Content-Disposition: attachment`) or delete one of the agent's artifacts; same bearer key as MCP; foreign/expired IDs are `404` |
+| `GET /.well-known/oauth-protected-resource[/mcp]` | OAuth resource metadata (when OAuth is enabled) |
+| `GET /.well-known/oauth-authorization-server` | OAuth issuer, endpoints, grants and PKCE metadata |
+| `POST /oauth/register` | Dynamic OAuth client registration; no browser authority |
+| `GET`/`POST /oauth/authorize` | Browser authorization form and extension pairing approval |
+| `POST /oauth/token` | Form-encoded authorization-code exchange or refresh-token rotation |
+| `POST /oauth/revoke` | Form-encoded token revocation, authenticated as the registered client |
+| `POST /mcp` | OAuth-authenticated stateless MCP; bearer access token identifies the agent |
+| `GET`/`HEAD`/`DELETE /mcp?artifact=<artifact_id>` | OAuth-authenticated artifact access scoped to that identity |
 
 Registration is open and rate-limited. A registered browser can do nothing
 until a person pairs an agent in its window. Unpaired browsers are deleted

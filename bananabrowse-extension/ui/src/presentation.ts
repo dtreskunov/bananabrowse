@@ -3,6 +3,7 @@ export interface Agent {
   name: string;
   url: string | null;
   color?: string;
+  oauth_client?: boolean;
 }
 export interface TabView {
   tabId: number;

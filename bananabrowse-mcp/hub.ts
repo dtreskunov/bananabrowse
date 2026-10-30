@@ -184,6 +184,7 @@ export interface AgentInfo {
   name: string;
   url: string | null;
   color: string;
+  oauth_client?: boolean;
 }
 
 function waitFor<T = unknown>(
@@ -247,7 +248,14 @@ export class Hub {
     this.store = store;
     this.config = config;
     this.now = config.now || Date.now;
-    this.agents = config.agents || new Map();
+    this.agents = new Map(config.agents);
+    store.db
+      .prepare('DELETE FROM oauth_agents WHERE NOT EXISTS (SELECT 1 FROM pairings WHERE agent_id=oauth_agents.id)')
+      .run();
+    for (const agent of store.oauthAgents()) {
+      requireValue(!this.agents.has(agent.id), 'DUPLICATE_AGENT_ID');
+      this.agents.set(agent.id, agent);
+    }
     store.pruneAgents([...this.agents.keys()]);
     this.artifacts = new ArtifactStore({ directory: config.artifacts ?? null, now: this.now });
     this.artifacts.prune([...this.agents.keys()]);
@@ -271,7 +279,15 @@ export class Hub {
 
   agent(id: string): AgentInfo | undefined {
     const agent = this.agents.get(id);
-    return agent && { id: agent.id, name: agent.name, url: agent.url, color: agentColor(agent.id) };
+    return (
+      agent && {
+        id: agent.id,
+        name: agent.name,
+        url: agent.url,
+        color: agentColor(agent.id),
+        ...(agent.key_hash === null ? { oauth_client: true } : {}),
+      }
+    );
   }
   issueAccessToken(browserId: string): { access_token: string; expires_at: number } {
     for (const [key, row] of this.tokens) if (row.expires <= this.now()) this.tokens.delete(key);
@@ -711,13 +727,37 @@ export class Hub {
       return;
     }
   }
-  async pairBrowser(agentId: string, code: unknown, timeoutMs: number, signal?: AbortSignal): Promise<Wire> {
+  async authorizeOAuth(clientId: string, code: unknown, signal: AbortSignal): Promise<Agent> {
+    const entry = this.codes.get(this.codeHash(code));
+    requireValue(entry && entry.expires > this.now(), 'PAIRING_UNAVAILABLE', 404);
+    const agent = this.store.oauthAgent(clientId, entry.browser_id);
+    this.agents.set(agent.id, this.agents.get(agent.id) || agent);
+    try {
+      await this.pairBrowser(agent.id, code, PAIRING_CODE_MS, signal, true);
+      return this.agents.get(agent.id)!;
+    } finally {
+      const waiting = [...this.codes.values()].some(
+        (row) => row.proposal?.agent_id === agent.id && row.proposal.waiters.size,
+      );
+      if (!waiting && !this.store.browsersForAgent(agent.id).length) {
+        this.store.db.prepare('DELETE FROM oauth_agents WHERE id=?').run(agent.id);
+        this.agents.delete(agent.id);
+      }
+    }
+  }
+  async pairBrowser(
+    agentId: string,
+    code: unknown,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    requireApproval = false,
+  ): Promise<Wire> {
     this.rates.take(`pair:${agentId}`, 20);
     this.rates.take('pair:global', 200);
     const key = this.codeHash(code),
       entry = this.codes.get(key);
     requireValue(entry && entry.expires > this.now(), 'PAIRING_UNAVAILABLE', 404);
-    if (this.store.paired(agentId, entry.browser_id)) {
+    if (!requireApproval && this.store.paired(agentId, entry.browser_id)) {
       const browser = this.store.browser(entry.browser_id)!;
       return { browser_id: browser.id, name: browser.name, paired: true };
     }
@@ -1368,6 +1408,8 @@ export class Hub {
     });
   }
   reconcile(): void {
+    const oauthIds = new Set(this.store.oauthAgents().map((agent) => agent.id));
+    for (const [id, agent] of this.agents) if (agent.key_hash === null && !oauthIds.has(id)) this.agents.delete(id);
     for (const conn of [...this.connections.values()]) {
       if (!this.store.browser(conn.browser_id!)) {
         this.send(conn, { type: 'revoked' });

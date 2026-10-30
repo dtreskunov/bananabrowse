@@ -10,6 +10,7 @@ import {
   type Wire,
 } from '../shared/protocol.js';
 import { requireValue } from './errors.js';
+import type { Agent } from './config.js';
 
 export const SCHEMA_VERSION = 6;
 export const REFRESH_GRACE_MS = 300_000;
@@ -107,6 +108,35 @@ export class Store {
       if (!tables.length && version === 0) initializeSchema(this.db);
       // Clean break: older layouts are never upgraded in place.
       else requireValue(version === SCHEMA_VERSION, 'SCHEMA_VERSION_UNSUPPORTED');
+      // Additive OAuth tables preserve existing v6 browsers, pairings and sessions.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT, redirect_uris TEXT NOT NULL,
+          auth_method TEXT NOT NULL, secret_hash TEXT, created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS oauth_agents (
+          id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS oauth_grants (
+          id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES oauth_agents(id) ON DELETE CASCADE,
+          expires_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS oauth_codes (
+          hash TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES oauth_agents(id) ON DELETE CASCADE,
+          redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL,
+          expires_at INTEGER NOT NULL, grant_id TEXT REFERENCES oauth_grants(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS oauth_tokens (
+          hash TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES oauth_grants(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS oauth_agents_client ON oauth_agents(client_id);
+        CREATE INDEX IF NOT EXISTS oauth_grants_agent ON oauth_grants(agent_id);
+        CREATE INDEX IF NOT EXISTS oauth_codes_agent ON oauth_codes(agent_id);
+        CREATE INDEX IF NOT EXISTS oauth_tokens_grant ON oauth_tokens(grant_id);
+        CREATE TRIGGER IF NOT EXISTS oauth_unpaired AFTER DELETE ON pairings
+          WHEN NOT EXISTS (SELECT 1 FROM pairings WHERE agent_id=OLD.agent_id)
+          BEGIN
+            DELETE FROM oauth_codes WHERE agent_id=OLD.agent_id;
+            DELETE FROM oauth_grants WHERE agent_id=OLD.agent_id;
+            DELETE FROM oauth_agents WHERE id=OLD.agent_id;
+          END;
+      `);
     } catch (error) {
       this.db.close();
       throw error;
@@ -283,6 +313,34 @@ export class Store {
     }[]) {
       if (!known.has(agent_id)) this.db.prepare('DELETE FROM pairings WHERE agent_id=?').run(agent_id);
     }
+  }
+  oauthAgents(): Agent[] {
+    return this.db
+      .prepare(
+        `SELECT a.id,c.name,c.url,NULL AS key_hash FROM oauth_agents a
+           JOIN oauth_clients c ON c.id=a.client_id`,
+      )
+      .all() as unknown as Agent[];
+  }
+  oauthAgent(clientId: string, browserId: string): Agent {
+    const existing = this.db
+      .prepare(
+        `SELECT a.id FROM oauth_agents a JOIN pairings p ON p.agent_id=a.id
+           WHERE a.client_id=? AND p.browser_id=? ORDER BY p.created_at,a.id LIMIT 1`,
+      )
+      .get(clientId, browserId);
+    const client = this.db.prepare('SELECT name,url FROM oauth_clients WHERE id=?').get(clientId);
+    requireValue(client, 'NOT_AUTHORIZED', 401);
+    const id = existing ? String(existing.id) : `oauth-${randomBytes(12).toString('hex')}`;
+    if (!existing) {
+      requireValue(
+        Number(this.db.prepare('SELECT count(*) AS n FROM oauth_agents').get()!.n) < 10_000,
+        'RATE_LIMITED',
+        429,
+      );
+      this.db.prepare('INSERT INTO oauth_agents(id,client_id) VALUES(?,?)').run(id, clientId);
+    }
+    return { id, name: String(client.name), url: client.url === null ? null : String(client.url), key_hash: null };
   }
 
   createSession({

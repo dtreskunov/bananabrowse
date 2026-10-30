@@ -367,7 +367,7 @@ export function publicArtifact(hub: Hub, meta: ArtifactMeta): Wire {
     bytes: meta.bytes,
     sha256: meta.sha256,
     expires_at: new Date(meta.expires_at).toISOString(),
-    download_url: `${hub.config.origin}/mcp/${meta.agent_id}?artifact=${meta.id}`,
+    download_url: `${hub.config.origin}/mcp${hub.agents.get(meta.agent_id)?.key_hash === null ? '' : `/${meta.agent_id}`}?artifact=${meta.id}`,
   };
 }
 function readArtifact(hub: Hub, agentId: string, args: Wire): Wire {

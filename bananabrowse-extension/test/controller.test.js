@@ -78,6 +78,16 @@ function fixture({ groups = [], tabs = [], values = {}, run = false, firefox = t
 const A = '11111111-1111-4111-8111-111111111111';
 const server = [{ session_id: 's1', client_id: A, agent_id: 'atlas', title: 'Flights', purpose: 'p', group_id: 'g1' }];
 
+test('pairing preserves the self-reported OAuth client warning for the approval UI', () => {
+  const { controller } = fixture();
+  controller.pairing = { code: 'K7MP-4QTX', state: 'ready', expires_at: Date.now() + 300_000, proposal: null };
+  controller.proposal({
+    request_id: A,
+    agent: { id: 'oauth-test', name: 'OAuth client', url: null, oauth_client: true },
+  });
+  assert.equal(controller.snapshot().pairing.proposal.agent.oauth_client, true);
+});
+
 test('no inventory is sent until reattach has finished', async () => {
   const { controller, sent } = fixture();
   controller.ready = false;

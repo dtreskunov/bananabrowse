@@ -25,6 +25,12 @@ export function Requests({ snapshot }: { snapshot: Snapshot }) {
             Pair with {proposal.agent.name}?
           </h2>
           {proposal.agent.url && <p class="muted">{hostOf(proposal.agent.url)}</p>}
+          {proposal.agent.oauth_client && (
+            <p>
+              This is an OAuth client. Its name and website are self-reported, not verified by the operator. Approve
+              only if you just started connecting this client.
+            </p>
+          )}
           <p>{proposal.agent.name} will be able to ask to open browser sessions here. You approve each one.</p>
           <Actions>
             <button

@@ -35,6 +35,7 @@ interface Agent {
   name: string;
   url?: string | null;
   color?: GroupColor;
+  oauth_client?: boolean;
 }
 interface Candidate {
   groupId: number;
@@ -1202,7 +1203,12 @@ export class Controller {
     this.pairing.state = 'proposed';
     this.pairing.proposal = {
       request_id: message.request_id,
-      agent: { id: message.agent.id, name: String(message.agent.name).slice(0, 80), url: message.agent.url || null },
+      agent: {
+        id: message.agent.id,
+        name: String(message.agent.name).slice(0, 80),
+        url: message.agent.url || null,
+        ...(message.agent.oauth_client === true ? { oauth_client: true } : {}),
+      },
     };
     this.notify(
       'bananabrowse-pairing',

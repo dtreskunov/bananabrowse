@@ -22,7 +22,7 @@ export const THIRD_KEY = 'bb_vega-test-key-0123456789abcdef0';
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function start(options = {}) {
-  const store = new Store(':memory:', { now: options.now });
+  const store = new Store(options.db || ':memory:', { now: options.now });
   const agents = new Map([
     ['atlas', { id: 'atlas', name: 'Atlas', url: 'https://atlas.example/', key_hash: hash(AGENT_KEY) }],
     ['orion', { id: 'orion', name: 'Orion', url: null, key_hash: hash(OTHER_KEY) }],
@@ -48,7 +48,7 @@ export async function start(options = {}) {
     async mcp(agent = 'atlas', key = AGENT_KEY) {
       const client = new Client({ name: 'fixture', version: '1' });
       await client.connect(
-        new StreamableHTTPClientTransport(new URL(`${base}/mcp/${agent}`), {
+        new StreamableHTTPClientTransport(new URL(`${base}/mcp${agent ? `/${agent}` : ''}`), {
           requestInit: { headers: { Authorization: `Bearer ${key}` } },
         }),
       );

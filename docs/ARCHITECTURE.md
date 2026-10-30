@@ -10,7 +10,7 @@ re-register and agents re-pair.
   with native browser gestures: the extension window is the on/off switch, a tab
   group is a session, tab membership is tab-level consent.
 - No sidebar or toolbar popup. The extension UI is a single app-like window.
-- No user accounts. The server knows agents (operator-configured) and browsers
+- No user accounts. The server knows agents (operator-configured or OAuth-authorized) and browsers
   (self-registered extension instances), and the pairings between them.
 
 ## 2. Components
@@ -20,7 +20,7 @@ re-register and agents re-pair.
 | BananaBrowse server | MCP endpoint per agent, browser registration/token endpoint, WSS hub, SQLite store |
 | Extension window | Single-instance popup window. Owns the WebSocket, controller, tab/group reconciliation and all UI |
 | Extension background | Thin: toolbar click, tab context menu, notification click, optional open-at-startup. Focuses/opens the window |
-| Agent | MCP client authenticated by API key at `/mcp/<agent-id>` |
+| Agent | MCP client authenticated by API key at `/mcp/<agent-id>` or OAuth access token at `/mcp` |
 
 The extension only works while its window is open. Everything that drives tabs
 runs in the window document, so closing the window ends the connection by
@@ -39,6 +39,24 @@ and appears in the MCP path. Only key hashes are stored;
 `admin.js agent-key <id> "<Name>" [homepage]` generates a key and prints the env
 line. Removing an agent from `.env` revokes
 its pairings and sessions.
+
+With `BANANABROWSE_OAUTH_ENABLED=true`, clients may dynamically register via
+`/oauth/register` and authenticate at `/mcp` using authorization-code OAuth with
+PKCE S256. Public registration has no browser authority. The authorization page
+requires an extension pairing code and local approval before issuing a code.
+OAuth client names and websites are self-reported, explicitly flagged in the
+approval UI. Discovery, endpoints and token lifetimes are documented in the
+[service guide](../bananabrowse-mcp/README.md#oauth-with-dynamic-client-registration).
+
+A DCR registration is not an agent identity. First authorization creates an
+`oauth-<random>` identity; reauthorization of that client through an already-paired
+browser reuses its identity after approval. Independent users of a shared DCR
+registration have separate identities. Each identity can pair multiple browsers
+via `pair_browser`; tokens cover that identity's pairings, not one browser.
+Removing one pairing preserves its other browsers; removing the last revokes
+the identity and its codes, grants and tokens. OAuth clients, identities and
+hashed credentials persist in additive schema-6 tables. API keys are never
+issued to dynamically created identities.
 
 **Browsers** self-register. Anyone who can reach the server can register a
 browser (rate-limited); a registered browser has no authority until paired.
@@ -65,7 +83,8 @@ One server per extension install. Changing the server domain wipes the identity
 1. In the window, the user clicks **Pair an agent**. The extension shows an
    8-character code (`K7MP-4QTX`, 40 bits, 5-minute expiry, single use).
 2. The user gives the code to their agent, which calls `pair_browser({code})`.
-3. The window shows the operator-configured agent name and homepage:
+3. The window shows the agent name and homepage (operator-configured for API-key
+   agents, explicitly marked as self-reported for OAuth clients):
    "Atlas (atlas.example) wants to use Bob's Firefox on Mac". **Approve** /
    **Decline**.
 4. The pairing persists until revoked in the window (Settings → Paired agents)
@@ -78,7 +97,7 @@ are stored as keyed hashes, never logged, and guessing is rate-limited per agent
 
 IDs are short, prefixed, never reused, server-global base-36 counters: `b7`
 (browser), `s12` (session), `g12` (tab group), `t41` (tab). Agents use their
-configured ID. IDs are not authority: every lookup is scoped to the calling
+configured or server-generated OAuth ID. IDs are not authority: every lookup is scoped to the calling
 agent's pairings, and unknown or foreign IDs return the same `NOT_FOUND`.
 
 | Entity | Fields | Notes |
@@ -167,7 +186,7 @@ count, and one system notification is shown. Clicking the notification focuses t
 window and the target tab. Clicking or dismissing never means Done. Firefox
 notifications have no buttons, so all decisions happen in the window.
 
-## 7. MCP surface (`/mcp/<agent-id>`, API key in the Authorization header)
+## 7. MCP surface (`/mcp/<agent-id>` with API keys, `/mcp` with OAuth)
 
 29 tools: the 13 below plus the 16 page operations.
 
@@ -213,7 +232,8 @@ Requires extension 6.1.0+; older extensions get `CAPABILITY_UNAVAILABLE` with
 `required_extension_version` before dispatch.
 
 `GET|HEAD|DELETE /mcp/<agent-id>?artifact=<artifact_id>` uses the same bearer
-key as MCP. The artifact rides on the exact MCP path so credential proxies that
+key as MCP; OAuth identities use `/mcp?artifact=<artifact_id>` and their access
+token instead. The artifact rides on the exact MCP path so credential proxies that
 match the path exactly (OneCLI ignores the query string) cover it too. A foreign
 or expired ID is `404`. Downloads carry `Content-Disposition: attachment`,
 `X-Content-SHA256` and an `ETag`; the service's CSP/`nosniff`/`no-store` headers

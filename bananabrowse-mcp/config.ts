@@ -8,7 +8,7 @@ export interface Agent {
   id: string;
   name: string;
   url: string | null;
-  key_hash: string;
+  key_hash: string | null;
 }
 export interface Config {
   origin: string;
@@ -19,6 +19,7 @@ export interface Config {
   protectedOrigins: string[];
   agents: Map<string, Agent>;
   pairingSecret: string | null;
+  oauthEnabled?: boolean;
   now?: () => number;
 }
 
@@ -97,6 +98,10 @@ export function loadConfig(env: Env = process.env): Config {
   }
   const db = env.BANANABROWSE_DB || './data/bananabrowse.db';
   const artifacts = env.BANANABROWSE_ARTIFACTS_DIR || (db === ':memory:' ? null : join(dirname(db), 'artifacts'));
+  requireValue(
+    !env.BANANABROWSE_OAUTH_ENABLED || ['true', 'false'].includes(env.BANANABROWSE_OAUTH_ENABLED),
+    'INVALID_OAUTH_CONFIG',
+  );
   return {
     origin,
     bind: env.BANANABROWSE_BIND || '127.0.0.1',
@@ -106,5 +111,6 @@ export function loadConfig(env: Env = process.env): Config {
     protectedOrigins: [...new Set(protectedOrigins)],
     agents: parseAgents(env),
     pairingSecret: secret(env, 'BANANABROWSE_PAIRING_SECRET'),
+    oauthEnabled: env.BANANABROWSE_OAUTH_ENABLED === 'true',
   };
 }

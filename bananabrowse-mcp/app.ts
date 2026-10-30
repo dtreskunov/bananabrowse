@@ -19,32 +19,12 @@ import type { Agent, Config } from './config.js';
 import { Fault, requireValue, failureCode, audit } from './errors.js';
 import { RateLimiter } from './rate.js';
 import { SERVICE_VERSION } from './version.js';
+import { body, json } from './http.js';
+import { OAuth } from './oauth.js';
 
 export { SERVICE_VERSION } from './version.js';
 const CHALLENGE_MS = 300_000;
 
-async function body(req: IncomingMessage, limit = 262144): Promise<Wire> {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    requireValue(size <= limit, 'PAYLOAD_TOO_LARGE', 413);
-    chunks.push(chunk);
-  }
-  requireValue(req.headers['content-type']?.split(';')[0] === 'application/json', 'CONTENT_TYPE_REQUIRED', 415);
-  let value: unknown;
-  try {
-    value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    throw new Fault('INVALID_JSON');
-  }
-  requireValue(value && typeof value === 'object' && !Array.isArray(value), 'INVALID_JSON');
-  return value as Wire;
-}
-function json(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(value));
-}
 const allowedFields = (data: Wire, required: string[], optional: string[] = []): void => {
   requireValue(
     required.every((k) => Object.hasOwn(data, k)) &&
@@ -88,13 +68,15 @@ function sendArtifact(res: ServerResponse, hub: Hub, agent: Agent, id: string, m
   res.end(method === 'HEAD' ? undefined : data);
 }
 export function agentKeyMatches(agent: Agent | undefined, presented: unknown): boolean {
-  if (!agent || typeof presented !== 'string' || presented.length < 16 || presented.length > 512) return false;
+  if (!agent?.key_hash || typeof presented !== 'string' || presented.length < 16 || presented.length > 512)
+    return false;
   return timingSafeEqual(Buffer.from(hash(presented), 'hex'), Buffer.from(agent.key_hash, 'hex'));
 }
 
 export function createApp(store: Store, config: Config) {
   const hub = new Hub(store, config),
     now = config.now || Date.now;
+  const oauth = config.oauthEnabled ? new OAuth(store, config, hub) : null;
   const challenges = new Map<string, { origin: string; expires_at: number }>(),
     rates = new RateLimiter(now);
   let activeMcp = 0;
@@ -140,11 +122,12 @@ export function createApp(store: Store, config: Config) {
       path = url.pathname,
       method = req.method,
       origin = req.headers.origin;
+    if (oauth && (await oauth.route(req, res, url))) return;
     // Artifacts live at /mcp/<agent>?artifact=<id> so that credential proxies scoped to the exact MCP path also cover them.
     const query = [...url.searchParams],
       artifactId = query.length === 1 && query[0][0] === 'artifact' ? query[0][1] : null;
     requireValue(
-      !url.search || (/^\/mcp\//.test(path) && ARTIFACT_ID_PATTERN.test(artifactId || '')),
+      !url.search || (/^\/mcp(?:\/|$)/.test(path) && ARTIFACT_ID_PATTERN.test(artifactId || '')),
       'INVALID_ARGUMENTS',
     );
     if (path === '/health' && method === 'GET') {
@@ -259,16 +242,20 @@ export function createApp(store: Store, config: Config) {
       return;
     }
     const mcp = /^\/mcp\/([a-z0-9-]{1,32})$/.exec(path);
-    if (mcp) {
-      requireValue(
-        artifactId ? ['GET', 'HEAD', 'DELETE'].includes(method!) : method === 'POST',
-        'METHOD_NOT_ALLOWED',
-        405,
-      );
+    if (mcp || (path === '/mcp' && oauth)) {
+      const allowedMethod = artifactId ? ['GET', 'HEAD', 'DELETE'].includes(method!) : method === 'POST';
+      if (mcp) requireValue(allowedMethod, 'METHOD_NOT_ALLOWED', 405);
       requireValue(!origin || origin === config.origin, 'NOT_AUTHORIZED', 403);
-      const agent = hub.agents.get(mcp[1]);
       const presented = /^Bearer ([^\s]+)$/.exec(req.headers.authorization || '')?.[1];
-      requireValue(agentKeyMatches(agent, presented), 'NOT_AUTHORIZED', 401);
+      const agent = mcp ? hub.agents.get(mcp[1]) : oauth!.authenticate(presented);
+      const authorized = mcp ? agentKeyMatches(agent, presented) : Boolean(agent);
+      if (!authorized && !mcp)
+        res.setHeader(
+          'WWW-Authenticate',
+          `Bearer resource_metadata="${config.origin}/.well-known/oauth-protected-resource/mcp", scope="mcp"${presented ? ', error="invalid_token"' : ''}`,
+        );
+      requireValue(authorized, 'NOT_AUTHORIZED', 401);
+      requireValue(allowedMethod, 'METHOD_NOT_ALLOWED', 405);
       requireValue(activeMcp < 256, 'RATE_LIMITED', 429);
       rates.take(`mcp:${agent!.id}`, 600);
       if (artifactId) {

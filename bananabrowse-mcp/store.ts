@@ -107,6 +107,7 @@ export function initializeSchema(db: DatabaseSync): void {
 export class Store {
   now: () => number;
   db: DatabaseSync;
+  private readonly sessionTokenKey: string;
   constructor(path: string, options: { now?: () => number } = {}) {
     this.now = options.now || Date.now;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -156,6 +157,11 @@ export class Store {
             DELETE FROM oauth_agents WHERE id=OLD.agent_id;
           END;
       `);
+      // A persisted server key makes recovery deterministic without storing plaintext task credentials.
+      this.db.prepare("INSERT OR IGNORE INTO metadata(key,value) VALUES('session-token-key',?)").run(token());
+      this.sessionTokenKey = String(
+        this.db.prepare("SELECT value FROM metadata WHERE key='session-token-key'").get()!.value,
+      );
     } catch (error) {
       this.db.close();
       throw error;
@@ -424,10 +430,7 @@ export class Store {
     });
   }
   sessionToken(agentId: string, requestKey: string): string {
-    // A persisted server key makes recovery deterministic without storing plaintext task credentials.
-    this.db.prepare("INSERT OR IGNORE INTO metadata(key,value) VALUES('session-token-key',?)").run(token());
-    const key = String(this.db.prepare("SELECT value FROM metadata WHERE key='session-token-key'").get()!.value);
-    return createHmac('sha256', key)
+    return createHmac('sha256', this.sessionTokenKey)
       .update(JSON.stringify([agentId, requestKey]))
       .digest('base64url');
   }

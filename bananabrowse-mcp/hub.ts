@@ -961,36 +961,34 @@ export class Hub {
         },
         this.now,
       );
-    } catch (error) {
-      this.sessionRequests.delete(request.id);
-      if (!request.session_id) this.send(conn, { type: 'session.request.cancel', request_id: request.id });
-      throw error;
-    }
-    // Approval committed: give the first inventory a bounded chance to publish starting tabs.
-    const sessionId = request.session_id!;
-    try {
-      await waitFor(
-        this.now() + 10_000,
-        signal,
-        (finish) => {
-          request.check = () => {
-            if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId) || !this.current(conn)) finish();
-          };
-          request.check();
-          return () => {
-            request.check = null;
-          };
-        },
-        this.now,
-      );
-    } catch (error) {
-      if ((error as Fault).code !== 'COMMAND_EXPIRED') throw error;
+      // Approval committed: give the first inventory a bounded chance to publish starting tabs.
+      const sessionId = request.session_id!;
+      try {
+        await waitFor(
+          this.now() + 10_000,
+          signal,
+          (finish) => {
+            request.check = () => {
+              if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId) || !this.current(conn))
+                finish();
+            };
+            request.check();
+            return () => {
+              request.check = null;
+            };
+          },
+          this.now,
+        );
+      } catch (error) {
+        if ((error as Fault).code !== 'COMMAND_EXPIRED') throw error;
+      }
+      const row = this.store.session(sessionId);
+      requireValue(row, 'SESSION_ENDED');
+      return this.requestedSession(row, args.request_key);
     } finally {
       this.sessionRequests.delete(request.id);
+      if (!request.session_id) this.send(conn, { type: 'session.request.cancel', request_id: request.id });
     }
-    const row = this.store.session(sessionId);
-    requireValue(row, 'SESSION_ENDED');
-    return this.requestedSession(row, args.request_key);
   }
   requestedSession(row: SessionRow, requestKey: string): Wire {
     const live = this.live.get(row.id);

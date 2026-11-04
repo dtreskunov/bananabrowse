@@ -448,6 +448,7 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       ),
       ...(urls ? validateUrls(args) : []),
     ]);
+    const credentials = { agentId: agent.id, sessionToken: args.session_token };
     let result: Wire | undefined;
     if (name === 'pair_browser')
       result = await hub.pairBrowser(agent.id, args.code, (args.timeout_seconds ?? 300) * 1000, signal);
@@ -456,13 +457,12 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
     else if (name === 'end_session') {
-      if (args.close_tabs !== true) result = hub.endSessionByAgent(agent.id, args.session_id, args.session_token);
+      if (args.close_tabs !== true) result = hub.endSessionByAgent(credentials, args.session_id);
       else {
         requireArguments(Object.hasOwn(args, 'description') ? [] : [{ field: 'description', reason: 'required' }]);
         result = await hub.closeSessionTabs(
-          agent.id,
+          credentials,
           args.session_id,
-          args.session_token,
           args.description,
           (args.timeout_seconds ?? 300) * 1000,
           signal,
@@ -470,33 +470,29 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       }
     } else if (name === 'close_tab') {
       result = await hub.closeTab(
-        agent.id,
+        credentials,
         args.tab_id,
-        args.session_token,
         args.description,
         (args.timeout_seconds ?? 300) * 1000,
         signal,
       );
-    } else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id, args.session_token);
+    } else if (name === 'list_tabs') result = hub.listTabs(credentials, args.session_id);
     else if (name === 'create_tab') {
       result = (await hub.createTab(
-        agent.id,
+        credentials,
         args.session_id,
-        args.session_token,
         args.url === undefined ? {} : { url: args.url },
         args.description,
         signal,
       )) as Wire | undefined;
-    } else if (name === 'report_progress')
-      result = hub.reportProgress(agent.id, args.session_id, args.session_token, args.message);
+    } else if (name === 'report_progress') result = hub.reportProgress(credentials, args.session_id, args.message);
     else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map((meta) => publicArtifact(hub, meta));
     else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
     else if (name === 'request_handoff') {
       const { tab_id, session_token, timeout_seconds, ...handoff } = args;
       result = (await hub.operate(
-        agent.id,
+        credentials,
         tab_id,
-        session_token,
         name,
         handoff,
         null,
@@ -505,8 +501,7 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       )) as Wire | undefined;
     } else {
       const { tab_id, session_token, description: intent, ...operationArgs } = args;
-      result = (await hub.operate(agent.id, tab_id, session_token, name, operationArgs, intent, 0, signal)) as
-        Wire | undefined;
+      result = (await hub.operate(credentials, tab_id, name, operationArgs, intent, 0, signal)) as Wire | undefined;
     }
     if (name === 'get_screenshot') {
       requireValue(

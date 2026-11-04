@@ -147,6 +147,10 @@ interface Authority {
   operation: string;
   connection_id?: string;
 }
+interface SessionCredentials {
+  agentId: string;
+  sessionToken: unknown;
+}
 interface Call extends Authority {
   connection_id: string;
   conn: Conn;
@@ -796,7 +800,7 @@ export class Hub {
   }
 
   // ---------- sessions ----------
-  requireSession(agentId: string, sessionId: unknown, sessionToken: unknown): SessionRow {
+  requireSession({ agentId, sessionToken }: SessionCredentials, sessionId: unknown): SessionRow {
     const row = validShortId('s', sessionId) && this.store.session(sessionId);
     requireValue(
       row &&
@@ -808,12 +812,8 @@ export class Hub {
     );
     return row;
   }
-  requireAttached(
-    agentId: string,
-    sessionId: unknown,
-    sessionToken: unknown,
-  ): { row: SessionRow; conn: Conn; live: Live } {
-    const row = this.requireSession(agentId, sessionId, sessionToken);
+  requireAttached(credentials: SessionCredentials, sessionId: unknown): { row: SessionRow; conn: Conn; live: Live } {
+    const row = this.requireSession(credentials, sessionId);
     const conn = this.online(row.browser_id);
     requireValue(conn, 'BROWSER_OFFLINE');
     const live = this.live.get(row.id);
@@ -874,8 +874,8 @@ export class Hub {
       .filter((row) => this.store.paired(agentId, row.browser_id))
       .map((row) => this.publicSession(row));
   }
-  listTabs(agentId: string, sessionId: unknown, sessionToken: unknown): Wire[] {
-    const { live } = this.requireAttached(agentId, sessionId, sessionToken);
+  listTabs(credentials: SessionCredentials, sessionId: unknown): Wire[] {
+    const { live } = this.requireAttached(credentials, sessionId);
     return [...live.tabs.values()].map((target) => this.publicTab(target));
   }
   async requestSession(agentId: string, args: Wire, signal?: AbortSignal): Promise<Wire> {
@@ -1044,33 +1044,32 @@ export class Hub {
     });
     request.finish(null);
   }
-  endSessionByAgent(agentId: string, sessionId: string, sessionToken: unknown): Wire {
-    this.requireSession(agentId, sessionId, sessionToken);
+  endSessionByAgent(credentials: SessionCredentials, sessionId: string): Wire {
+    this.requireSession(credentials, sessionId);
     this.endSession(sessionId, 'SESSION_ENDED', true);
     return { session_id: sessionId, ended: true, tabs_closed: false };
   }
   // Closing tabs is never automatic: the extension asks the user and only closes after an explicit approval.
   async closeSessionTabs(
-    agentId: string,
+    credentials: SessionCredentials,
     sessionId: string,
-    sessionToken: unknown,
     description: unknown,
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<Wire> {
-    const { live } = this.requireAttached(agentId, sessionId, sessionToken);
+    const { live } = this.requireAttached(credentials, sessionId);
     requireExtension(live.conn, 'close_tabs');
     requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
     await this.dispatch(live, null, 'close_session', {}, description, this.now() + waitMs, signal);
     this.endSession(sessionId, 'SESSION_ENDED', false);
     return { session_id: sessionId, ended: true, tabs_closed: true };
   }
-  reportProgress(agentId: string, sessionId: unknown, sessionToken: unknown, message: unknown): Wire {
-    const row = this.requireSession(agentId, sessionId, sessionToken);
+  reportProgress(credentials: SessionCredentials, sessionId: unknown, message: unknown): Wire {
+    const row = this.requireSession(credentials, sessionId);
     const conn = this.online(row.browser_id);
     requireValue(conn, 'BROWSER_OFFLINE');
-    this.rates.take(`progress:${agentId}`, 120);
-    this.send(conn, { type: 'progress', session_id: row.id, agent_id: agentId, message, at: this.now() });
+    this.rates.take(`progress:${credentials.agentId}`, 120);
+    this.send(conn, { type: 'progress', session_id: row.id, agent_id: credentials.agentId, message, at: this.now() });
     return { delivered: true };
   }
 
@@ -1122,7 +1121,8 @@ export class Hub {
     const first = live.slots.values().next().value;
     first?.release();
   }
-  findTarget(agentId: string, tabId: unknown, sessionToken: unknown): Target {
+  findTarget(credentials: SessionCredentials, tabId: unknown): Target {
+    const { agentId, sessionToken } = credentials;
     const owned = (target: Target | null | undefined): target is Target =>
       Boolean(target && target.live.agent_id === agentId);
     let target: Target | null | undefined = null;
@@ -1134,7 +1134,7 @@ export class Hub {
         }
       }
     if (owned(target)) {
-      this.requireSession(agentId, target.session_id, sessionToken);
+      this.requireSession(credentials, target.session_id);
       return target;
     }
     const tombstone = this.tombstones.get(tabId as string);
@@ -1148,16 +1148,15 @@ export class Hub {
     const row = validShortId('t', tabId) && this.store.tab(tabId);
     const session = row && this.store.session(row.session_id);
     if (session && session.agent_id === agentId) {
-      this.requireSession(agentId, session.id, sessionToken);
+      this.requireSession(credentials, session.id);
       requireValue(this.online(session.browser_id), 'BROWSER_OFFLINE');
       throw new Fault('SESSION_DETACHED');
     }
     throw new Fault('NOT_FOUND', 404);
   }
   async operate(
-    agentId: string,
+    credentials: SessionCredentials,
     tabId: unknown,
-    sessionToken: unknown,
     operation: string,
     args: Wire,
     description: unknown,
@@ -1179,7 +1178,7 @@ export class Hub {
         { tab_id: tabId, ...(operation === 'request_handoff' ? {} : { description }) },
       ),
     ]);
-    const target = this.findTarget(agentId, tabId, sessionToken);
+    const target = this.findTarget(credentials, tabId);
     const live = target.live;
     const probe = { live, target, operation };
     if (operation === 'query_all') requireExtension(live.conn, 'query_all');
@@ -1233,14 +1232,13 @@ export class Hub {
     }
   }
   async createTab(
-    agentId: string,
+    credentials: SessionCredentials,
     sessionId: unknown,
-    sessionToken: unknown,
     args: Wire,
     description: unknown,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const { live } = this.requireAttached(agentId, sessionId, sessionToken);
+    const { live } = this.requireAttached(credentials, sessionId);
     if (args.url !== undefined) {
       try {
         navigationUrl(args.url, this.config.protectedOrigins);
@@ -1264,14 +1262,13 @@ export class Hub {
     }
   }
   async closeTab(
-    agentId: string,
+    credentials: SessionCredentials,
     tabId: unknown,
-    sessionToken: unknown,
     description: unknown,
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<Wire> {
-    const target = this.findTarget(agentId, tabId, sessionToken),
+    const target = this.findTarget(credentials, tabId),
       live = target.live;
     this.checkAuthority({ live, target: null, operation: 'close_tab' });
     requireExtension(live.conn, 'close_tabs');

@@ -94,6 +94,8 @@ const sessionToken = {
   description:
     'Private session_token returned by request_session for this task. Required for every session/tab operation; never obtain one from another task.',
 };
+const sessionTarget = { session_id: session, session_token: sessionToken };
+const tabTarget = { tab_id: TAB_ID_SCHEMA, session_token: sessionToken };
 export const tools: Tool[] = [
   {
     name: 'pair_browser',
@@ -157,27 +159,25 @@ export const tools: Tool[] = [
       "End only this task's session when the task finishes, using its session_token. By default its tabs are ungrouped and stay open. close_tabs: true instead asks the user to approve closing the session's tabs (system notification plus a prompt in the BananaBrowse window showing your description) and waits; ACTION_DECLINED means the user kept them and the session continues. Untracked tabs, such as protected sites, are only ungrouped. Closing needs extension 6.1.3 and an online browser.",
     inputSchema: schema(
       {
-        session_id: session,
-        session_token: sessionToken,
+        ...sessionTarget,
         close_tabs: { type: 'boolean', default: false },
         description: { ...description, description: `Required with close_tabs. ${description.description}` },
         timeout_seconds: humanWait,
       },
-      ['session_id', 'session_token'],
+      Object.keys(sessionTarget),
     ),
   },
   {
     name: 'list_tabs',
     description:
       'Tabs in an attached session with tab_id, title, URL, page_state, capabilities and execution_state. Every tab in the session tab group is in scope, including tabs the user drags in and tabs a site opens from a grouped tab.',
-    inputSchema: schema({ session_id: session, session_token: sessionToken }),
+    inputSchema: schema(sessionTarget),
   },
   {
     name: 'create_tab',
     description: `Open a new background tab in the session tab group (maximum ${SESSION_TAB_LIMIT}). Never steals focus. Do not retry automatically after an uncertain result.`,
-    inputSchema: schema({ session_id: session, session_token: sessionToken, url: urlField, description }, [
-      'session_id',
-      'session_token',
+    inputSchema: schema({ ...sessionTarget, url: urlField, description }, [
+      ...Object.keys(sessionTarget),
       'description',
     ]),
   },
@@ -185,28 +185,24 @@ export const tools: Tool[] = [
     name: 'close_tab',
     description:
       "Ask the user to close one tab in your session, for example a scratch tab you opened. The user gets a system notification and approves or keeps the tab in the BananaBrowse window; this waits for that decision (ACTION_DECLINED: the tab stays). After closing, pending commands on it fail with TAB_NOT_IN_SESSION. Closing the session's last tab ends the session (session_ended: true). Needs extension 6.1.3.",
-    inputSchema: schema(
-      { tab_id: TAB_ID_SCHEMA, session_token: sessionToken, description, timeout_seconds: humanWait },
-      ['tab_id', 'session_token', 'description'],
-    ),
+    inputSchema: schema({ ...tabTarget, description, timeout_seconds: humanWait }, [
+      ...Object.keys(tabTarget),
+      'description',
+    ]),
   },
   {
     name: 'report_progress',
     description: "Post a short progress update to the user's BananaBrowse activity feed for this session.",
-    inputSchema: schema({
-      session_id: session,
-      session_token: sessionToken,
-      message: { type: 'string', minLength: 1, maxLength: 500 },
-    }),
+    inputSchema: schema({ ...sessionTarget, message: { type: 'string', minLength: 1, maxLength: 500 } }),
   },
   {
     name: 'request_handoff',
     description:
       'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the BananaBrowse window. Only this tab waits; others can keep working.',
-    inputSchema: schema(
-      { tab_id: TAB_ID_SCHEMA, session_token: sessionToken, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait },
-      ['tab_id', 'session_token', 'instructions'],
-    ),
+    inputSchema: schema({ ...tabTarget, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait }, [
+      ...Object.keys(tabTarget),
+      'instructions',
+    ]),
   },
   {
     name: 'list_artifacts',
@@ -235,10 +231,11 @@ export const tools: Tool[] = [
     name,
     description: `${name} in a session tab. ${NOTES[name] || ''}`.trim(),
     inputSchema: {
-      ...schema(
-        { tab_id: TAB_ID_SCHEMA, session_token: sessionToken, ...OPERATION_SCHEMAS[name].properties, description },
-        ['tab_id', 'session_token', 'description', ...OPERATION_SCHEMAS[name].required],
-      ),
+      ...schema({ ...tabTarget, ...OPERATION_SCHEMAS[name].properties, description }, [
+        ...Object.keys(tabTarget),
+        'description',
+        ...OPERATION_SCHEMAS[name].required,
+      ]),
       ...(OPERATION_SCHEMAS[name].anyOf ? { anyOf: OPERATION_SCHEMAS[name].anyOf } : {}),
     },
   })),

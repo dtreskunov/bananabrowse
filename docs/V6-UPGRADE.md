@@ -129,3 +129,28 @@ database migration is needed.
 - **Agent guidance.** Check existing sessions before requesting another group,
   use read-only selector probes, verify application outcomes after actions,
   and check optional capabilities before calling them.
+
+## Task-owned sessions
+
+This service update changes the MCP contract to one group per task. Wire v6
+and DB schema 6 remain unchanged; an additive `session_requests` table and a
+server signing key in metadata preserve existing browser registrations and
+pairings. No extension update or re-pairing is required. Rebuild/restart the
+service and rediscover its MCP tools/instructions.
+
+- `request_session` now requires a fresh random lowercase UUID `request_key`
+  per task and returns a private `session_token`.
+- Every session/tab operation requires that session's token, including page
+  tools, progress, handoff and cleanup. Session listings remain metadata-only.
+- Retry uncertain creation with the same key and original browser/purpose/
+  URLs/title to recover the same session and token, including after restart or
+  while offline. Never reuse an old key for a new task.
+- End only the current task's group with `end_session({session_id, session_token})`.
+  Tabs stay open unless the user approves `close_tabs: true`.
+- Existing tokenless sessions remain visible and their tabs are untouched, but
+  agents cannot claim or operate on them. The user should close/ungroup those
+  groups and approve fresh task-owned sessions. The same applies if a task
+  loses both its token and its recovery key.
+
+See [task ownership and recovery](../bananabrowse-mcp/README.md#task-owned-sessions)
+for pending/conflicting retries, retention and credential-handling rules.

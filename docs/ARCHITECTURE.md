@@ -98,7 +98,9 @@ are stored as keyed hashes, never logged, and guessing is rate-limited per agent
 IDs are short, prefixed, never reused, server-global base-36 counters: `b7`
 (browser), `s12` (session), `g12` (tab group), `t41` (tab). Agents use their
 configured or server-generated OAuth ID. IDs are not authority: every lookup is scoped to the calling
-agent's pairings, and unknown or foreign IDs return the same `NOT_FOUND`.
+agent's pairings and session/tab operations additionally require a private
+task capability. Unknown/foreign IDs and incorrect capabilities return the same
+`NOT_FOUND`.
 
 | Entity | Fields | Notes |
 | --- | --- | --- |
@@ -108,6 +110,28 @@ agent's pairings, and unknown or foreign IDs return the same `NOT_FOUND`.
 | `agent_session` | `id`, `agent_id`, `browser_id`, `tab_group_id`, `purpose`, `expires_at` | 1:1 with a tab group |
 | `tab_group` | `server_id`, `client_id`, `browser_id`, `agent_session_id`, `title` | `client_id` is browser-side only |
 | `tab` | `id`, `tab_group_id`, `url`, `title` | Live metadata, not history |
+| `session_request` | `agent_id`, `browser_id`, `request_hash`, `fingerprint`, `session_id?`, `access_hash`, `expires_at` | Additive schema-6 table; private task ownership and retry recovery |
+
+**One group per task.** Tasks sharing an agent identity do not share session
+authority. Each task generates and retains a fresh random UUID `request_key`.
+Approval atomically commits the session and its recovery record; the response
+includes a private `session_token`, derived with a persisted server HMAC key.
+Only hashes of task credentials are stored. Every session/tab operation checks
+the token against the target session before dispatch. Tokens and request keys
+never appear in session listings or browser messages.
+
+Retrying the same key and original browser/purpose/URLs/title recovers the same
+session and token, including offline or after restart. Concurrent duplicates
+return `SESSION_REQUEST_PENDING`; changed arguments return
+`SESSION_REQUEST_CONFLICT`. Completed sessions leave a recovery tombstone for
+seven days, returning `SESSION_ENDED` rather than creating another group.
+Unpairing removes the recovery records. Task boundaries are caller-declared;
+sharing a token/key deliberately shares access, and browser administration and
+artifacts remain agent-scoped.
+
+Legacy sessions without capabilities remain visible but are not claimable.
+Lost task credentials have no metadata-based reclaim path: the user ends the
+orphaned group and approves a new session.
 
 The server stores no activity history. The activity feed lives in extension local
 storage, capped at about 200 entries.
@@ -133,14 +157,15 @@ execution: `idle | running | waiting_for_human`. That is the whole state machine
 | User opens the window (toolbar, or at startup if enabled) | Connect. The extension reports all known groups; live ones reattach immediately (opening the window is consent). Sessions whose group is gone are deleted |
 | User closes the window | Generic browser "Leave site?" confirmation, then `bye` and close 1000. Sessions become `detached` and agent calls fail `BROWSER_OFFLINE` |
 | Minimize or unfocus the window | No effect |
-| Agent `request_session` | Fails immediately if the browser is offline. Otherwise: system notification, plus a request card in the window |
+| Agent `request_session` with a new task key | Fails immediately if the browser is offline. Otherwise: system notification, plus a request card in the window |
+| Agent retries `request_session` with the same key and original arguments | Recovers the committed session/token without creating another group, even offline |
 | User approves | Group created in the last-focused normal window without stealing focus; tabs open in the background, are protected, then navigate |
 | User declines or ignores the request | `DECLINED` or `TIMEOUT` |
 | A tab joins the group (user drag, context menu **Add to <group>**, or a website opening it from a grouped tab) | Tab granted with a fresh `t` ID |
 | Tab dragged out or closed | Grant revoked; unstarted work cancelled |
 | User ungroups or closes the group | Session ends and is deleted |
 | User renames the group | Title synced; agent sees it |
-| Agent `end_session` | Ungroups; tabs stay open |
+| Agent `end_session` with this task's token | Ungroups only this task's group; tabs stay open |
 
 **Retention.** `expires_at = last report + 7 days`. Every sync where the
 extension reports the group alive extends it. If the group vanished while
@@ -195,16 +220,16 @@ notifications have no buttons, so all decisions happen in the window.
 | `pair_browser({code, timeout_seconds?})` | Bounded wait for local Approve; returns `browser_id`, `name` |
 | `list_browsers()` | Paired browsers: `browser_id`, `name`, `online`, self-reported `browser_info`, `last_seen`, `paired_at`. Pairing renames a browser to `name (n)` when another of the agent's browsers has the same name |
 | `unpair_browser({browser_id})` | Remove the caller's own pairing (ends its sessions there); `NOT_FOUND` for unknown or foreign IDs |
-| `request_session({browser_id, purpose, urls?, title?, timeout_seconds?})` | Fails at once with `BROWSER_OFFLINE`; waits for Approve/Decline/timeout (default 300 s, max 600 s); returns the session and its tabs |
-| `list_sessions()` | Caller's sessions: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at` |
-| `end_session({session_id, close_tabs?, description?, timeout_seconds?})` | Ungroup; tabs remain. `close_tabs: true` (with `description`) asks the user to approve closing the session's tracked tabs and waits; on approval the extension closes them, ungroups the rest and ends the session. Declined: `ACTION_DECLINED`, session continues. Online browser, extension 6.1.3+ |
-| `list_tabs({session_id})` / `create_tab({session_id, url?, description})` | Grouped tabs only; 8-tab cap |
-| `close_tab({tab_id, description, timeout_seconds?})` | Ask the user to close one session tab and wait (extension 6.1.3+); declined: `ACTION_DECLINED`. After closing, queued commands on it fail with `TAB_NOT_IN_SESSION`; closing the last tab ends the session (`session_ended: true`) |
-| `report_progress({session_id, message})` | Activity feed line; ≤500 characters |
-| `request_handoff({tab_id, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
+| `request_session({browser_id, request_key, purpose, urls?, title?, timeout_seconds?})` | New keys need an online browser and Approve/Decline (default 300 s, max 600 s); returns `session_token`, session metadata and tabs. Same-key retries recover without another group |
+| `list_sessions()` | Agent-wide metadata: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at`; never credentials |
+| `end_session({session_id, session_token, close_tabs?, description?, timeout_seconds?})` | Ungroup this task's group; tabs remain. `close_tabs: true` (with `description`) asks the user to approve closing the session's tracked tabs and waits; on approval the extension closes them, ungroups the rest and ends the session. Declined: `ACTION_DECLINED`, session continues. Online browser, extension 6.1.3+ |
+| `list_tabs({session_id, session_token})` / `create_tab({session_id, session_token, url?, description})` | Grouped tabs only; 8-tab cap |
+| `close_tab({tab_id, session_token, description, timeout_seconds?})` | Ask the user to close one session tab and wait (extension 6.1.3+); declined: `ACTION_DECLINED`. After closing, queued commands on it fail with `TAB_NOT_IN_SESSION`; closing the last tab ends the session (`session_ended: true`) |
+| `report_progress({session_id, session_token, message})` | Activity feed line; ≤500 characters |
+| `request_handoff({tab_id, session_token, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
 | `list_artifacts()` | Caller's unexpired artifacts (metadata only) |
 | `read_artifact({artifact_id, offset?, max_bytes?})` | Byte range (default 16 KiB, max 48 KiB); UTF-8 text never split mid-character, binary as base64; `next_offset`/`eof` |
-| 16 page operations | `tab_id` plus a 40–500 character `description` shown in the feed; existing operations plus read-only `query_all` |
+| 16 page operations | `tab_id`, `session_token` and a 40–500 character `description` shown in the feed; existing operations plus read-only `query_all` |
 
 `query_all` is a capability-advertised structured read, not script evaluation.
 It selects rendered rows and single-valued text/allowlisted-attribute fields,
@@ -270,8 +295,9 @@ page errors (`DOCUMENT_NOT_CONTROLLABLE`, `OUTCOME_UNKNOWN`, ...).
 
 `BROWSER_OFFLINE` describes connection availability, not a proven window-close
 decision. `list_browsers.online` is a point-in-time observation and cannot
-guarantee the next call succeeds. Agents check `list_sessions` before requesting
-or retrying a new session: `request_session` always creates a new group.
+guarantee the next call succeeds. Agents request a fresh group per task and retry
+uncertain requests using the same private `request_key` and original arguments;
+`list_sessions` never grants access to other tasks' groups.
 `inspect_element` is already a no-focus, no-scroll selector/readiness probe,
 including missing and ambiguous matches. Action receipts do not assert that
 the application achieved the agent's intended outcome.

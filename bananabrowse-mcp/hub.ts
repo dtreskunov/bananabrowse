@@ -35,7 +35,7 @@ import {
   type Wire,
 } from '../shared/protocol.js';
 import { ArtifactStore } from './artifacts.js';
-import { token, hash, cleanText, type Store, type SessionRow } from './store.js';
+import { token, hash, cleanText, matchesSessionToken, type Store, type SessionRow } from './store.js';
 import type { Agent, Config } from './config.js';
 import { sanitizeDiagnostics } from '../shared/diagnostics.js';
 import { RateLimiter } from './rate.js';
@@ -125,6 +125,7 @@ export interface Live {
   creating: number;
   slots: Set<Slot>;
   firstSync: boolean;
+  access_hash: string | undefined;
 }
 export interface Target {
   id: string;
@@ -145,6 +146,10 @@ interface Authority {
   target: Target | null;
   operation: string;
   connection_id?: string;
+}
+interface SessionCredentials {
+  agentId: string;
+  sessionToken: unknown;
 }
 interface Call extends Authority {
   connection_id: string;
@@ -175,6 +180,8 @@ interface SessionRequest {
   conn: Conn;
   purpose: string;
   title: string;
+  request_key: string;
+  fingerprint: string;
   session_id: string | null;
   check: (() => void) | null;
   finish?: Finish | null;
@@ -235,7 +242,7 @@ export class Hub {
   sockets: Set<WebSocket>;
   live: Map<string, Live>;
   calls: Map<string, Call>;
-  tombstones: Map<string, { agent_id: string; reason: string; expires: number }>;
+  tombstones: Map<string, { agent_id: string; access_hash: string | undefined; reason: string; expires: number }>;
   tokens: Map<string, { browser_id: string; expires: number }>;
   codes: Map<string, CodeEntry>;
   sessionRequests: Map<string, SessionRequest>;
@@ -564,6 +571,7 @@ export class Hub {
           creating: 0,
           slots: new Set(),
           firstSync: false,
+          access_hash: this.store.sessionAccessHash(row.id),
         };
         this.live.set(row.id, live);
       }
@@ -658,7 +666,12 @@ export class Hub {
   removeTarget(target: Target, reason: string): void {
     const live = target.live;
     if (live.tabs.get(target.id) === target) live.tabs.delete(target.id);
-    this.tombstones.set(target.id, { agent_id: live.agent_id, reason, expires: this.now() + 600_000 });
+    this.tombstones.set(target.id, {
+      agent_id: live.agent_id,
+      access_hash: live.access_hash,
+      reason,
+      expires: this.now() + 600_000,
+    });
     while (this.tombstones.size > 4096) this.tombstones.delete(this.tombstones.keys().next().value!);
     for (const call of [...this.calls.values()]) if (call.target === target) call.cancel(reason);
     for (const controller of target.queuedControllers) controller.abort(new Fault(reason));
@@ -787,13 +800,20 @@ export class Hub {
   }
 
   // ---------- sessions ----------
-  requireSession(agentId: string, sessionId: unknown): SessionRow {
+  requireSession({ agentId, sessionToken }: SessionCredentials, sessionId: unknown): SessionRow {
     const row = validShortId('s', sessionId) && this.store.session(sessionId);
-    requireValue(row && row.agent_id === agentId && this.store.paired(agentId, row.browser_id), 'NOT_FOUND', 404);
+    requireValue(
+      row &&
+        row.agent_id === agentId &&
+        this.store.paired(agentId, row.browser_id) &&
+        matchesSessionToken(sessionToken, this.store.sessionAccessHash(row.id)),
+      'NOT_FOUND',
+      404,
+    );
     return row;
   }
-  requireAttached(agentId: string, sessionId: unknown): { row: SessionRow; conn: Conn; live: Live } {
-    const row = this.requireSession(agentId, sessionId);
+  requireAttached(credentials: SessionCredentials, sessionId: unknown): { row: SessionRow; conn: Conn; live: Live } {
+    const row = this.requireSession(credentials, sessionId);
     const conn = this.online(row.browser_id);
     requireValue(conn, 'BROWSER_OFFLINE');
     const live = this.live.get(row.id);
@@ -854,12 +874,32 @@ export class Hub {
       .filter((row) => this.store.paired(agentId, row.browser_id))
       .map((row) => this.publicSession(row));
   }
-  listTabs(agentId: string, sessionId: unknown): Wire[] {
-    const { live } = this.requireAttached(agentId, sessionId);
+  listTabs(credentials: SessionCredentials, sessionId: unknown): Wire[] {
+    const { live } = this.requireAttached(credentials, sessionId);
     return [...live.tabs.values()].map((target) => this.publicTab(target));
   }
   async requestSession(agentId: string, args: Wire, signal?: AbortSignal): Promise<Wire> {
+    requireArguments(
+      typeof args.request_key === 'string' && UUID.test(args.request_key)
+        ? []
+        : [{ field: 'request_key', reason: args.request_key === undefined ? 'required' : 'invalid_format' }],
+    );
     requireValue(validShortId('b', args.browser_id) && this.store.paired(agentId, args.browser_id), 'NOT_FOUND', 404);
+    const fingerprint = hash(JSON.stringify([args.browser_id, args.purpose, args.urls || [], args.title ?? null]));
+    const previous = this.store.sessionRequest(agentId, args.request_key);
+    if (previous) {
+      requireValue(previous.fingerprint === fingerprint, 'SESSION_REQUEST_CONFLICT', 409);
+      const row = previous.session_id && this.store.session(previous.session_id);
+      requireValue(row, 'SESSION_ENDED');
+      return this.requestedSession(row, args.request_key);
+    }
+    const pending = [...this.sessionRequests.values()].find(
+      (request) => request.agent_id === agentId && request.request_key === args.request_key,
+    );
+    if (pending) {
+      requireValue(pending.fingerprint === fingerprint, 'SESSION_REQUEST_CONFLICT', 409);
+      throw Object.assign(new Fault('SESSION_REQUEST_PENDING', 409), { dispatch_status: 'not_dispatched' });
+    }
     const conn = this.online(args.browser_id);
     if (!conn) throw Object.assign(this.offlineFault(args.browser_id), { dispatch_status: 'not_dispatched' });
     const urls = args.urls || [];
@@ -886,6 +926,8 @@ export class Hub {
       conn,
       purpose: args.purpose,
       title,
+      request_key: args.request_key,
+      fingerprint,
       session_id: null,
       check: null,
     };
@@ -919,38 +961,40 @@ export class Hub {
         },
         this.now,
       );
-    } catch (error) {
-      this.sessionRequests.delete(request.id);
-      if (!request.session_id) this.send(conn, { type: 'session.request.cancel', request_id: request.id });
-      throw error;
-    }
-    // Approval committed: give the first inventory a bounded chance to publish starting tabs.
-    const sessionId = request.session_id!;
-    try {
-      await waitFor(
-        this.now() + 10_000,
-        signal,
-        (finish) => {
-          request.check = () => {
-            if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId) || !this.current(conn)) finish();
-          };
-          request.check();
-          return () => {
-            request.check = null;
-          };
-        },
-        this.now,
-      );
-    } catch (error) {
-      if ((error as Fault).code !== 'COMMAND_EXPIRED') throw error;
+      // Approval committed: give the first inventory a bounded chance to publish starting tabs.
+      const sessionId = request.session_id!;
+      try {
+        await waitFor(
+          this.now() + 10_000,
+          signal,
+          (finish) => {
+            request.check = () => {
+              if (this.live.get(sessionId)?.firstSync || !this.store.session(sessionId) || !this.current(conn))
+                finish();
+            };
+            request.check();
+            return () => {
+              request.check = null;
+            };
+          },
+          this.now,
+        );
+      } catch (error) {
+        if ((error as Fault).code !== 'COMMAND_EXPIRED') throw error;
+      }
+      const row = this.store.session(sessionId);
+      requireValue(row, 'SESSION_ENDED');
+      return this.requestedSession(row, args.request_key);
     } finally {
       this.sessionRequests.delete(request.id);
+      if (!request.session_id) this.send(conn, { type: 'session.request.cancel', request_id: request.id });
     }
-    const row = this.store.session(sessionId);
-    requireValue(row, 'SESSION_ENDED');
-    const live = this.live.get(sessionId);
+  }
+  requestedSession(row: SessionRow, requestKey: string): Wire {
+    const live = this.live.get(row.id);
     return {
       ...this.publicSession(row),
+      session_token: this.store.sessionToken(row.agent_id, requestKey),
       tabs: live ? [...live.tabs.values()].map((target) => this.publicTab(target)) : [],
     };
   }
@@ -976,6 +1020,8 @@ export class Hub {
       group_client_id: m.client_id,
       purpose: request.purpose,
       title: request.title,
+      request_key: request.request_key,
+      fingerprint: request.fingerprint,
     });
     request.session_id = row.id;
     audit('session_created', {
@@ -998,32 +1044,32 @@ export class Hub {
     });
     request.finish(null);
   }
-  endSessionByAgent(agentId: string, sessionId: string): Wire {
-    this.requireSession(agentId, sessionId);
+  endSessionByAgent(credentials: SessionCredentials, sessionId: string): Wire {
+    this.requireSession(credentials, sessionId);
     this.endSession(sessionId, 'SESSION_ENDED', true);
     return { session_id: sessionId, ended: true, tabs_closed: false };
   }
   // Closing tabs is never automatic: the extension asks the user and only closes after an explicit approval.
   async closeSessionTabs(
-    agentId: string,
+    credentials: SessionCredentials,
     sessionId: string,
     description: unknown,
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<Wire> {
-    const { live } = this.requireAttached(agentId, sessionId);
+    const { live } = this.requireAttached(credentials, sessionId);
     requireExtension(live.conn, 'close_tabs');
     requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
     await this.dispatch(live, null, 'close_session', {}, description, this.now() + waitMs, signal);
     this.endSession(sessionId, 'SESSION_ENDED', false);
     return { session_id: sessionId, ended: true, tabs_closed: true };
   }
-  reportProgress(agentId: string, sessionId: unknown, message: unknown): Wire {
-    const row = this.requireSession(agentId, sessionId);
+  reportProgress(credentials: SessionCredentials, sessionId: unknown, message: unknown): Wire {
+    const row = this.requireSession(credentials, sessionId);
     const conn = this.online(row.browser_id);
     requireValue(conn, 'BROWSER_OFFLINE');
-    this.rates.take(`progress:${agentId}`, 120);
-    this.send(conn, { type: 'progress', session_id: row.id, agent_id: agentId, message, at: this.now() });
+    this.rates.take(`progress:${credentials.agentId}`, 120);
+    this.send(conn, { type: 'progress', session_id: row.id, agent_id: credentials.agentId, message, at: this.now() });
     return { delivered: true };
   }
 
@@ -1075,7 +1121,8 @@ export class Hub {
     const first = live.slots.values().next().value;
     first?.release();
   }
-  findTarget(agentId: string, tabId: unknown): Target {
+  findTarget(credentials: SessionCredentials, tabId: unknown): Target {
+    const { agentId, sessionToken } = credentials;
     const owned = (target: Target | null | undefined): target is Target =>
       Boolean(target && target.live.agent_id === agentId);
     let target: Target | null | undefined = null;
@@ -1086,20 +1133,29 @@ export class Hub {
           break;
         }
       }
-    if (owned(target)) return target;
+    if (owned(target)) {
+      this.requireSession(credentials, target.session_id);
+      return target;
+    }
     const tombstone = this.tombstones.get(tabId as string);
-    if (tombstone && tombstone.agent_id === agentId && tombstone.expires > this.now())
+    if (
+      tombstone &&
+      tombstone.agent_id === agentId &&
+      tombstone.expires > this.now() &&
+      matchesSessionToken(sessionToken, tombstone.access_hash)
+    )
       throw new Fault(tombstone.reason);
     const row = validShortId('t', tabId) && this.store.tab(tabId);
     const session = row && this.store.session(row.session_id);
     if (session && session.agent_id === agentId) {
+      this.requireSession(credentials, session.id);
       requireValue(this.online(session.browser_id), 'BROWSER_OFFLINE');
       throw new Fault('SESSION_DETACHED');
     }
     throw new Fault('NOT_FOUND', 404);
   }
   async operate(
-    agentId: string,
+    credentials: SessionCredentials,
     tabId: unknown,
     operation: string,
     args: Wire,
@@ -1122,7 +1178,7 @@ export class Hub {
         { tab_id: tabId, ...(operation === 'request_handoff' ? {} : { description }) },
       ),
     ]);
-    const target = this.findTarget(agentId, tabId);
+    const target = this.findTarget(credentials, tabId);
     const live = target.live;
     const probe = { live, target, operation };
     if (operation === 'query_all') requireExtension(live.conn, 'query_all');
@@ -1176,13 +1232,13 @@ export class Hub {
     }
   }
   async createTab(
-    agentId: string,
+    credentials: SessionCredentials,
     sessionId: unknown,
     args: Wire,
     description: unknown,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const { live } = this.requireAttached(agentId, sessionId);
+    const { live } = this.requireAttached(credentials, sessionId);
     if (args.url !== undefined) {
       try {
         navigationUrl(args.url, this.config.protectedOrigins);
@@ -1206,13 +1262,13 @@ export class Hub {
     }
   }
   async closeTab(
-    agentId: string,
+    credentials: SessionCredentials,
     tabId: unknown,
     description: unknown,
     waitMs: number,
     signal?: AbortSignal,
   ): Promise<Wire> {
-    const target = this.findTarget(agentId, tabId),
+    const target = this.findTarget(credentials, tabId),
       live = target.live;
     this.checkAuthority({ live, target: null, operation: 'close_tab' });
     requireExtension(live.conn, 'close_tabs');

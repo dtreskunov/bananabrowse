@@ -88,6 +88,14 @@ const schema = (properties: Wire, required: string[] = Object.keys(properties)) 
 });
 const urlField = { type: 'string', minLength: 1, maxLength: 2048 };
 const session = { ...SESSION_ID_SCHEMA, description: 'Session ID from request_session or list_sessions.' };
+const sessionToken = {
+  type: 'string',
+  pattern: '^[A-Za-z0-9_-]{43}(?![\\s\\S])',
+  description:
+    'Private session_token returned by request_session for this task. Required for every session/tab operation; never obtain one from another task.',
+};
+const sessionTarget = { session_id: session, session_token: sessionToken };
+const tabTarget = { tab_id: TAB_ID_SCHEMA, session_token: sessionToken };
 export const tools: Tool[] = [
   {
     name: 'pair_browser',
@@ -111,10 +119,16 @@ export const tools: Tool[] = [
   },
   {
     name: 'request_session',
-    description: `Create a new browser session (a native tab group); this does not reuse an existing session. First check list_sessions for an appropriate attached session. The user sees your purpose and starting URLs and approves or declines in their BananaBrowse window. Fails with BROWSER_OFFLINE if no live connection is available, including transient connection loss. Check list_sessions before retrying a failed request to avoid duplicate groups. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns the session and its tabs.`,
+    description: `Create one browser session (a native tab group) per task; this does not reuse another task's session. Generate a fresh random UUID request_key for each new task and retain it privately. Retry an uncertain request with the SAME request_key and unchanged browser_id, purpose, urls and title to recover the session and its private session_token without another approval or duplicate group. Never reuse a key for a new task. The user approves your purpose and starting URLs in their BananaBrowse window. New requests fail with BROWSER_OFFLINE without a live connection; committed sessions can be recovered offline. Up to ${SESSION_TAB_LIMIT} starting URLs (default: one blank tab). Returns session_token, session metadata and tabs.`,
     inputSchema: schema(
       {
         browser_id: BROWSER_ID_SCHEMA,
+        request_key: {
+          type: 'string',
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])',
+          description:
+            'Fresh random lowercase UUID generated once per task. Keep private with the original request arguments; reuse only to retry/recover that same task.',
+        },
         purpose: {
           type: 'string',
           minLength: 1,
@@ -126,61 +140,67 @@ export const tools: Tool[] = [
           type: 'string',
           minLength: 1,
           maxLength: 80,
-          description: 'Tab group title. Defaults to the agent name.',
+          description: 'Short task-specific tab group title. Defaults to the agent name.',
         },
         timeout_seconds: humanWait,
       },
-      ['browser_id', 'purpose'],
+      ['browser_id', 'request_key', 'purpose'],
     ),
   },
   {
     name: 'list_sessions',
     description:
-      'Your sessions. state is attached (usable) or detached (browser window closed or reattach pending). Sessions survive up to 7 days while their tab group exists; one ends when the user closes or ungroups its tab group.',
+      'Session metadata for this agent, possibly belonging to other tasks. Never returns session_token or request_key and does not authorize reuse or cleanup. Only use a session whose private token this task already holds. state is attached or detached (browser window closed or reattach pending). Sessions survive up to 7 days while their tab group exists; one ends when the user closes or ungroups its tab group.',
     inputSchema: schema({}),
   },
   {
     name: 'end_session',
     description:
-      "End a session. By default its tabs are ungrouped and stay open. close_tabs: true instead asks the user to approve closing the session's tabs (system notification plus a prompt in the BananaBrowse window showing your description) and waits; ACTION_DECLINED means the user kept them and the session continues. Untracked tabs, such as protected sites, are only ungrouped. Closing needs extension 6.1.3 and an online browser.",
+      "End only this task's session when the task finishes, using its session_token. By default its tabs are ungrouped and stay open. close_tabs: true instead asks the user to approve closing the session's tabs (system notification plus a prompt in the BananaBrowse window showing your description) and waits; ACTION_DECLINED means the user kept them and the session continues. Untracked tabs, such as protected sites, are only ungrouped. Closing needs extension 6.1.3 and an online browser.",
     inputSchema: schema(
       {
-        session_id: session,
+        ...sessionTarget,
         close_tabs: { type: 'boolean', default: false },
         description: { ...description, description: `Required with close_tabs. ${description.description}` },
         timeout_seconds: humanWait,
       },
-      ['session_id'],
+      Object.keys(sessionTarget),
     ),
   },
   {
     name: 'list_tabs',
     description:
       'Tabs in an attached session with tab_id, title, URL, page_state, capabilities and execution_state. Every tab in the session tab group is in scope, including tabs the user drags in and tabs a site opens from a grouped tab.',
-    inputSchema: schema({ session_id: session }),
+    inputSchema: schema(sessionTarget),
   },
   {
     name: 'create_tab',
     description: `Open a new background tab in the session tab group (maximum ${SESSION_TAB_LIMIT}). Never steals focus. Do not retry automatically after an uncertain result.`,
-    inputSchema: schema({ session_id: session, url: urlField, description }, ['session_id', 'description']),
+    inputSchema: schema({ ...sessionTarget, url: urlField, description }, [
+      ...Object.keys(sessionTarget),
+      'description',
+    ]),
   },
   {
     name: 'close_tab',
     description:
       "Ask the user to close one tab in your session, for example a scratch tab you opened. The user gets a system notification and approves or keeps the tab in the BananaBrowse window; this waits for that decision (ACTION_DECLINED: the tab stays). After closing, pending commands on it fail with TAB_NOT_IN_SESSION. Closing the session's last tab ends the session (session_ended: true). Needs extension 6.1.3.",
-    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, description, timeout_seconds: humanWait }, ['tab_id', 'description']),
+    inputSchema: schema({ ...tabTarget, description, timeout_seconds: humanWait }, [
+      ...Object.keys(tabTarget),
+      'description',
+    ]),
   },
   {
     name: 'report_progress',
     description: "Post a short progress update to the user's BananaBrowse activity feed for this session.",
-    inputSchema: schema({ session_id: session, message: { type: 'string', minLength: 1, maxLength: 500 } }),
+    inputSchema: schema({ ...sessionTarget, message: { type: 'string', minLength: 1, maxLength: 500 } }),
   },
   {
     name: 'request_handoff',
     description:
       'Ask the user to do something in a tab (log in, solve a CAPTCHA, review). Shows a system notification, flashes the tab group and waits for the user to click Done or Cancel in the BananaBrowse window. Only this tab waits; others can keep working.',
-    inputSchema: schema({ tab_id: TAB_ID_SCHEMA, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait }, [
-      'tab_id',
+    inputSchema: schema({ ...tabTarget, ...HANDOFF_SCHEMA.properties, timeout_seconds: humanWait }, [
+      ...Object.keys(tabTarget),
       'instructions',
     ]),
   },
@@ -211,8 +231,8 @@ export const tools: Tool[] = [
     name,
     description: `${name} in a session tab. ${NOTES[name] || ''}`.trim(),
     inputSchema: {
-      ...schema({ tab_id: TAB_ID_SCHEMA, ...OPERATION_SCHEMAS[name].properties, description }, [
-        'tab_id',
+      ...schema({ ...tabTarget, ...OPERATION_SCHEMAS[name].properties, description }, [
+        ...Object.keys(tabTarget),
         'description',
         ...OPERATION_SCHEMAS[name].required,
       ]),
@@ -223,10 +243,12 @@ export const tools: Tool[] = [
 export const INSTRUCTIONS =
   "BananaBrowse lets you work in the user's real browser inside tab groups they approve. " +
   'First use: ask the user to open the BananaBrowse window (toolbar button), click Pair an agent and tell you the code; call pair_browser. ' +
-  'Then: list_sessions -> reuse an appropriate attached session, or list_browsers -> request_session(browser_id, purpose, urls) -> the user approves -> use tab_ids with page tools. request_session always creates a new group. ' +
-  'BROWSER_OFFLINE means no live connection: the window may be closed or reconnecting. Check sessions before retrying a session request; ask the user to check the window/connection or choose another browser if it stays offline. ' +
+  "One group per task: list_browsers -> generate a fresh random UUID request_key -> request_session(browser_id, request_key, purpose, urls) -> the user approves -> retain the returned session_id and private session_token in this task context. Supply session_token with every session/tab operation. Never reuse another task's group or credentials, even when list_sessions shows an appropriate attached session. " +
+  'After an uncertain session request, retry with the SAME request_key and unchanged browser_id, purpose, urls and title; this recovers the committed session and token, even offline, without creating another group. Keep the key and original arguments across context compaction; never reuse a key for a new task. SESSION_REQUEST_PENDING means retry the same request later; SESSION_REQUEST_CONFLICT means restore the original arguments, not change the key blindly. ' +
+  'BROWSER_OFFLINE means no live connection: the window may be closed or reconnecting. Ask the user to check the window/connection or choose another browser if it stays offline. list_sessions returns metadata only, never task credentials. If both key and token are lost, ask the user to end the orphaned group and approve a new one; do not reclaim another group. ' +
   'A stale duplicate (e.g. after an extension reinstall) can be removed with unpair_browser. ' +
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
+  "When finished, call end_session with only this task's session_id and session_token; tabs stay open by default. Never use unpair_browser for task cleanup: it revokes all this agent's sessions on that browser. " +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
   'Start with get_page_snapshot; inspect_element is a read-only selector/readiness probe without focus or scrolling. Action receipts confirm dispatch, not application success: verify the resulting page. ' +
   'For structured DOM data with known selectors, use query_all; use evaluate_script for data not available through DOM extraction. ' +
@@ -236,7 +258,13 @@ export const INSTRUCTIONS =
 
 const HINTS: Record<string, string> = {
   BROWSER_OFFLINE:
-    'No live browser connection is available; the window may be closed or reconnecting. Check list_sessions before retrying request_session to avoid duplicate groups. If it stays offline, ask the user to check the window and connection.',
+    'No live browser connection is available; the window may be closed or reconnecting. Retry request_session only with the same task request_key and original arguments. If it stays offline, ask the user to check the window and connection.',
+  SESSION_REQUEST_PENDING:
+    'This task request is still in progress. Wait, then retry request_session with the same request_key and original arguments; do not create another group.',
+  SESSION_REQUEST_CONFLICT:
+    'This request_key already belongs to a different request. Restore its original browser_id, purpose, urls and title. Generate a fresh key only for a genuinely new task.',
+  SESSION_ENDED:
+    'This session has ended. Its request_key cannot recreate it while its recovery record is retained. Start a new session with a fresh key only if a new task needs browser access.',
   SESSION_DETACHED:
     'The session is not ready to use. Recheck list_sessions after the browser reconnects or the user confirms Chrome reattachment; do not create a duplicate group.',
   CAPABILITY_UNAVAILABLE:
@@ -420,6 +448,7 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       ),
       ...(urls ? validateUrls(args) : []),
     ]);
+    const credentials = { agentId: agent.id, sessionToken: args.session_token };
     let result: Wire | undefined;
     if (name === 'pair_browser')
       result = await hub.pairBrowser(agent.id, args.code, (args.timeout_seconds ?? 300) * 1000, signal);
@@ -428,11 +457,11 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
     else if (name === 'end_session') {
-      if (args.close_tabs !== true) result = hub.endSessionByAgent(agent.id, args.session_id);
+      if (args.close_tabs !== true) result = hub.endSessionByAgent(credentials, args.session_id);
       else {
         requireArguments(Object.hasOwn(args, 'description') ? [] : [{ field: 'description', reason: 'required' }]);
         result = await hub.closeSessionTabs(
-          agent.id,
+          credentials,
           args.session_id,
           args.description,
           (args.timeout_seconds ?? 300) * 1000,
@@ -441,31 +470,38 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       }
     } else if (name === 'close_tab') {
       result = await hub.closeTab(
-        agent.id,
+        credentials,
         args.tab_id,
         args.description,
         (args.timeout_seconds ?? 300) * 1000,
         signal,
       );
-    } else if (name === 'list_tabs') result = hub.listTabs(agent.id, args.session_id);
+    } else if (name === 'list_tabs') result = hub.listTabs(credentials, args.session_id);
     else if (name === 'create_tab') {
       result = (await hub.createTab(
-        agent.id,
+        credentials,
         args.session_id,
         args.url === undefined ? {} : { url: args.url },
         args.description,
         signal,
       )) as Wire | undefined;
-    } else if (name === 'report_progress') result = hub.reportProgress(agent.id, args.session_id, args.message);
+    } else if (name === 'report_progress') result = hub.reportProgress(credentials, args.session_id, args.message);
     else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map((meta) => publicArtifact(hub, meta));
     else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
     else if (name === 'request_handoff') {
-      const { tab_id, timeout_seconds, ...handoff } = args;
-      result = (await hub.operate(agent.id, tab_id, name, handoff, null, (timeout_seconds ?? 300) * 1000, signal)) as
-        Wire | undefined;
+      const { tab_id, session_token, timeout_seconds, ...handoff } = args;
+      result = (await hub.operate(
+        credentials,
+        tab_id,
+        name,
+        handoff,
+        null,
+        (timeout_seconds ?? 300) * 1000,
+        signal,
+      )) as Wire | undefined;
     } else {
-      const { tab_id, description: intent, ...operationArgs } = args;
-      result = (await hub.operate(agent.id, tab_id, name, operationArgs, intent, 0, signal)) as Wire | undefined;
+      const { tab_id, session_token, description: intent, ...operationArgs } = args;
+      result = (await hub.operate(credentials, tab_id, name, operationArgs, intent, 0, signal)) as Wire | undefined;
     }
     if (name === 'get_screenshot') {
       requireValue(

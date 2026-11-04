@@ -150,11 +150,56 @@ wait up to 600 s.
 
 ## Agent workflow and recovery
 
-Check `list_sessions` before `request_session`: an appropriate attached session
-can be reused, while every `request_session` asks for a new tab group.
+### Task-owned sessions
+
+Use one native tab group per task, not a shared group for every task using the
+same agent credentials. The server cannot infer task boundaries from MCP
+connections; the agent starts a new session for each new task.
+
+1. Generate a fresh random lowercase UUID `request_key` and retain it with the
+   original `browser_id`, `purpose`, `urls` and `title`.
+2. Call `request_session({browser_id, request_key, purpose, urls?, title?})`.
+   After approval it returns session metadata, tabs and a private `session_token`.
+3. Include `session_token` in **every session/tab call**, including page tools,
+   `list_tabs`, `create_tab`, `close_tab`, `report_progress`, `request_handoff`
+   and `end_session`. The token must belong to the target session, even when
+   multiple tasks share the same agent identity.
+4. When done, call `end_session({session_id, session_token})`. Tabs are ungrouped
+   and stay open; `close_tabs: true` still requires local approval. Never use
+   `unpair_browser` for routine task cleanup: it revokes all the agent's sessions
+   on that browser.
+
+`list_sessions` is metadata-only: it never returns tokens or request keys.
+Knowing a session/tab ID does not authorize operating on it. A missing token is
+`INVALID_ARGUMENTS`; an incorrect token or a foreign ID is `NOT_FOUND`, before
+any browser command or approval prompt. Browser pairing/unpairing and artifacts
+remain agent-scoped. Capabilities protect against accidental cross-task use;
+deliberately sharing the token or request key shares access.
+
+Keep the token, request key and original arguments privately in task context,
+including across compaction. If a response is lost, repeat `request_session`
+with the **same key and original arguments** to recover the same session and
+token without another approval, including after a service restart or while the
+browser is offline. `timeout_seconds` may change. A concurrent duplicate gets
+`SESSION_REQUEST_PENDING`: wait and retry the same request. Changed creation
+arguments return `SESSION_REQUEST_CONFLICT`. A request cancelled/declined before
+commit creates no session and can be retried with the same key.
+
+Recovery records survive session termination for seven days; during that time
+the same key returns `SESSION_ENDED` rather than reopening a group. Never reuse
+old request keys, even after that retention period. Unpairing removes recovery
+records. The service persists hashes of request keys/tokens and a server
+signing key, not plaintext task credentials. Tokens/keys are never sent to the
+extension. If both credentials are lost, there is no automatic reclaim:
+ask the user to end the orphaned group and approve a new one. Tokenless sessions
+from older service versions are similarly not claimable; see
+[the upgrade notes](../docs/V6-UPGRADE.md#task-owned-sessions).
+
+### Connection recovery
+
 `list_browsers.online` is a point-in-time connection check, not a reservation.
-`BROWSER_OFFLINE` can mean either a closed window or connection loss; check
-sessions before retrying a failed request so an approved group is not duplicated.
+`BROWSER_OFFLINE` can mean either a closed window or connection loss; retry
+session creation only with the same task's request key and original arguments.
 `SESSION_DETACHED` means the existing session is not yet usable, for example
 while reconnecting or awaiting Chrome reattachment confirmation.
 Session-request offline failures include `offline_reason` when observed:
@@ -162,7 +207,7 @@ Session-request offline failures include `offline_reason` when observed:
 `connection_replaced`, `service_stopped`, or `unknown`. Recent observations
 expire after 90 seconds; they are not a claim about the current window state.
 An approved request that disconnects before inventory returns its committed
-detached session, rather than inviting a retry that creates another group.
+detached session and token, rather than inviting a retry that creates another group.
 
 Start with `get_page_snapshot`. `inspect_element` is an immediate read-only
 selector/readiness probe: zero matches are missing, one has readiness details,

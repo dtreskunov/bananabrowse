@@ -66,13 +66,18 @@ test('agent authentication uses the path ID and a hashed bearer key', async (t) 
   assert.equal((await post('/mcp/atlas', '')).status, 401);
 });
 
-test('agent guidance explains reuse, connection uncertainty, probes and capabilities', () => {
+test('agent guidance explains task ownership, retry-safe recovery, probes and capabilities', () => {
   const descriptions = Object.fromEntries(tools.map((tool) => [tool.name, tool.description]));
-  assert.match(INSTRUCTIONS, /list_sessions -> reuse/);
+  assert.match(INSTRUCTIONS, /One group per task/);
+  assert.match(INSTRUCTIONS, /Supply session_token with every session\/tab operation/);
+  assert.match(INSTRUCTIONS, /SAME request_key/);
+  assert.match(INSTRUCTIONS, /When finished, call end_session/);
+  assert.match(INSTRUCTIONS, /Never use unpair_browser for task cleanup/);
   assert.match(INSTRUCTIONS, /window may be closed or reconnecting/);
   assert.match(INSTRUCTIONS, /OUTCOME_UNKNOWN.*inspect before retrying/);
   assert.match(INSTRUCTIONS, /max_text_chars.*not evaluate_script/);
-  assert.match(descriptions.request_session, /does not reuse an existing session/);
+  assert.match(descriptions.request_session, /does not reuse another task's session/);
+  assert.match(descriptions.list_sessions, /Never returns session_token or request_key/);
   assert.match(descriptions.list_browsers, /point-in-time observation/);
   assert.match(descriptions.inspect_element, /matches:0.*matches:1.*matches>1/);
   assert.match(descriptions.inspect_element, /Does not focus, scroll or mutate/);
@@ -267,6 +272,7 @@ test('session approval and inventory in the same turn return the starting tabs',
   const { extension } = await paired(fixture);
   const conn = fixture.hub.online(extension.browser_id);
   const pending = fixture.hub.requestSession('atlas', {
+    request_key: crypto.randomUUID(),
     browser_id: extension.browser_id,
     purpose: 'Immediate inventory',
   });
@@ -328,7 +334,11 @@ test('disconnect before approval rejects and a late approval cannot create a ses
   t.after(() => fixture.close());
   const { extension } = await paired(fixture);
   const conn = fixture.hub.online(extension.browser_id);
-  const pending = fixture.hub.requestSession('atlas', { browser_id: extension.browser_id, purpose: 'Disconnect' });
+  const pending = fixture.hub.requestSession('atlas', {
+    request_key: crypto.randomUUID(),
+    browser_id: extension.browser_id,
+    purpose: 'Disconnect',
+  });
   const request = [...fixture.hub.sessionRequests.values()][0];
   fixture.hub.disconnected(conn);
   await assert.rejects(
@@ -347,7 +357,11 @@ test('disconnect after approval returns the committed detached session without w
     const { extension } = await paired(fixture);
     const conn = fixture.hub.online(extension.browser_id);
     t.mock.timers.enable({ apis: ['setTimeout'] });
-    const pending = fixture.hub.requestSession('atlas', { browser_id: extension.browser_id, purpose: 'Approved' });
+    const pending = fixture.hub.requestSession('atlas', {
+      request_key: crypto.randomUUID(),
+      browser_id: extension.browser_id,
+      purpose: 'Approved',
+    });
     const request = [...fixture.hub.sessionRequests.values()][0];
     fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
     if (afterWaitRegistration) await Promise.resolve();
@@ -398,7 +412,7 @@ test('cancelled and timed-out session requests discard late approvals', async (t
   const abort = new AbortController();
   let pending = fixture.hub.requestSession(
     'atlas',
-    { browser_id: extension.browser_id, purpose: 'Cancel' },
+    { request_key: crypto.randomUUID(), browser_id: extension.browser_id, purpose: 'Cancel' },
     abort.signal,
   );
   let request = [...fixture.hub.sessionRequests.values()][0];
@@ -407,6 +421,7 @@ test('cancelled and timed-out session requests discard late approvals', async (t
   fixture.hub.sessionDecision(conn, { request_id: request.id, approved: true, client_id: crypto.randomUUID() });
   t.mock.timers.enable({ apis: ['setTimeout'] });
   pending = fixture.hub.requestSession('atlas', {
+    request_key: crypto.randomUUID(),
     browser_id: extension.browser_id,
     purpose: 'Timeout',
     timeout_seconds: 1,

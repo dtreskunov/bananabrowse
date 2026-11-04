@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Store, hash } from '../store.js';
 import { createApp } from '../app.js';
+import { tools } from '../mcp.js';
 import {
   keyId,
   sign,
@@ -53,13 +54,36 @@ export async function start(options = {}) {
         }),
       );
       clients.push(client);
+      const sessionTokens = new Map();
+      const tabTokens = new Map();
+      const rawCall = async (name, args = {}) => {
+        const result = await client.callTool({ name, arguments: args });
+        const text = result.content?.[0]?.text;
+        const value = text ? JSON.parse(text) : result.content?.[0];
+        if (result.isError) throw Object.assign(new Error(value.error), { code: value.error, details: value });
+        return value;
+      };
       return {
         client,
+        rawCall,
         async call(name, args = {}) {
-          const result = await client.callTool({ name, arguments: args });
-          const text = result.content?.[0]?.text;
-          const value = text ? JSON.parse(text) : result.content?.[0];
-          if (result.isError) throw Object.assign(new Error(value.error), { code: value.error, details: value });
+          // Model task-local credentials; rawCall exercises missing/incorrect credentials.
+          if (name === 'request_session') args = { request_key: crypto.randomUUID(), ...args };
+          if (tools.find((tool) => tool.name === name)?.inputSchema.properties.session_token) {
+            const sessionId =
+              args.session_id ?? (typeof args.tab_id === 'string' ? store.tab(args.tab_id)?.session_id : undefined);
+            args = {
+              session_token: sessionTokens.get(sessionId) ?? tabTokens.get(args.tab_id) ?? 'x'.repeat(43),
+              ...args,
+            };
+          }
+          const value = await rawCall(name, args);
+          if (name === 'request_session') {
+            sessionTokens.set(value.session_id, value.session_token);
+            for (const tab of value.tabs) tabTokens.set(tab.tab_id, value.session_token);
+          } else if (name === 'list_tabs') {
+            for (const tab of value) tabTokens.set(tab.tab_id, args.session_token);
+          } else if (name === 'create_tab') tabTokens.set(value.tab_id, args.session_token);
           return value;
         },
       };

@@ -37,8 +37,9 @@ extensions and unsigned temporary Firefox add-ons.
    “Bob's Firefox on Mac”, then click **Connect**.
 3. **Pair an agent:** click **Pair an agent** and tell your agent the 8-character
    code. The agent calls `pair_browser`; you click **Approve** in the window.
-4. **Sessions:** when the agent needs the browser it calls `request_session` with
-   a purpose and starting URLs. You get a system notification and a card in the
+4. **Sessions:** each task gets its own tab group. When the agent needs the browser
+   it calls `request_session` with a task-specific request key, purpose and starting URLs.
+   You get a system notification and a card in the
    window. **Approve** creates a colored tab group in your last-used window
    without stealing focus.
 5. **Work together:** the agent works in the group's tabs in the background.
@@ -131,10 +132,22 @@ Page operations take a server-issued `tab_id` (such as `t12`) and a 40–500
 character `description` that the user sees in the activity feed. Output limits,
 DOM-only input, script worlds (`MAIN`/`USER_SCRIPT`), protected origins and
 "never replay an uncertain mutation" (`OUTCOME_UNKNOWN`) carry over from v5.
-Check `list_sessions` first and reuse an appropriate attached session:
-`request_session` always requests a new group. `BROWSER_OFFLINE` means no live
-connection, not necessarily a closed window; it can also mean connection loss.
-Check sessions before retrying a failed request to avoid duplicate groups.
+Use **one group per task**. Generate a fresh random UUID `request_key` before
+`request_session` and keep it with the original request arguments. The approved
+request returns a private `session_token`; supply it with every session or tab
+operation, including `end_session` when the task finishes. Ending a session
+ungroups its tabs by default; closing tabs still needs user approval.
+`list_sessions` returns metadata, never credentials, and does not authorize
+using another task's group.
+
+Retry an uncertain session request with the **same key and original arguments**:
+it recovers the committed session and token without another group or approval,
+even while offline. `BROWSER_OFFLINE` means no live connection, not necessarily
+a closed window; it can also mean connection loss. Keep the key and token
+private in the task context, including across context compaction. If both are
+lost, ask the user to end the orphaned group and approve a fresh one.
+Existing sessions created before task tokens were introduced remain visible
+but cannot be used by agents; see [the upgrade notes](docs/V6-UPGRADE.md#task-owned-sessions).
 
 Start with `get_page_snapshot`. Use `inspect_element` to probe a selector without
 scrolling, focusing or mutating; it reports missing, unique or ambiguous matches.

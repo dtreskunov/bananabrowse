@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
@@ -16,6 +16,10 @@ export const SCHEMA_VERSION = 6;
 export const REFRESH_GRACE_MS = 300_000;
 export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+export const matchesSessionToken = (value: unknown, digest: string | undefined) =>
+  typeof value === 'string' &&
+  digest !== undefined &&
+  timingSafeEqual(Buffer.from(hash(value), 'hex'), Buffer.from(digest, 'hex'));
 export const cleanText = (value: unknown, max: number) =>
   String(value ?? '')
     // eslint-disable-next-line no-control-regex -- strips control characters on purpose
@@ -69,6 +73,15 @@ export interface TabRow {
   url: string;
   title: string;
 }
+export interface SessionRequestRow {
+  agent_id: string;
+  browser_id: string;
+  request_hash: string;
+  fingerprint: string;
+  session_id: string | null;
+  access_hash: string;
+  expires_at: number;
+}
 
 export function initializeSchema(db: DatabaseSync): void {
   db.exec(`
@@ -110,6 +123,12 @@ export class Store {
       else requireValue(version === SCHEMA_VERSION, 'SCHEMA_VERSION_UNSUPPORTED');
       // Additive OAuth tables preserve existing v6 browsers, pairings and sessions.
       this.db.exec(`
+        CREATE TABLE IF NOT EXISTS session_requests (
+          agent_id TEXT NOT NULL, browser_id TEXT NOT NULL, request_hash TEXT NOT NULL,
+          fingerprint TEXT NOT NULL, session_id TEXT UNIQUE REFERENCES sessions(id) ON DELETE SET NULL,
+          access_hash TEXT NOT NULL, expires_at INTEGER NOT NULL,
+          PRIMARY KEY(agent_id, request_hash),
+          FOREIGN KEY(agent_id, browser_id) REFERENCES pairings(agent_id, browser_id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS oauth_clients (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT, redirect_uris TEXT NOT NULL,
           auth_method TEXT NOT NULL, secret_hash TEXT, created_at INTEGER NOT NULL);
@@ -349,12 +368,16 @@ export class Store {
     group_client_id,
     purpose,
     title,
+    request_key,
+    fingerprint,
   }: {
     agent_id: string;
     browser_id: string;
     group_client_id: string;
     purpose: string;
     title: unknown;
+    request_key: string;
+    fingerprint: string;
   }): SessionRow {
     return this.transaction(() => {
       requireValue(this.paired(agent_id, browser_id), 'NOT_FOUND', 404);
@@ -383,8 +406,39 @@ export class Store {
           now,
           now + SESSION_RETENTION_MS,
         );
+      this.db
+        .prepare(
+          `INSERT INTO session_requests(agent_id,browser_id,request_hash,fingerprint,session_id,access_hash,expires_at)
+           VALUES(?,?,?,?,?,?,?)`,
+        )
+        .run(
+          agent_id,
+          browser_id,
+          hash(request_key),
+          fingerprint,
+          id,
+          hash(this.sessionToken(agent_id, request_key)),
+          now + SESSION_RETENTION_MS,
+        );
       return this.session(id)!;
     });
+  }
+  sessionToken(agentId: string, requestKey: string): string {
+    // A persisted server key makes recovery deterministic without storing plaintext task credentials.
+    this.db.prepare("INSERT OR IGNORE INTO metadata(key,value) VALUES('session-token-key',?)").run(token());
+    const key = String(this.db.prepare("SELECT value FROM metadata WHERE key='session-token-key'").get()!.value);
+    return createHmac('sha256', key)
+      .update(JSON.stringify([agentId, requestKey]))
+      .digest('base64url');
+  }
+  sessionRequest(agentId: string, requestKey: string): SessionRequestRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM session_requests WHERE agent_id=? AND request_hash=?')
+      .get(agentId, hash(requestKey)) as SessionRequestRow | undefined;
+  }
+  sessionAccessHash(sessionId: string): string | undefined {
+    return this.db.prepare('SELECT access_hash FROM session_requests WHERE session_id=?').get(sessionId)
+      ?.access_hash as string | undefined;
   }
   session(id: string): SessionRow | undefined {
     return this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as SessionRow | undefined;
@@ -408,7 +462,12 @@ export class Store {
       .run(cleanText(title, 120), this.now() + SESSION_RETENTION_MS, id);
   }
   deleteSession(id: string): boolean {
-    return this.db.prepare('DELETE FROM sessions WHERE id=?').run(id).changes === 1;
+    return this.transaction(() => {
+      this.db
+        .prepare('UPDATE session_requests SET expires_at=? WHERE session_id=?')
+        .run(this.now() + SESSION_RETENTION_MS, id);
+      return this.db.prepare('DELETE FROM sessions WHERE id=?').run(id).changes === 1;
+    });
   }
 
   tabsForSession(sessionId: string): TabRow[] {
@@ -442,6 +501,7 @@ export class Store {
       .all(now)
       .map((row) => row.id as string);
     for (const id of expired) this.deleteSession(id);
+    this.db.prepare('DELETE FROM session_requests WHERE session_id IS NULL AND expires_at<=?').run(now);
     // Pairings and sessions cascade. Online browsers are touched every heartbeat, so only offline ones age out.
     const stale = this.db
       .prepare(

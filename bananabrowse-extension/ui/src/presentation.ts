@@ -30,6 +30,8 @@ export interface SessionView {
   candidates: Candidate[];
   tabs: TabView[];
   excluded: number;
+  stale: boolean;
+  close_on_completion: boolean;
 }
 export interface RequestView {
   request_id: string;
@@ -173,7 +175,8 @@ export function tabStatus(tab: TabView): string {
 export function sessionSummary(session: SessionView): string {
   if (session.state === 'unconfirmed') return 'Waiting for you to reconnect it';
   const tabs = `${session.tabs.length} tab${session.tabs.length === 1 ? '' : 's'}`;
-  return session.excluded ? `${tabs} · ${session.excluded} not shared` : tabs;
+  const summary = session.excluded ? `${tabs} · ${session.excluded} not shared` : tabs;
+  return session.stale ? `Stale · ${summary}` : summary;
 }
 
 const STATUS_TEXT: Record<string, string> = {

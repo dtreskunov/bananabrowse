@@ -79,6 +79,7 @@ async function startService(directory) {
   const { createApp } = await import(
     pathToFileURL(path.join(root, 'bananabrowse-mcp/dist/bananabrowse-mcp/app.js')).href
   );
+  const { tools } = await import(pathToFileURL(path.join(root, 'bananabrowse-mcp/dist/bananabrowse-mcp/mcp.js')).href);
   let app;
   const tls = https.createServer(
     {
@@ -130,7 +131,30 @@ async function startService(directory) {
       }),
     );
     clients.push(client);
-    const raw = (name, args = {}) => client.callTool({ name, arguments: args }, undefined, { timeout: 120_000 });
+    const sessionTokens = new Map();
+    const tabTokens = new Map();
+    const raw = async (name, args = {}) => {
+      if (name === 'request_session') args = { request_key: crypto.randomUUID(), ...args };
+      if (tools.find((tool) => tool.name === name)?.inputSchema.properties.session_token) {
+        const sessionId =
+          args.session_id ?? (typeof args.tab_id === 'string' ? store.tab(args.tab_id)?.session_id : undefined);
+        args = {
+          session_token: sessionTokens.get(sessionId) ?? tabTokens.get(args.tab_id) ?? 'x'.repeat(43),
+          ...args,
+        };
+      }
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 120_000 });
+      if (!result.isError) {
+        const value = JSON.parse(result.content[0].text);
+        if (name === 'request_session') {
+          sessionTokens.set(value.session_id, value.session_token);
+          for (const tab of value.tabs) tabTokens.set(tab.tab_id, value.session_token);
+        } else if (name === 'list_tabs') {
+          for (const tab of value) tabTokens.set(tab.tab_id, args.session_token);
+        } else if (name === 'create_tab') tabTokens.set(value.tab_id, args.session_token);
+      }
+      return result;
+    };
     const call = async (name, args = {}) => {
       const result = await raw(name, args);
       const value = JSON.parse(result.content[0].text);

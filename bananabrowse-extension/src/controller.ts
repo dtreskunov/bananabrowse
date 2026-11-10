@@ -90,6 +90,13 @@ interface Session {
   startUrls?: string[];
   color?: GroupColor;
   painted?: `${chrome.tabGroups.Color}`;
+  closeOnCompletion: boolean;
+  createdTabs: Set<number>;
+  lastActivityAt: number;
+  stale: boolean;
+  staleCollapsed: boolean;
+  completing?: boolean;
+  collapsing?: boolean;
 }
 interface SessionRequest {
   request_id: string;
@@ -125,6 +132,7 @@ interface ControllerOptions {
 
 const FEED_LIMIT = 200;
 const SYNC_KEEPALIVE_MS = 30 * 60_000;
+const SESSION_IDLE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TAB_VALUE = 'bananabrowse';
 const READ_OPERATIONS = [
@@ -135,7 +143,7 @@ const READ_OPERATIONS = [
   'get_screenshot',
   'query_all',
 ];
-// Tab closing waits for an explicit user approval in the BananaBrowse window; nothing closes tabs automatically.
+// Individual/all-tab close requests need fresh approval; completion can use session-scoped user consent.
 const CLOSE_OPERATIONS = ['close_tab', 'close_session'];
 const MUTATIONS = ['navigate', 'click', 'type_text', 'select_option', 'set_checked', 'press_key'];
 
@@ -319,16 +327,25 @@ export class Controller {
   }
   async persist() {
     const records = [...this.sessions.values()]
-      .filter((session) => session.session_id)
+      .filter((session) => session.session_id || session.state === 'pending')
       .map((session) => ({
         client_id: session.client_id,
         session_id: session.session_id,
         agent_id: session.agent_id,
         title: session.title,
         groupId: session.groupId,
-        tabs: [...session.tabs.values()]
-          .filter((tab) => tab.id)
-          .map((tab) => ({ key: tab.tabId, id: tab.id, url: tab.url })),
+        closeOnCompletion: session.closeOnCompletion === true,
+        lastActivityAt: session.lastActivityAt,
+        stale: session.stale === true,
+        staleCollapsed: session.staleCollapsed === true,
+        tabs: session.startTabs
+          ? session.startTabs.map((key) => ({ key, id: null, url: 'about:blank', created: true }))
+          : [...session.tabs.values()].map((tab) => ({
+              key: tab.tabId,
+              id: tab.id,
+              url: tab.url,
+              created: session.createdTabs?.has(tab.tabId) === true,
+            })),
       }));
     // Unconfirmed sessions keep their previous record so a later reattach can still match tabs.
     const keep = this.records.filter((record) => this.sessions.get(record.client_id)?.state === 'unconfirmed');
@@ -347,6 +364,8 @@ export class Controller {
         title: session.title,
         purpose: session.purpose,
         state: session.state,
+        stale: session.stale === true,
+        close_on_completion: session.closeOnCompletion === true,
         candidates: session.candidates || [],
         tabs: [...session.tabs.values()].map((tab) => ({
           tabId: tab.tabId,
@@ -812,17 +831,21 @@ export class Controller {
         tabsByGroup.get(tab.groupId)!.push(tab);
       }
     // Firefox persists per-tab values across restarts; Chrome only keeps group IDs for one browser run.
-    const located = new Map<string, { groups: Map<number, number>; tabs: Map<number, string> }>();
+    const located = new Map<
+      string,
+      { groups: Map<number, number>; tabs: Map<number, { id: string; created: boolean }> }
+    >();
     if (this.api.sessions?.getTabValue) {
       for (const tab of allTabs) {
         if (tab.groupId < 0) continue;
         const value = await this.api.sessions
-          .getTabValue<{ client_id: string; tab_id?: unknown }>(tab.id!, TAB_VALUE)
+          .getTabValue<{ client_id: string; tab_id?: unknown; created?: unknown }>(tab.id!, TAB_VALUE)
           .catch(() => null);
         if (!value || !UUID.test(value.client_id || '')) continue;
         const entry = located.get(value.client_id) || { groups: new Map(), tabs: new Map() };
         entry.groups.set(tab.groupId, (entry.groups.get(tab.groupId) || 0) + 1);
-        if (typeof value.tab_id === 'string') entry.tabs.set(tab.id, value.tab_id);
+        if (typeof value.tab_id === 'string')
+          entry.tabs.set(tab.id, { id: value.tab_id, created: value.created === true });
         located.set(value.client_id, entry);
       }
     }
@@ -861,6 +884,11 @@ export class Controller {
         running: 0,
         creating: 0,
         excluded: 0,
+        closeOnCompletion: record.closeOnCompletion === true,
+        createdTabs: new Set(),
+        lastActivityAt: Number.isFinite(record.lastActivityAt) ? record.lastActivityAt : this.now(),
+        stale: record.stale === true,
+        staleCollapsed: record.staleCollapsed === true,
       };
       const found = located.get(clientId);
       let groupId: number | null = null;
@@ -873,11 +901,19 @@ export class Controller {
         // A tagged tab dragged into someone else's group must not pull that whole group into scope.
         if (!claimed.has(candidate) && tagged * 2 > (tabsByGroup.get(candidate) || []).length) {
           groupId = candidate;
-          for (const [tabId, serverTabId] of found.tabs) knownTabs.set(tabId, serverTabId);
+          for (const [tabId, saved] of found.tabs) {
+            if (!tabsByGroup.get(candidate)?.some((tab) => tab.id === tabId)) continue;
+            knownTabs.set(tabId, saved.id);
+            if (saved.created) base.createdTabs.add(tabId);
+          }
         }
       } else if (sameRun && groupIds.has(record.groupId)) {
         groupId = record.groupId;
-        for (const tab of record.tabs || []) knownTabs.set(tab.key, tab.id);
+        for (const tab of record.tabs || []) {
+          if (!tabsByGroup.get(record.groupId)?.some((current) => current.id === tab.key)) continue;
+          if (typeof tab.id === 'string') knownTabs.set(tab.key, tab.id);
+          if (tab.created === true) base.createdTabs.add(tab.key);
+        }
       }
       if (groupId !== null) {
         const group = groups.find((g) => g.id === groupId)!;
@@ -918,7 +954,9 @@ export class Controller {
     for (const tab of tabs) {
       const index = unused.findIndex((old) => old.url === tab.url);
       if (index >= 0) {
-        this.knownTabs.set(tab.id!, unused[index].id);
+        const old = unused[index];
+        if (typeof old.id === 'string') this.knownTabs.set(tab.id!, old.id);
+        // URL matching restores access, not provenance: restored Chrome tabs need fresh close approval.
         unused.splice(index, 1);
       }
     }
@@ -973,6 +1011,7 @@ export class Controller {
     this.changed();
   }
   async scan(session: Session) {
+    if (session.completing) return;
     let group: chrome.tabGroups.TabGroup | null = null;
     try {
       group = await this.api.tabGroups.get(session.groupId!);
@@ -980,6 +1019,7 @@ export class Controller {
     } catch {
       group = null;
     }
+    if (session.completing) return;
     if (!group) {
       // The user closed or ungrouped the tab group: the session ends.
       this.addFeed({
@@ -995,6 +1035,7 @@ export class Controller {
     if (group.title && group.title !== session.title) session.title = group.title;
     session.windowId = group.windowId;
     const tabs = (await this.api.tabs.query({ groupId: session.groupId! })) as IdentifiedTab[];
+    if (session.completing) return;
     for (const [tabId, tab] of [...session.tabs]) {
       if (!tabs.some((current) => current.id === tabId)) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
     }
@@ -1078,11 +1119,16 @@ export class Controller {
   tagTab(session: Session, tab: Tab) {
     if (!this.api.sessions?.setTabValue) return;
     void this.api.sessions
-      .setTabValue(tab.tabId, TAB_VALUE, { client_id: session.client_id, tab_id: tab.id })
+      .setTabValue(tab.tabId, TAB_VALUE, {
+        client_id: session.client_id,
+        tab_id: tab.id,
+        created: session.createdTabs?.has(tab.tabId) === true,
+      })
       .catch(() => {});
   }
   dropTab(session: Session, tab: Tab, code: string) {
     session.tabs.delete(tab.tabId);
+    session.createdTabs?.delete(tab.tabId);
     for (const task of [...session.tasks]) {
       if (task.message.operation === 'close_tab' && task.message.args.tab_id === tab.id && !task.executing) {
         this.finishTask(session, null, task, { code: 'TAB_NOT_IN_SESSION' });
@@ -1286,7 +1332,7 @@ export class Controller {
     );
     this.changed();
   }
-  async approveSession(requestId: string) {
+  async approveSession(requestId: string, closeOnCompletion = true) {
     const request = this.requests.get(requestId);
     if (!request || request.expires_at <= this.now()) fail('ACTION_EXPIRED');
     this.requests.delete(requestId);
@@ -1321,12 +1367,24 @@ export class Controller {
         startTabs: created,
         startUrls: request.urls,
         color: request.agent.color,
+        closeOnCompletion,
+        createdTabs: new Set(created),
+        lastActivityAt: this.now(),
+        stale: false,
+        staleCollapsed: false,
       };
       if (!this.agents.has(request.agent.id)) this.agents.set(request.agent.id, request.agent);
-      this.send({ type: 'session.decision', request_id: requestId, approved: true, client_id: session.client_id });
       this.sessions.set(session.client_id, session);
+      await this.persist();
+      this.send({ type: 'session.decision', request_id: requestId, approved: true, client_id: session.client_id });
     } catch (error) {
+      for (const [clientId, session] of this.sessions)
+        if (session.request_id === requestId) {
+          this.sessions.delete(clientId);
+          this.records = this.records.filter((record) => record.client_id !== clientId);
+        }
       if (created.length) await this.api.tabs.remove(created).catch(() => {});
+      await this.persist().catch((failure) => this.report(failure));
       throw error;
     }
     this.changed();
@@ -1405,8 +1463,9 @@ export class Controller {
     await this.sync(true);
   }
   progress(message: Wire) {
-    const session = [...this.sessions.values()].find((s) => s.session_id === message.session_id);
+    const session = this.findSession(message.session_id);
     if (typeof message.message !== 'string') fail('INVALID_MESSAGE');
+    if (session) this.touchSession(session);
     this.addFeed({
       kind: 'progress',
       session_id: message.session_id,
@@ -1442,13 +1501,15 @@ export class Controller {
       session = this.findSession(message.session_id);
       if (!session || session.state !== 'attached') fail('SESSION_DETACHED');
       const create = message.operation === 'create_tab',
+        ending = message.operation === 'end_session',
         confirm = CLOSE_OPERATIONS.includes(message.operation);
+      const sessionCommand = create || confirm || ending;
       const human = message.operation === 'request_handoff';
       if (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)) fail('INVALID_ARGUMENT');
       if (!human && !validDescription(message.description)) fail('INVALID_ARGUMENT');
       // Tab lifecycle commands queue on the session, not on a tab.
-      tab = create || confirm ? null : [...session.tabs.values()].find((t) => t.id === message.tab_id);
-      if (!create && !confirm && !tab) fail('TAB_NOT_IN_SESSION');
+      tab = sessionCommand ? null : this.sessionTab(session, message.tab_id);
+      if (!sessionCommand && !tab) fail('TAB_NOT_IN_SESSION');
       if (create) {
         if (Object.keys(message.args).some((key) => key !== 'url')) fail('INVALID_ARGUMENT');
         if (message.args.url !== undefined) navigationUrl(String(message.args.url), this.protectedOrigins);
@@ -1457,6 +1518,9 @@ export class Controller {
         if (!this.sessionTab(session, message.args.tab_id)) fail('TAB_NOT_IN_SESSION');
       } else if (message.operation === 'close_session') {
         if (Object.keys(message.args).length) fail('INVALID_ARGUMENT');
+      } else if (ending) {
+        if (Object.keys(message.args).some((key) => key !== 'keep_tabs') || typeof message.args.keep_tabs !== 'boolean')
+          fail('INVALID_ARGUMENT');
       } else if (!validOperationArgs(message.operation, message.args)) fail('INVALID_ARGUMENT');
       const duration = message.wait_timeout_ms;
       if (!Number.isSafeInteger(duration) || duration <= 0 || duration > HUMAN_WAIT_MS) fail('INVALID_MESSAGE');
@@ -1475,6 +1539,7 @@ export class Controller {
       const queue = tab?.queue || session.tasks;
       if (queue.length >= 16) fail('QUEUE_FULL');
       queue.push(task);
+      this.touchSession(session);
       this.addFeed({
         id: message.request_id,
         kind: 'command',
@@ -1514,13 +1579,14 @@ export class Controller {
     }
   }
   drain(session: Session) {
-    if (session.state !== 'attached') return;
+    if (session.state !== 'attached' || session.completing) return;
     const full = session.running >= SESSION_CONCURRENCY;
     for (const tab of [null, ...session.tabs.values()]) {
       const task = (tab?.queue || session.tasks)[0];
       if (!task || task.preparing || task.ready || task.executing || task.human) continue;
       // Close commands start only after the user approves them, and never wait for a page slot.
-      if (task.confirm ? !task.approved : full) continue;
+      if (task.confirm && !task.approved) continue;
+      if (!task.confirm && full && task.message.operation !== 'end_session') continue;
       task.preparing = true;
       void this.prepare(session, tab, task).catch((error) => this.report(error));
     }
@@ -1603,7 +1669,7 @@ export class Controller {
     if (!found) return;
     const { session, tab, task } = found;
     const queue = tab?.queue || session.tasks;
-    const unslotted = task.human || task.confirm;
+    const unslotted = task.human || task.confirm || task.message.operation === 'end_session';
     if (
       queue[0] !== task ||
       !task.ready ||
@@ -1640,6 +1706,7 @@ export class Controller {
         );
       else if (task.message.operation === 'close_tab') operation = this.closeTab(session, task);
       else if (task.message.operation === 'close_session') operation = this.closeSession(session, task);
+      else if (task.message.operation === 'end_session') operation = this.completeSession(session, task);
       else operation = this.createTab(session, task);
       const timeout = new Promise((_, reject) => {
         task.abort = () => reject(Object.assign(new Error('OUTCOME_UNKNOWN'), { code: 'OUTCOME_UNKNOWN' }));
@@ -1667,6 +1734,7 @@ export class Controller {
     } finally {
       clearTimeout(timer);
       task.abort = null;
+      if (task.message.operation === 'end_session' && !after) session.completing = false;
       if (!unslotted) session.running--;
       this.drain(session);
       this.changed();
@@ -1695,6 +1763,35 @@ export class Controller {
     task.after = () => this.endApprovedClose(session, tabIds);
     return { tabs_closed: tabIds.length };
   }
+  async completeSession(session: Session, task: Task) {
+    session.completing = true;
+    const closeTabs = session.closeOnCompletion === true && !task.message.args.keep_tabs;
+    let closed = 0;
+    if (closeTabs) {
+      const tabs = await this.api.tabs.query({ groupId: session.groupId! });
+      this.check(session, null, task);
+      for (const tab of tabs) {
+        if (!session.tabs.has(tab.id!) || !session.createdTabs?.has(tab.id!) || tab.pinned) continue;
+        const current = await this.api.tabs.get(tab.id!);
+        this.check(session, null, task);
+        if (current.groupId !== session.groupId || current.pinned || !session.createdTabs.has(tab.id!)) continue;
+        await this.api.tabs.remove(tab.id!);
+        closed++;
+      }
+    }
+    task.after = async () => {
+      this.addFeed({
+        session_id: session.session_id,
+        agent_id: session.agent_id,
+        kind: 'session',
+        status: 'complete',
+        description: `Session “${session.title}” finished. Completion cleanup ${closeTabs ? 'was approved when it opened' : 'kept its tabs open'}.`,
+      });
+      await this.closeLocal(session, true);
+      await this.sync(true);
+    };
+    return { tabs_closed: closed };
+  }
   async endApprovedClose(session: Session, tabIds: number[]) {
     this.addFeed({
       session_id: session.session_id,
@@ -1716,6 +1813,7 @@ export class Controller {
         url: 'about:blank',
         active: false,
       })) as IdentifiedTab;
+      (session.createdTabs ??= new Set()).add(created.id);
     } catch (error) {
       session.creating--;
       throw error;
@@ -1744,6 +1842,7 @@ export class Controller {
       }
       return { tab_id: tab.id };
     } catch (error) {
+      session.createdTabs.delete(created.id);
       const tab = session.tabs.get(created.id);
       if (tab) this.dropTab(session, tab, 'TAB_NOT_IN_SESSION');
       await this.api.tabs.remove(created.id).catch(() => {});
@@ -1754,6 +1853,8 @@ export class Controller {
   }
   finishTask(session: Session, tab: Tab | null, task: Task, error: Wire | null, value?: unknown) {
     if (task.cancelled) return;
+    if (this.sessions.get(session.client_id) === session && error?.code !== 'BROWSER_OFFLINE')
+      this.touchSession(session);
     let status = 'complete';
     if (error?.code === 'OUTCOME_UNKNOWN') status = 'uncertain';
     else if (error && ['COMMAND_CANCELLED', 'ACTION_DECLINED', 'SESSION_ENDED', 'BROWSER_OFFLINE'].includes(error.code))
@@ -1892,6 +1993,45 @@ export class Controller {
     if (!session || session.state !== 'attached') fail('SESSION_DETACHED');
     await this.api.tabs.group({ groupId: session.groupId!, tabIds: [tab.id] });
   }
+  touchSession(session: Session) {
+    session.lastActivityAt = this.now();
+    session.stale = false;
+    session.staleCollapsed = false;
+    this.persistSoon();
+  }
+  async markIdleSessions() {
+    const idle = (session: Session) =>
+      session.state === 'attached' &&
+      !session.completing &&
+      !session.running &&
+      !session.creating &&
+      !session.tasks.length &&
+      ![...session.tabs.values()].some((tab) => tab.queue.length) &&
+      this.now() - session.lastActivityAt >= SESSION_IDLE_MS;
+    for (const session of this.sessions.values()) {
+      if (!idle(session)) continue;
+      if (!session.stale) {
+        session.stale = true;
+        this.persistSoon();
+        this.changed();
+      }
+      if (session.staleCollapsed || session.collapsing) continue;
+      session.collapsing = true;
+      try {
+        const tabs = await this.api.tabs.query({ groupId: session.groupId! });
+        if (tabs.some((tab) => tab.active)) {
+          const window = await this.api.windows.get(session.windowId!);
+          if (window.focused) continue;
+        }
+        if (!idle(session) || this.sessions.get(session.client_id) !== session) continue;
+        await this.api.tabGroups.update(session.groupId!, { collapsed: true });
+        if (idle(session)) session.staleCollapsed = true;
+        this.persistSoon();
+      } finally {
+        session.collapsing = false;
+      }
+    }
+  }
   async tick() {
     if (this.socket && this.connection && this.now() - this.lastPing >= LIVENESS_MS)
       this.lost(this.socket, this.generation);
@@ -1912,6 +2052,7 @@ export class Controller {
             this.finishTask(session, tab, task, { code: task.executing ? 'OUTCOME_UNKNOWN' : 'COMMAND_EXPIRED' });
           }
       }
+    await this.markIdleSessions();
     await this.paintGroups();
   }
   async paintGroups() {

@@ -66,6 +66,7 @@ export function Requests({ snapshot }: { snapshot: Snapshot }) {
 }
 
 function SessionRequest({ request }: { request: RequestView }) {
+  const [closeOnCompletion, setCloseOnCompletion] = useState(true);
   return (
     <article class="card">
       <h2>
@@ -92,6 +93,16 @@ function SessionRequest({ request }: { request: RequestView }) {
       <p class="muted small">
         The agent can use your existing logins in tabs of this group until you close or ungroup it.
       </p>
+      <label class="choice">
+        <input
+          type="checkbox"
+          checked={closeOnCompletion}
+          disabled={busy.value !== null}
+          onChange={(event) => setCloseOnCompletion(event.currentTarget.checked)}
+        />
+        Close tabs created for this session when the agent finishes, without asking again.
+      </label>
+      <p class="muted small">User-added, pinned or moved-out tabs stay open. Unsaved work in closed tabs is lost.</p>
       <Actions>
         <button
           class="primary"
@@ -99,7 +110,7 @@ function SessionRequest({ request }: { request: RequestView }) {
           onClick={() =>
             void act('Opening session', async () => {
               await requestSitePermission();
-              await controller.approveSession(request.request_id);
+              await controller.approveSession(request.request_id, closeOnCompletion);
             })
           }
         >

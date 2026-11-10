@@ -156,11 +156,11 @@ export const tools: Tool[] = [
   {
     name: 'end_session',
     description:
-      "End only this task's session when the task finishes, using its session_token. By default its tabs are ungrouped and stay open. close_tabs: true instead asks the user to approve closing the session's tabs (system notification plus a prompt in the BananaBrowse window showing your description) and waits; ACTION_DECLINED means the user kept them and the session continues. Untracked tabs, such as protected sites, are only ungrouped. Closing needs extension 6.1.3 and an online browser.",
+      "End only this task's session when its browsing work finishes, using its session_token, including before delivering your final response. With extension 0.9.0.3+, omitting close_tabs honors the user's completion-cleanup choice at session approval: eligible tabs created for this session close without another prompt; user-added, pinned or moved-out tabs stay open. close_tabs: false preserves all tabs. close_tabs: true instead asks for fresh approval to close all tracked tabs and requires description; ACTION_DECLINED leaves the session open. Older or offline extensions preserve tabs. Never use idle time or a disconnect as proof the task finished.",
     inputSchema: schema(
       {
         ...sessionTarget,
-        close_tabs: { type: 'boolean', default: false },
+        close_tabs: { type: 'boolean' },
         description: { ...description, description: `Required with close_tabs. ${description.description}` },
         timeout_seconds: humanWait,
       },
@@ -248,7 +248,7 @@ export const INSTRUCTIONS =
   'BROWSER_OFFLINE means no live connection: the window may be closed or reconnecting. Ask the user to check the window/connection or choose another browser if it stays offline. list_sessions returns metadata only, never task credentials. If both key and token are lost, ask the user to end the orphaned group and approve a new one; do not reclaim another group. ' +
   'A stale duplicate (e.g. after an extension reinstall) can be removed with unpair_browser. ' +
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
-  "When finished, call end_session with only this task's session_id and session_token; tabs stay open by default. Never use unpair_browser for task cleanup: it revokes all this agent's sessions on that browser. " +
+  "When finished, call end_session with only this task's session_id and session_token before your final response, including when abandoning a task after an error if the session is still available. Omit close_tabs to honor the user's session cleanup choice; do not assume completion closes every tab. Keep the session credentials across compaction until cleanup succeeds, and never retry an uncertain tab-closing outcome blindly. Never use unpair_browser for task cleanup: it revokes all this agent's sessions on that browser. " +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
   'Start with get_page_snapshot; inspect_element is a read-only selector/readiness probe without focus or scrolling. Action receipts confirm dispatch, not application success: verify the resulting page. ' +
   'For structured DOM data with known selectors, use query_all; use evaluate_script for data not available through DOM extraction. ' +
@@ -457,7 +457,8 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
     else if (name === 'request_session') result = await hub.requestSession(agent.id, args, signal);
     else if (name === 'list_sessions') result = hub.listSessions(agent.id);
     else if (name === 'end_session') {
-      if (args.close_tabs !== true) result = hub.endSessionByAgent(credentials, args.session_id);
+      if (args.close_tabs !== true)
+        result = await hub.endSessionByAgent(credentials, args.session_id, args.close_tabs === false, signal);
       else {
         requireArguments(Object.hasOwn(args, 'description') ? [] : [{ field: 'description', reason: 'required' }]);
         result = await hub.closeSessionTabs(

@@ -74,7 +74,8 @@ order.
   with that name. Remove existing orphans with `admin.js browser-revoke`.
 - **Closing tabs (6.1.0-beta.5, extension 6.1.3).** New tool
   `close_tab({tab_id, description, timeout_seconds?})`; `end_session` accepts
-  `close_tabs: true` with a `description`. Closing is never automatic: the
+  `close_tabs: true` with a `description`. These explicit close requests require
+  fresh approval: the
   extension shows a system notification and an approval card (the agent's
   description and the tabs affected) and closes only after the user clicks
   **Close**; **Keep open** returns `ACTION_DECLINED` and the session continues.
@@ -82,6 +83,14 @@ order.
   extension 6.1.3; older extensions (including 6.1.2, which closed without
   asking, shipped in 6.1.0-beta.4) get `CAPABILITY_UNAVAILABLE` with
   `required_extension_version` before anything is sent to the browser.
+- **Completion cleanup (BananaBrowse extension 0.9.0.3+).** New session approval
+  includes a checked-by-default choice to close eligible session-created tabs
+  when the agent calls `end_session`. Omit `close_tabs` to honor this choice;
+  `false` keeps tabs and `true` still requests fresh approval for all tracked
+  tabs. Existing sessions without recorded consent keep their tabs. User-added,
+  pinned, moved-out and unidentifiable restored tabs are preserved. Generic
+  `session.end` remains non-destructive. After one hour of idle agent activity,
+  otherwise idle sessions are marked Stale and collapse once, never auto-close.
 - **TypeScript build (6.1.0-beta.6, extension 6.1.4).** No protocol, schema or
   behaviour change. The service is now TypeScript and must be built before it
   runs: in `bananabrowse-mcp/` run `npm ci && npm run build:service` after every

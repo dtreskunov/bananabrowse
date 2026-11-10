@@ -41,7 +41,9 @@ extensions and unsigned temporary Firefox add-ons.
    it calls `request_session` with a task-specific request key, purpose and starting URLs.
    You get a system notification and a card in the
    window. **Approve** creates a colored tab group in your last-used window
-   without stealing focus.
+   without stealing focus. **Close tabs created for this session when the agent
+   finishes** is checked by default. Uncheck it to keep those tabs; user-added,
+   pinned and moved-out tabs are always kept by completion cleanup.
 5. **Work together:** the agent works in the group's tabs in the background.
    Progress and requests for help (logins, CAPTCHAs) appear in the window; help
    requests also flash the tab group and show a notification. Click **Done** when
@@ -70,6 +72,11 @@ Each agent gets a stable group color. Sessions survive window closes and
 browser restarts for up to 7 days while their group exists. After a Chrome
 restart, the window asks you to confirm which group belongs to a session,
 because Chrome changes group IDs on restart. Firefox reattaches automatically.
+After one hour without agent commands or progress, an otherwise idle session
+is marked **Stale** in the window and its native group collapses once. Collapse
+waits while you are viewing the group; running work and pending approvals/help
+defer staleness. Reopening the group does not make it collapse repeatedly.
+New agent activity clears staleness. Idle cleanup never closes tabs.
 
 ## Agent setup
 
@@ -136,7 +143,15 @@ Use **one group per task**. Generate a fresh random UUID `request_key` before
 `request_session` and keep it with the original request arguments. The approved
 request returns a private `session_token`; supply it with every session or tab
 operation, including `end_session` when the task finishes. Ending a session
-ungroups its tabs by default; closing tabs still needs user approval.
+honors your cleanup choice from session approval, closing eligible tabs created
+for it without another prompt and ungrouping the rest. The choice survives
+reconnects; old sessions without recorded consent keep their tabs. After a
+Chrome browser restart, restored tabs are kept because URL-based reattachment
+cannot prove which tabs were created for the session; newly created tabs can
+still be cleaned up. Firefox preserves tab provenance across restarts.
+`close_tabs: false` keeps all tabs; `close_tabs: true` requests fresh approval
+to close all tracked tabs. Completion cleanup needs extension 0.9.0.3+ and a
+live session; disconnects, expiry and unpairing never trigger it.
 `list_sessions` returns metadata, never credentials, and does not authorize
 using another task's group.
 

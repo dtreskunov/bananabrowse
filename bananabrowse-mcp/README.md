@@ -164,8 +164,15 @@ connections; the agent starts a new session for each new task.
    `list_tabs`, `create_tab`, `close_tab`, `report_progress`, `request_handoff`
    and `end_session`. The token must belong to the target session, even when
    multiple tasks share the same agent identity.
-4. When done, call `end_session({session_id, session_token})`. Tabs are ungrouped
-   and stay open; `close_tabs: true` still requires local approval. Never use
+4. When browsing is done, call `end_session({session_id, session_token})` before
+   your final response, including when abandoning a task after an error.
+   Omit `close_tabs` to honor the user's session cleanup choice (checked by
+   default when approving a new session). With extension 0.9.0.3+ and a live
+   session, eligible session-created tabs close without another prompt;
+   user-added, pinned, moved-out or unidentifiable restored tabs are preserved.
+   `close_tabs: false` keeps all tabs; `close_tabs: true` requests fresh local
+   approval to close all tracked tabs. Older/offline extensions keep tabs.
+   Never retry uncertain tab-closing outcomes blindly. Never use
    `unpair_browser` for routine task cleanup: it revokes all the agent's sessions
    on that browser.
 
@@ -177,7 +184,7 @@ remain agent-scoped. Capabilities protect against accidental cross-task use;
 deliberately sharing the token or request key shares access.
 
 Keep the token, request key and original arguments privately in task context,
-including across compaction. If a response is lost, repeat `request_session`
+including across compaction until cleanup succeeds. If a response is lost, repeat `request_session`
 with the **same key and original arguments** to recover the same session and
 token without another approval, including after a service restart or while the
 browser is offline. `timeout_seconds` may change. A concurrent duplicate gets

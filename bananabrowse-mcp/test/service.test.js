@@ -718,6 +718,52 @@ test('end_session, pairing revocation and forgetting the browser end sessions an
   assert.equal(fixture.store.browser(extension.browser_id), undefined);
 });
 
+test('ordinary completion uses acknowledged local consent on new extensions; false explicitly keeps tabs', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.3' });
+  for (const close_tabs of [undefined, false]) {
+    const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Complete this task' });
+    const { group } = await extension.approveNext([page(81)]);
+    const session = await pending;
+    extension.serve((command) => {
+      assert.equal(command.operation, 'end_session');
+      assert.deepEqual(command.args, { keep_tabs: close_tabs === false });
+      assert(fixture.store.session(session.session_id), 'authority stays live until the receipt');
+      return { tabs_closed: close_tabs === false ? 0 : 1 };
+    });
+    assert.deepEqual(
+      await agent.call('end_session', {
+        session_id: session.session_id,
+        ...(close_tabs === undefined ? {} : { close_tabs }),
+      }),
+      { session_id: session.session_id, ended: true, tabs_closed: close_tabs !== false },
+    );
+    assert.equal(fixture.store.session(session.session_id), undefined);
+    assert.equal(
+      extension.messages.some((message) => message.type === 'session.end'),
+      false,
+    );
+    extension.groups.delete(group.client_id);
+    await extension.sync();
+  }
+});
+
+test('failed completion cleanup leaves the session available instead of claiming success', async (t) => {
+  const fixture = await start();
+  t.after(() => fixture.close());
+  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.3' });
+  const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Completion fails' });
+  await extension.approveNext([page(82)]);
+  const session = await pending;
+  extension.serve(() => ({ error: { code: 'OPERATION_FAILED' } }));
+  await assert.rejects(agent.call('end_session', { session_id: session.session_id }), { code: 'OPERATION_FAILED' });
+  assert(fixture.store.session(session.session_id));
+  extension.serve(() => ({ tabs_closed: -1 }));
+  await assert.rejects(agent.call('end_session', { session_id: session.session_id }), { code: 'INVALID_MESSAGE' });
+  assert(fixture.store.session(session.session_id));
+});
+
 test('sessions expire after 7 days without the extension reporting the group alive', async (t) => {
   let now = 1_800_000_000_000;
   const fixture = await start({ now: () => now });

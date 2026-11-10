@@ -85,6 +85,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     });
     await expect(app.getByRole('heading', { name: 'Atlas wants to open a session' })).toBeVisible();
     await expect(app.getByText(/^Check the disposable fixture page/)).toBeVisible();
+    await expect(app.getByRole('checkbox', { name: /Close tabs created for this session/ })).toBeChecked();
     await app.getByRole('button', { name: 'Approve' }).click();
     const session = await requested;
     expect(session).toMatchObject({ state: 'attached', title: 'Fixture task' });
@@ -143,6 +144,11 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     );
 
     await agent.call('report_progress', { session_id: session.session_id, message: 'Fixture checks are halfway done' });
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.bananabrowse.controller.snapshot().feed.map((entry) => entry.description)),
+      )
+      .toContain('Fixture checks are halfway done');
     await expect(app.getByText('Fixture checks are halfway done')).toBeVisible();
 
     const handoff = agent
@@ -259,7 +265,7 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     });
     await expect(app.locator('.agent-row .agent-status')).toHaveText('Idle');
 
-    // A declined request creates nothing; an agent-ended session ungroups but keeps tabs.
+    // A declined request creates nothing; completion honors the default-on user consent.
     const declined = agent
       .call('request_session', { browser_id: paired.browser_id, purpose: 'This one gets declined' })
       .then(
@@ -272,8 +278,51 @@ test('v6 Chrome: app window setup, pairing, approved session, actions, handoff, 
     const second = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'Second fixture session' });
     await app.getByRole('button', { name: 'Approve' }).click();
     const two = await second;
-    await agent.call('end_session', { session_id: two.session_id });
+    const secondGroup = await worker.evaluate(() => chrome.tabGroups.query({}).then((groups) => groups[0]));
+    const ownedTab = await worker.evaluate(
+      (id) => chrome.tabs.query({ groupId: id }).then((tabs) => tabs[0].id),
+      secondGroup.id,
+    );
+    const userTab = await worker.evaluate(async (id) => {
+      const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+      await chrome.tabs.group({ groupId: id, tabIds: [tab.id] });
+      return tab.id;
+    }, secondGroup.id);
+    await expect.poll(async () => (await agent.call('list_tabs', { session_id: two.session_id })).length).toBe(2);
+    // Staleness is visible and collapses once, without closing tabs or overriding a manual expansion.
+    await app.evaluate(async () => {
+      const controller = globalThis.bananabrowse.controller;
+      const session = [...controller.sessions.values()][0];
+      session.lastActivityAt = Date.now() - 60 * 60_000;
+      await controller.markIdleSessions();
+    });
+    await expect(app.getByText('Stale · 2 tabs')).toBeVisible();
+    expect(
+      await worker.evaluate((id) => chrome.tabGroups.get(id).then((group) => group.collapsed), secondGroup.id),
+    ).toBe(true);
+    await worker.evaluate((id) => chrome.tabGroups.update(id, { collapsed: false }), secondGroup.id);
+    await app.evaluate(() => globalThis.bananabrowse.controller.markIdleSessions());
+    expect(
+      await worker.evaluate((id) => chrome.tabGroups.get(id).then((group) => group.collapsed), secondGroup.id),
+    ).toBe(false);
+    expect(await agent.call('end_session', { session_id: two.session_id })).toMatchObject({ tabs_closed: true });
     await expect.poll(() => worker.evaluate(() => chrome.tabGroups.query({}).then((g) => g.length))).toBe(0);
+    expect(
+      await worker.evaluate((id) => chrome.tabs.query({}).then((tabs) => tabs.some((tab) => tab.id === id)), ownedTab),
+    ).toBe(false);
+    expect(await worker.evaluate((id) => chrome.tabs.get(id).then((tab) => tab.groupId), userTab)).toBe(-1);
+    await expect(app.locator('.requests')).toHaveCount(0);
+
+    // Opting out preserves session-created tabs without a second prompt.
+    const third = agent.call('request_session', { browser_id: paired.browser_id, purpose: 'Keep my result tabs' });
+    await app.getByRole('checkbox', { name: /Close tabs created for this session/ }).uncheck();
+    await app.getByRole('button', { name: 'Approve' }).click();
+    const three = await third;
+    const keptTab = await worker.evaluate(() =>
+      chrome.tabGroups.query({}).then(async ([group]) => (await chrome.tabs.query({ groupId: group.id }))[0].id),
+    );
+    expect(await agent.call('end_session', { session_id: three.session_id })).toMatchObject({ tabs_closed: false });
+    await expect.poll(() => worker.evaluate((id) => chrome.tabs.get(id).then((tab) => tab.groupId), keptTab)).toBe(-1);
 
     // Only an abnormal connection is shown: the strip names the server, offers Retry and the title says offline.
     await service.close();

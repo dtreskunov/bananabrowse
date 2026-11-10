@@ -105,6 +105,7 @@ test('countdown, tab status, session summaries and labels are compact', () => {
   assert.equal(tabStatus(tab({ help: true, working: true })), 'Needs you');
   assert.equal(tabStatus(tab()), '');
   assert.equal(sessionSummary(session(atlas, { tabs: [tab()], excluded: 2 })), '1 tab · 2 not shared');
+  assert.equal(sessionSummary(session(atlas, { stale: true, tabs: [tab()] })), 'Stale · 1 tab');
   assert.equal(feedStatus('uncertain'), 'Unconfirmed');
   assert.match(failureMessage('SOMETHING_NEW'), /SOMETHING_NEW/);
   assert.equal(operationLabel('request_handoff'), 'Asked for your help');

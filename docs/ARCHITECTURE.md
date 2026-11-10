@@ -159,13 +159,30 @@ execution: `idle | running | waiting_for_human`. That is the whole state machine
 | Minimize or unfocus the window | No effect |
 | Agent `request_session` with a new task key | Fails immediately if the browser is offline. Otherwise: system notification, plus a request card in the window |
 | Agent retries `request_session` with the same key and original arguments | Recovers the committed session/token without creating another group, even offline |
-| User approves | Group created in the last-focused normal window without stealing focus; tabs open in the background, are protected, then navigate |
+| User approves | Group created in the last-focused normal window without stealing focus; tabs open in the background, are protected, then navigate. Completion cleanup is checked by default, chosen only by the user and persisted locally |
 | User declines or ignores the request | `DECLINED` or `TIMEOUT` |
 | A tab joins the group (user drag, context menu **Add to <group>**, or a website opening it from a grouped tab) | Tab granted with a fresh `t` ID |
 | Tab dragged out or closed | Grant revoked; unstarted work cancelled |
 | User ungroups or closes the group | Session ends and is deleted |
 | User renames the group | Title synced; agent sees it |
-| Agent `end_session` with this task's token | Ungroups only this task's group; tabs stay open |
+| Agent `end_session` with this task's token | Honors recorded completion consent, closes eligible session-created tabs, then ungroups the rest. Explicit `close_tabs: false` preserves all tabs |
+| One hour without meaningful agent activity | Marks an otherwise idle session Stale and collapses its group once; never ends the session or closes tabs |
+
+**Completion consent.** Only explicit task completion can use this consent;
+generic `session.end` messages (expiry, revocation, offline completion) never
+close tabs. Extension 0.9.0.3+ supports the acknowledged `end_session` command;
+older extensions retain ungroup-only behavior. Explicit `close_tabs: true`
+continues to require fresh approval. Automatic completion cleanup only closes
+tracked tabs created by session approval or `create_tab`, still in the group
+and not pinned. Provenance is stored locally and in Firefox per-tab values.
+Chrome URL-only reattachment restores access but not close authority, so restored
+tabs are preserved after a browser restart. Missing consent/provenance fails safe.
+
+**Staleness.** Command acceptance/completion and progress reset the persisted
+activity clock; heartbeats and inventory sync do not. Queued/running work,
+creation, help and close approvals defer staleness. Collapse waits if the group
+contains the active tab of a focused window. One collapse is allowed per idle
+period, so manually reopening a stale group is respected.
 
 **Retention.** `expires_at = last report + 7 days`. Every sync where the
 extension reports the group alive extends it. If the group vanished while
@@ -222,7 +239,7 @@ notifications have no buttons, so all decisions happen in the window.
 | `unpair_browser({browser_id})` | Remove the caller's own pairing (ends its sessions there); `NOT_FOUND` for unknown or foreign IDs |
 | `request_session({browser_id, request_key, purpose, urls?, title?, timeout_seconds?})` | New keys need an online browser and Approve/Decline (default 300 s, max 600 s); returns `session_token`, session metadata and tabs. Same-key retries recover without another group |
 | `list_sessions()` | Agent-wide metadata: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at`; never credentials |
-| `end_session({session_id, session_token, close_tabs?, description?, timeout_seconds?})` | Ungroup this task's group; tabs remain. `close_tabs: true` (with `description`) asks the user to approve closing the session's tracked tabs and waits; on approval the extension closes them, ungroups the rest and ends the session. Declined: `ACTION_DECLINED`, session continues. Online browser, extension 6.1.3+ |
+| `end_session({session_id, session_token, close_tabs?, description?, timeout_seconds?})` | Omit `close_tabs` to honor user-selected completion cleanup (extension 0.9.0.3+, attached session); `false` keeps tabs. `true` (with `description`) asks the user to approve closing all tracked tabs and waits. Declined: `ACTION_DECLINED`, session continues. Older/offline extensions preserve tabs on ordinary completion |
 | `list_tabs({session_id, session_token})` / `create_tab({session_id, session_token, url?, description})` | Grouped tabs only; 8-tab cap |
 | `close_tab({tab_id, session_token, description, timeout_seconds?})` | Ask the user to close one session tab and wait (extension 6.1.3+); declined: `ACTION_DECLINED`. After closing, queued commands on it fail with `TAB_NOT_IN_SESSION`; closing the last tab ends the session (`session_ended: true`) |
 | `report_progress({session_id, session_token, message})` | Activity feed line; ≤500 characters |

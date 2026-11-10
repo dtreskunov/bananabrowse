@@ -43,7 +43,8 @@ What they cover, against the real service over TLS with a real MCP client:
   a flashing group, badge and Done; close confirmation (`beforeunload`), graceful
   disconnect, debugger and protection rules removed; reopen with automatic
   reattach and the same tab IDs; second window refused; ungrouping ending the
-  session; decline; `end_session` ungrouping. A second test simulates a new
+  session; decline; default-checked completion consent, opt-out, preserving
+  user-added tabs, and one-time stale collapse. A second test simulates a new
   browser run (headless Chromium does not restore groups across real
   restarts): group IDs change, the window asks to reconnect, and tab IDs survive.
 - `firefox-app.spec.cjs` (native Firefox 153 over RDP): the same flow driven

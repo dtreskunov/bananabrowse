@@ -105,6 +105,7 @@ export const EXTENSION_FEATURES = Object.freeze({
   artifacts: '0.9.0.1',
   close_tabs: '0.9.0.1',
   query_all: '0.9.0.2',
+  session_cleanup: '0.9.0.3',
 });
 export function versionAtLeast(version: unknown, minimum: string): boolean {
   const parts = (value: unknown) =>

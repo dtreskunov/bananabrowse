@@ -1044,12 +1044,44 @@ export class Hub {
     });
     request.finish(null);
   }
-  endSessionByAgent(credentials: SessionCredentials, sessionId: string): Wire {
-    this.requireSession(credentials, sessionId);
+  async endSessionByAgent(
+    credentials: SessionCredentials,
+    sessionId: string,
+    keepTabs = false,
+    signal?: AbortSignal,
+  ): Promise<Wire> {
+    const row = this.requireSession(credentials, sessionId);
+    const live = this.live.get(sessionId);
+    if (
+      live?.state === 'attached' &&
+      this.online(row.browser_id) === live.conn &&
+      versionAtLeast(live.conn?.browser_info?.extension_version, EXTENSION_FEATURES.session_cleanup)
+    ) {
+      requireValue(this.calls.size < 1024, 'QUEUE_FULL', 429);
+      const result = (await this.dispatch(
+        live,
+        null,
+        'end_session',
+        { keep_tabs: keepTabs },
+        "End this task's browser session now that its browsing work has finished.",
+        this.now() + EXECUTION_MS,
+        signal,
+      )) as Wire;
+      requireValue(
+        result &&
+          Number.isSafeInteger(result.tabs_closed) &&
+          result.tabs_closed >= 0 &&
+          result.tabs_closed <= SESSION_TAB_LIMIT,
+        'INVALID_MESSAGE',
+      );
+      this.endSession(sessionId, 'SESSION_ENDED', false);
+      return { session_id: sessionId, ended: true, tabs_closed: result.tabs_closed > 0 };
+    }
+    // Older or detached extensions cannot apply completion consent; never close tabs on reconnect.
     this.endSession(sessionId, 'SESSION_ENDED', true);
     return { session_id: sessionId, ended: true, tabs_closed: false };
   }
-  // Closing tabs is never automatic: the extension asks the user and only closes after an explicit approval.
+  // Explicit close_tabs requests still require a fresh approval for all tracked tabs.
   async closeSessionTabs(
     credentials: SessionCredentials,
     sessionId: string,

@@ -17,15 +17,18 @@ browser profile.
 
 ## Version
 
-**1.0.0-beta.2** (service and extension), browser wire **v6**, DB schema **6**.
+**1.0.0-beta.4** (service and extension), browser wire **v6**, DB schema **6**.
 BananaBrowse restarts versioning at 1.0.0; the last DomAgent release was
 6.1.0-beta.6. It accepts no DomAgent extension: install BananaBrowse,
 re-register browsers and re-pair agents. See [the upgrade notes](docs/V6-UPGRADE.md)
 and [architecture](docs/ARCHITECTURE.md).
 
-Beta 2 adds `query_all` structured extraction, clearer agent guidance, and
-session-connection lifecycle fixes. Existing BananaBrowse pairings and sessions
-are preserved; update the extension to use `query_all`.
+Beta 4 adds user-approved completion cleanup, one-hour idle group collapse,
+task-owned sessions and OAuth improvements. It retains beta 3's full inventory
+validation and session readiness fixes. Upgrade the server before extensions,
+then rediscover MCP tools/instructions. Browser registrations and pairings are
+preserved; existing tokenless sessions must be ended and replaced with fresh
+task-owned sessions. See [the upgrade notes](docs/V6-UPGRADE.md#task-owned-sessions).
 
 Chrome **145+** and Firefox **153+**. Release ZIPs are unpacked Chrome
 extensions and unsigned temporary Firefox add-ons.
@@ -150,7 +153,7 @@ Chrome browser restart, restored tabs are kept because URL-based reattachment
 cannot prove which tabs were created for the session; newly created tabs can
 still be cleaned up. Firefox preserves tab provenance across restarts.
 `close_tabs: false` keeps all tabs; `close_tabs: true` requests fresh approval
-to close all tracked tabs. Completion cleanup needs extension 0.9.0.3+ and a
+to close all tracked tabs. Completion cleanup needs extension 0.9.0.4+ and a
 live session; disconnects, expiry and unpairing never trigger it.
 `list_sessions` returns metadata, never credentials, and does not authorize
 using another task's group.

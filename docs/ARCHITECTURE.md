@@ -1,7 +1,7 @@
 # BananaBrowse architecture
 
-Status: implemented in BananaBrowse 1.0.0-beta.2 (wire v6, DB schema 6),
-2026-10-19; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
+Status: implemented in BananaBrowse 1.0.0-beta.4 (wire v6, DB schema 6),
+2026-11-10; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
 ## 1. Goals
@@ -170,7 +170,7 @@ execution: `idle | running | waiting_for_human`. That is the whole state machine
 
 **Completion consent.** Only explicit task completion can use this consent;
 generic `session.end` messages (expiry, revocation, offline completion) never
-close tabs. Extension 0.9.0.3+ supports the acknowledged `end_session` command;
+close tabs. Extension 0.9.0.4+ supports the acknowledged `end_session` command;
 older extensions retain ungroup-only behavior. Explicit `close_tabs: true`
 continues to require fresh approval. Automatic completion cleanup only closes
 tracked tabs created by session approval or `create_tab`, still in the group
@@ -239,7 +239,7 @@ notifications have no buttons, so all decisions happen in the window.
 | `unpair_browser({browser_id})` | Remove the caller's own pairing (ends its sessions there); `NOT_FOUND` for unknown or foreign IDs |
 | `request_session({browser_id, request_key, purpose, urls?, title?, timeout_seconds?})` | New keys need an online browser and Approve/Decline (default 300 s, max 600 s); returns `session_token`, session metadata and tabs. Same-key retries recover without another group |
 | `list_sessions()` | Agent-wide metadata: `session_id`, `browser_id`, `tab_group_id`, `title`, `purpose`, `state` (`attached`/`detached`), `expires_at`; never credentials |
-| `end_session({session_id, session_token, close_tabs?, description?, timeout_seconds?})` | Omit `close_tabs` to honor user-selected completion cleanup (extension 0.9.0.3+, attached session); `false` keeps tabs. `true` (with `description`) asks the user to approve closing all tracked tabs and waits. Declined: `ACTION_DECLINED`, session continues. Older/offline extensions preserve tabs on ordinary completion |
+| `end_session({session_id, session_token, close_tabs?, description?, timeout_seconds?})` | Omit `close_tabs` to honor user-selected completion cleanup (extension 0.9.0.4+, attached session); `false` keeps tabs. `true` (with `description`) asks the user to approve closing all tracked tabs and waits. Declined: `ACTION_DECLINED`, session continues. Older/offline extensions preserve tabs on ordinary completion |
 | `list_tabs({session_id, session_token})` / `create_tab({session_id, session_token, url?, description})` | Grouped tabs only; 8-tab cap |
 | `close_tab({tab_id, session_token, description, timeout_seconds?})` | Ask the user to close one session tab and wait (extension 6.1.3+); declined: `ACTION_DECLINED`. After closing, queued commands on it fail with `TAB_NOT_IN_SESSION`; closing the last tab ends the session (`session_ended: true`) |
 | `report_progress({session_id, session_token, message})` | Activity feed line; ≤500 characters |
@@ -343,6 +343,18 @@ which the extension ungroups. A group approved but not yet committed carries its
 `request_id`, so the server doesn't treat it as unknown. Tab ID assignment is
 idempotent per browser tab, so a sync that races ahead of its acknowledgement
 can't renumber tabs. Sessions missing from an inventory are deleted.
+
+The entire inventory is validated before reconciliation changes any live state
+or persisted metadata, including tabs in unknown, pending and unconfirmed
+groups. Group IDs, tab keys and supplied tab IDs must not repeat across the
+inventory. Invalid data returns `INVALID_MESSAGE` without partially applying
+earlier groups. An attached group is reported as a usable attached session only
+after its first successful sync, matching dispatch readiness.
+
+The server is upgraded before extensions. Capability names must be supported
+by the server; unknown names remain invalid. There is no negotiation or fallback
+for a newer extension talking to an older server. Older extensions can continue
+advertising their supported subset to a newer server.
 
 Messages are capped at 8 MiB (6.1; 4 MiB before), results at 8 MiB − 4 KiB.
 

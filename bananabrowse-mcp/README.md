@@ -1,6 +1,6 @@
 # BananaBrowse service (v6)
 
-Self-hosted MCP server and browser hub. Service **1.0.0-beta.2**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **1.0.0-beta.4**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -167,7 +167,7 @@ connections; the agent starts a new session for each new task.
 4. When browsing is done, call `end_session({session_id, session_token})` before
    your final response, including when abandoning a task after an error.
    Omit `close_tabs` to honor the user's session cleanup choice (checked by
-   default when approving a new session). With extension 0.9.0.3+ and a live
+   default when approving a new session). With extension 0.9.0.4+ and a live
    session, eligible session-created tabs close without another prompt;
    user-added, pinned, moved-out or unidentifiable restored tabs are preserved.
    `close_tabs: false` keeps all tabs; `close_tabs: true` requests fresh local
@@ -209,6 +209,10 @@ from older service versions are similarly not claimable; see
 session creation only with the same task's request key and original arguments.
 `SESSION_DETACHED` means the existing session is not yet usable, for example
 while reconnecting or awaiting Chrome reattachment confirmation.
+Sessions are reported attached only after their first successful inventory
+sync. A malformed inventory is rejected before changing any session, tab grant
+or persisted inventory metadata. Upgrade the server before extensions;
+unsupported capability names remain invalid rather than being silently ignored.
 Session-request offline failures include `offline_reason` when observed:
 `graceful_disconnect`, `connection_lost`, `heartbeat_timeout`,
 `connection_replaced`, `service_stopped`, or `unknown`. Recent observations

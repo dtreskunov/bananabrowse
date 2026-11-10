@@ -142,7 +142,7 @@ test('v6 native Firefox: app window, pairing, session, actions, user scripts, cl
     await poll('c.feed.some(entry => entry.description === "Native Firefox halfway")').toBe(true);
     const tagged = await app(`browser.tabs.query({ groupId: [...c.sessions.values()][0].groupId })
       .then(tabs => browser.sessions.getTabValue(tabs[0].id, "bananabrowse"))`);
-    expect(tagged).toEqual({ client_id: expect.any(String), tab_id: tabId });
+    expect(tagged).toEqual({ client_id: expect.any(String), tab_id: tabId, created: true });
 
     // Closing the window disconnects; reopening reattaches without approval.
     await app('browser.windows.getCurrent().then(w => browser.windows.remove(w.id)).then(() => true)').catch(

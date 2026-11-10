@@ -690,7 +690,7 @@ test('group lifecycle: reattach after reconnect, unconfirmed detach, closed grou
 test('end_session, pairing revocation and forgetting the browser end sessions and notify the window', async (t) => {
   const fixture = await start();
   t.after(() => fixture.close());
-  const { extension, agent } = await paired(fixture);
+  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.3' });
   let pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'One' });
   const first = await extension.approveNext([page(61)]);
   const one = await pending;
@@ -721,7 +721,7 @@ test('end_session, pairing revocation and forgetting the browser end sessions an
 test('ordinary completion uses acknowledged local consent on new extensions; false explicitly keeps tabs', async (t) => {
   const fixture = await start();
   t.after(() => fixture.close());
-  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.3' });
+  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.4' });
   for (const close_tabs of [undefined, false]) {
     const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Complete this task' });
     const { group } = await extension.approveNext([page(81)]);
@@ -752,7 +752,7 @@ test('ordinary completion uses acknowledged local consent on new extensions; fal
 test('failed completion cleanup leaves the session available instead of claiming success', async (t) => {
   const fixture = await start();
   t.after(() => fixture.close());
-  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.3' });
+  const { extension, agent } = await paired(fixture, { extensionVersion: '0.9.0.4' });
   const pending = agent.call('request_session', { browser_id: extension.browser_id, purpose: 'Completion fails' });
   await extension.approveNext([page(82)]);
   const session = await pending;

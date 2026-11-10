@@ -6,9 +6,10 @@ This document describes how to cut a versioned release of BananaBrowse and what 
 
 The fork publishes tested betas manually: compiled Chrome and Firefox ZIPs, a
 tracked-source service ZIP and `SHA256SUMS`. The service, packages, tags and
-asset filenames use one semver version (now `1.0.0-beta.2`). Browser manifests
-only accept up to four integers, so they carry `version_name` with the same
-semver string and a numeric `version` that sorts below the final release:
+asset filenames use one semver version (now `1.0.0-beta.4`). Browser manifests
+only accept up to four integers, so they carry a numeric `version` that sorts
+below the final release. Chrome also carries the semver in `version_name`;
+Firefox rejects that key and shows the package version in the app window:
 `1.0.0-beta.N` ships as `0.9.0.N`, and `1.0.0` as `1.0.0`. Bump
 `EXTENSION_FEATURES` in `shared/protocol.ts` to the numeric `version` that
 first supports a new extension capability.
@@ -30,6 +31,18 @@ BananaBrowse 1.0.0-beta.2 (extension 0.9.0.2) adds `query_all`, agent guidance
 and session-connection lifecycle fixes. Wire v6 and schema 6 are unchanged;
 existing BananaBrowse registrations, pairings and sessions are retained.
 
+BananaBrowse 1.0.0-beta.3 validates full inventories before publishing updates
+and reports sessions attached only after a successful first sync. This is a
+service fix; beta.2 extensions continue to work. Extension assets are versioned
+0.9.0.3 with no runtime change. Always upgrade the server before extensions;
+there is no newer-extension/older-server compatibility negotiation.
+
+BananaBrowse 1.0.0-beta.4 (extension 0.9.0.4) adds per-session completion
+consent, one-hour idle group collapse, task-owned sessions and OAuth updates.
+It retains beta.3's validation/readiness fixes. Upgrade the service first,
+then the extension and agent tool definitions. Tokenless sessions must be
+replaced with fresh task-owned sessions; browser registrations/pairings remain.
+
 Before tagging, run the unit/MCP tests, build both extensions, run the
 real-browser suite (Chrome and native Firefox) and `npm run check` (formatting, lint,
 typecheck and syntax check), then commit
@@ -44,6 +57,12 @@ The source ZIP contains TypeScript, not runnable JavaScript. To deploy it, run
 
 Manual checksums verify asset integrity, not SLSA provenance. Never force-update
 an existing release tag.
+
+For manual fork releases, include `[skip ci]` in the release commit to avoid the
+inherited auto-release workflow. Create a draft release, upload all tested
+assets and checksums, then publish the draft as a prerelease. Verify downloaded
+assets against `SHA256SUMS`. The inherited workflows below do not implement
+this manual fork process and must not be used to package fork betas.
 
 ---
 

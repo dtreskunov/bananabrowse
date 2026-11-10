@@ -83,7 +83,7 @@ order.
   extension 6.1.3; older extensions (including 6.1.2, which closed without
   asking, shipped in 6.1.0-beta.4) get `CAPABILITY_UNAVAILABLE` with
   `required_extension_version` before anything is sent to the browser.
-- **Completion cleanup (BananaBrowse extension 0.9.0.3+).** New session approval
+- **Completion cleanup (BananaBrowse extension 0.9.0.4+).** New session approval
   includes a checked-by-default choice to close eligible session-created tabs
   when the agent calls `end_session`. Omit `close_tabs` to honor this choice;
   `false` keeps tabs and `true` still requests fresh approval for all tracked
@@ -155,7 +155,8 @@ service and rediscover its MCP tools/instructions.
   URLs/title to recover the same session and token, including after restart or
   while offline. Never reuse an old key for a new task.
 - End only the current task's group with `end_session({session_id, session_token})`.
-  Tabs stay open unless the user approves `close_tabs: true`.
+  Omit `close_tabs` to honor completion consent on extension 0.9.0.4+;
+  `false` keeps tabs and `true` requests fresh approval for all tracked tabs.
 - Existing tokenless sessions remain visible and their tabs are untouched, but
   agents cannot claim or operate on them. The user should close/ungroup those
   groups and approve fresh task-owned sessions. The same applies if a task
@@ -163,3 +164,39 @@ service and rediscover its MCP tools/instructions.
 
 See [task ownership and recovery](../bananabrowse-mcp/README.md#task-owned-sessions)
 for pending/conflicting retries, retention and credential-handling rules.
+
+## BananaBrowse 1.0.0-beta.2 → beta.3
+
+Update and rebuild the service first. Wire v6 and schema 6 are unchanged;
+existing registrations, pairings and sessions are preserved. The extension
+assets carry numeric manifest 0.9.0.3, with no runtime change: beta.2 extensions
+already work with the updated service and do not require replacement for this
+fix. Always upgrade the server before extensions.
+
+- **Inventory validation.** A malformed full inventory is rejected before
+  changing sessions, grants or persisted tab metadata. Validation covers all
+  groups, even unknown/pending/unconfirmed groups, and rejects duplicate group
+  IDs, tab keys and supplied tab IDs.
+- **Readiness reporting.** A session is reported attached only after its first
+  successful inventory sync, so listing and dispatch agree on readiness.
+- **Capabilities.** Unsupported names remain invalid. This release adds no
+  negotiation or newer-extension/older-server compatibility layer.
+
+## BananaBrowse 1.0.0-beta.3 → beta.4
+
+Upgrade/rebuild the service first, then replace the browser extension and
+rediscover the MCP tools/instructions. Service and extension packages are
+1.0.0-beta.4; browser manifests use numeric version 0.9.0.4. Wire v6 and DB
+schema 6 are unchanged, and existing browser registrations/pairings survive.
+
+- New sessions offer checked-by-default completion cleanup. Ordinary
+  `end_session` honors that consent and preserves user-added, pinned,
+  moved-out or unidentifiable restored tabs. Existing sessions without consent
+  keep their tabs; disconnects, expiry and revocation never close tabs.
+- After one hour without meaningful agent activity, otherwise idle sessions
+  are marked Stale and collapse once, respecting active work and user viewing.
+- Task-owned sessions require fresh request keys and private session tokens;
+  see [task ownership](#task-owned-sessions) before upgrading agents.
+- OAuth adds dynamic client registration, local consent and multiple paired
+  browsers per identity. OAuth remains opt-in.
+- Beta.3's full-inventory validation and first-sync readiness fixes are retained.

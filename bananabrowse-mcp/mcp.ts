@@ -156,7 +156,7 @@ export const tools: Tool[] = [
   {
     name: 'end_session',
     description:
-      "End only this task's session when its browsing work finishes, using its session_token, including before delivering your final response. With extension 0.9.0.3+, omitting close_tabs honors the user's completion-cleanup choice at session approval: eligible tabs created for this session close without another prompt; user-added, pinned or moved-out tabs stay open. close_tabs: false preserves all tabs. close_tabs: true instead asks for fresh approval to close all tracked tabs and requires description; ACTION_DECLINED leaves the session open. Older or offline extensions preserve tabs. Never use idle time or a disconnect as proof the task finished.",
+      "End only this task's session when its browsing work finishes, using its session_token, including before delivering your final response. With extension 0.9.0.4+, omitting close_tabs honors the user's completion-cleanup choice at session approval: eligible tabs created for this session close without another prompt; user-added, pinned or moved-out tabs stay open. close_tabs: false preserves all tabs. close_tabs: true instead asks for fresh approval to close all tracked tabs and requires description; ACTION_DECLINED leaves the session open. Older or offline extensions preserve tabs. Never use idle time or a disconnect as proof the task finished.",
     inputSchema: schema(
       {
         ...sessionTarget,

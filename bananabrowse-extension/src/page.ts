@@ -26,6 +26,20 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
   // Ref numbers keep rising across documents in a tab (ref_base), so a ref from an earlier
   // document can never name an element here; first classifies stale refs.
   const state = ((globalThis as any).__bananabrowsePageRefs ||= { entries: new Map(), next: 1, first: null });
+  if (state.first === null && Number.isSafeInteger(args.ref_base) && args.ref_base > state.next)
+    state.next = args.ref_base;
+  if (state.next > 999_000_000) {
+    state.next = 1;
+    state.first = null;
+    state.entries.clear();
+  }
+  const remember = (element: any): string => {
+    for (const [ref, existing] of state.entries) if (existing === element) return ref;
+    state.first ??= state.next;
+    const ref = `e${state.next++}`;
+    state.entries.set(ref, element);
+    return ref;
+  };
   const bindings = ((globalThis as any).__bananabrowseActionBindings ||= new Map());
   if (operation === 'release_action') {
     bindings.delete(args.approval_token);
@@ -81,7 +95,8 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
   const all: any[] = [];
   const needsTree =
     !args.ref &&
-    (args.selector || ['get_page_snapshot', 'get_interactive_elements', 'clear_overlays'].includes(operation));
+    (args.selector ||
+      ['get_page_snapshot', 'find_elements', 'get_interactive_elements', 'clear_overlays'].includes(operation));
   for (let index = 0; needsTree && index < roots.length; index++) {
     const elements = roots[index].querySelectorAll('*');
     if (all.length + elements.length > 20_000 || roots.length > 1000) return { error: 'RESULT_TOO_LARGE' };
@@ -125,17 +140,17 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       ?.split(/\s+/)
       .map((id: string) => element.getRootNode().getElementById(id))
       .filter(Boolean)
-      .map((label: any) => textOf(label))
+      .map((label: any) => textOf(label, 10_000, true))
       .join(' ');
     return (
       labelled ||
       element.getAttribute('aria-label') ||
-      [...(element.labels || [])].map((label) => textOf(label)).join(' ') ||
+      [...(element.labels || [])].map((label) => textOf(label, 10_000, true)).join(' ') ||
       element.getAttribute('alt') ||
       element.getAttribute('title') ||
       (element.matches('input,textarea,select') || element.isContentEditable
         ? element.getAttribute('placeholder')
-        : textOf(element)) ||
+        : textOf(element, 10_000, true)) ||
       ''
     )
       .replace(/\s+/g, ' ')
@@ -156,6 +171,89 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
     in_viewport: rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight,
   });
   const viewport = { width: innerWidth, height: innerHeight };
+  const formState = (element: any) => {
+    if (!element.matches('input,textarea,select') && !element.isContentEditable) return {};
+    return {
+      value_redacted: true,
+      value_present: Boolean(element.isContentEditable ? element.textContent : element.value),
+      ...(element.validity
+        ? {
+            valid: element.validity.valid,
+            validation: Object.fromEntries(
+              [
+                'valueMissing',
+                'typeMismatch',
+                'patternMismatch',
+                'tooLong',
+                'tooShort',
+                'rangeUnderflow',
+                'rangeOverflow',
+                'stepMismatch',
+                'badInput',
+                'customError',
+              ].map((key) => [key, element.validity[key]]),
+            ),
+          }
+        : {}),
+    };
+  };
+  const interactiveRoles = new Set([
+    'link',
+    'button',
+    'textbox',
+    'searchbox',
+    'combobox',
+    'listbox',
+    'option',
+    'checkbox',
+    'radio',
+    'switch',
+    'slider',
+    'spinbutton',
+    'tab',
+    'menuitem',
+    'menuitemcheckbox',
+    'menuitemradio',
+    'treeitem',
+  ]);
+  const actionable = (element: any) =>
+    Boolean(
+      interactiveRoles.has(roleOf(element)) ||
+      (element.matches('label') && element.control?.matches('input[type="checkbox"],input[type="radio"]')) ||
+      element.hasAttribute('onclick') ||
+      typeof element.onclick === 'function' ||
+      element.hasAttribute('tabindex') ||
+      getComputedStyle(element).cursor === 'pointer',
+    );
+  const elementRow = (element: any) => {
+    const rect = element.getBoundingClientRect();
+    const control = element.matches('label') ? element.control : element;
+    const row: Record<string, any> = {
+      ref: remember(element),
+      tag: element.tagName.toLowerCase(),
+      role: roleOf(element),
+      name: nameOf(element),
+      ...elementState(element, rect),
+      ...formState(element),
+    };
+    if (control?.matches('input[type="checkbox"],input[type="radio"]')) row.checked = control.checked;
+    if (element.hasAttribute('aria-checked')) row.checked = element.getAttribute('aria-checked') === 'true';
+    if (row.role === 'link' && typeof element.href === 'string' && /^https?:/i.test(element.href))
+      row.href = element.href.slice(0, 500);
+    return row;
+  };
+  const candidates = (matches: any[]) => ({
+    document: (globalThis as any)[documentKey],
+    matches: matches.length,
+    candidates: matches.slice(0, 5).map((element) => ({
+      ...metadata(element),
+      ref: remember(element),
+      visible: visible(element),
+      disabled: disabled(element),
+    })),
+    candidates_truncated: matches.length > 5,
+    next_ref: state.next,
+  });
   const hidingNode = (element: any) => {
     for (let node = element; node; node = parent(node)) {
       const style = getComputedStyle(node);
@@ -242,12 +340,17 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       tag: element.tagName.toLowerCase(),
       role: roleOf(element),
       name: nameOf(element),
+      ref: remember(element),
       ...flags,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       viewport,
       value_redacted: element.matches('input,textarea,select') || element.isContentEditable,
+      ...formState(element),
       ...hiddenDetails,
-      ...(activation.label ? { activation: { ...metadata(activation.label), kind: 'associated_label' } } : {}),
+      ...(activation.label
+        ? { activation: { ...metadata(activation.label), ref: remember(activation.label), kind: 'associated_label' } }
+        : {}),
+      next_ref: state.next,
     };
   };
   const snapshot = () => {
@@ -270,19 +373,6 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       for (let node = element; node; node = parent(node)) if (node === scope) return true;
       return false;
     };
-    if (
-      state.first === null &&
-      Number.isSafeInteger(args.ref_base) &&
-      args.ref_base > state.next &&
-      args.ref_base < 900_000_000
-    )
-      state.next = args.ref_base;
-    // Recycle numbers before they outgrow the ref pattern (e + at most nine digits).
-    if (state.next > 999_000_000) {
-      state.next = 1;
-      state.first = null;
-    }
-    state.first ??= state.next;
     state.entries.clear();
     const decorative = (element: any) => {
       const role = roleOf(element);
@@ -294,55 +384,22 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       }
       return false;
     };
-    const interactiveRoles = new Set([
-      'link',
-      'button',
-      'textbox',
-      'searchbox',
-      'combobox',
-      'listbox',
-      'option',
-      'checkbox',
-      'radio',
-      'switch',
-      'slider',
-      'spinbutton',
-      'tab',
-      'menuitem',
-      'menuitemcheckbox',
-      'menuitemradio',
-      'treeitem',
-    ]);
     const candidates = all.filter(
-      (element) => inScope(element) && roleOf(element) && !decorative(element) && visible(element),
+      (element) =>
+        inScope(element) &&
+        (element === scope || roleOf(element) || actionable(element)) &&
+        !decorative(element) &&
+        visible(element),
     );
     const limit = args.max_elements ?? 50;
     let chosen = candidates;
     if (candidates.length > limit) {
       const order = new Map(candidates.map((element, index) => [element, index]));
-      const interactive = candidates.filter((element) => interactiveRoles.has(roleOf(element)));
-      const rest = candidates.filter((element) => !interactiveRoles.has(roleOf(element)));
+      const interactive = candidates.filter(actionable);
+      const rest = candidates.filter((element) => !interactive.includes(element));
       chosen = [...interactive, ...rest].slice(0, limit).sort((a, b) => order.get(a)! - order.get(b)!);
     }
-    const elements = chosen.map((element) => {
-      const ref = `e${state.next++}`;
-      state.entries.set(ref, element);
-      const rect = element.getBoundingClientRect();
-      const row: Record<string, any> = {
-        ref,
-        tag: element.tagName.toLowerCase(),
-        role: roleOf(element),
-        name: nameOf(element),
-        ...elementState(element, rect),
-      };
-      if (element.matches('input[type="checkbox"],input[type="radio"]')) row.checked = element.checked;
-      if (element.hasAttribute('aria-checked')) row.checked = element.getAttribute('aria-checked') === 'true';
-      if (element.matches('input,textarea,select') || element.isContentEditable) row.value_redacted = true;
-      if (row.role === 'link' && typeof element.href === 'string' && /^https?:/i.test(element.href)) {
-        row.href = element.href.slice(0, 500);
-      }
-      return row;
-    });
+    const elements = chosen.map(elementRow);
     const text = textData(scope, true);
     const elementsTruncated = candidates.length > elements.length;
     return {
@@ -357,6 +414,49 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       scope: 'top-level-and-open-shadow-roots',
       input_mode: 'dom',
       viewport,
+    };
+  };
+  const findElements = () => {
+    let matches = all;
+    if (args.selector) {
+      try {
+        matches = roots.flatMap((root) => [...root.querySelectorAll(args.selector)]);
+      } catch (error: any) {
+        if (error.name === 'SyntaxError') return { error: 'INVALID_SELECTOR' };
+        throw error;
+      }
+    }
+    matches = matches.filter(
+      (element) =>
+        !ignored(element) &&
+        (args.include_hidden || visible(element)) &&
+        (!args.role || roleOf(element) === args.role) &&
+        (!args.label ||
+          ((element.matches('input,textarea,select') || element.isContentEditable) &&
+            nameOf(element) === args.label)) &&
+        (!args.text ||
+          nameOf(element) === args.text ||
+          textOf(element, 10_000, true).replace(/\s+/g, ' ').trim() === args.text) &&
+        (args.selector || args.role || args.label || args.text || actionable(element)),
+    );
+    if (args.text) {
+      const controls = matches.filter(actionable);
+      if (controls.length) matches = controls;
+      matches = matches.filter((element) => !matches.some((other) => other !== element && element.contains(other)));
+    }
+    const elements = matches.slice(0, args.max_elements ?? 50).map((element) => ({
+      ...elementRow(element),
+      visible: visible(element),
+      id: element.id?.slice(0, 80) || null,
+    }));
+    return {
+      document: (globalThis as any)[documentKey],
+      elements,
+      matched_count: matches.length,
+      returned_count: elements.length,
+      elements_truncated: matches.length > elements.length,
+      truncated: matches.length > elements.length,
+      next_ref: state.next,
     };
   };
   const interactiveElements = () => {
@@ -441,8 +541,8 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
         if (!target) {
           issue('missing');
         } else if (
-          target.matches('input,textarea,select') ||
-          ('isContentEditable' in target && target.isContentEditable)
+          !field.attribute &&
+          (target.matches('input,textarea,select') || ('isContentEditable' in target && target.isContentEditable))
         ) {
           issue('redacted');
         } else if (field.attribute) {
@@ -530,8 +630,8 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       }
       if (matches.length > 1) {
         if (operation === 'inspect_element')
-          return { matches: matches.length, state: 'ambiguous', reason: 'ELEMENT_AMBIGUOUS', viewport };
-        return { error: 'ELEMENT_AMBIGUOUS' };
+          return { ...candidates(matches), state: 'ambiguous', reason: 'ELEMENT_AMBIGUOUS', viewport };
+        return { error: 'ELEMENT_AMBIGUOUS', ...candidates(matches) };
       }
       element = matches[0];
     } else element = operation === 'scroll' ? document.scrollingElement : document.body;
@@ -544,6 +644,16 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
     return { found: true, element, activator };
   };
   const readText = (element: any) => {
+    if (element.matches('input,textarea,select') || element.isContentEditable)
+      return {
+        text: '',
+        truncated: false,
+        text_truncated: false,
+        rendered: visible(element),
+        text_source: 'rendered',
+        empty_reason: 'VALUE_REDACTED',
+        ...formState(element),
+      };
     if (element.tagName === 'TITLE' && element.parentElement?.tagName === 'HEAD') {
       const limit = args.max_text_chars ?? 4000;
       const value = document.title;
@@ -684,6 +794,8 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       return { key: args.key, events_dispatched: true, native_input: false, default_action_performed: false };
     },
     type_text: async (element: any) => {
+      const valueOf = () => (element.isContentEditable ? element.textContent : element.value);
+      const previous = valueOf();
       element.focus();
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
       let inputMode = 'dom';
@@ -722,13 +834,26 @@ export async function pageHelper(operation: string, args: Wire = {}): Promise<an
       }
       await new Promise((resolve) => setTimeout(resolve, 150));
       if (!element.isConnected) return { error: 'ELEMENT_STALE' };
-      if ((element.isContentEditable ? element.textContent : element.value) !== args.text) {
-        return { error: 'INPUT_NOT_APPLIED' };
-      }
-      return { typed: true, input_mode: inputMode, verification: 'dom_after_reconciliation' };
+      const input_state = {
+        value_present: Boolean(valueOf()),
+        value_matches: valueOf() === (args.expected_value ?? args.text),
+        value_changed: valueOf() !== previous,
+        ...(element.validity ? { valid: element.validity.valid } : {}),
+      };
+      if (!input_state.value_matches) return { error: 'INPUT_NOT_APPLIED', input_state };
+      return {
+        typed: true,
+        input_mode: inputMode,
+        verification:
+          args.expected_value !== undefined && args.expected_value !== args.text
+            ? 'expected_formatted_value'
+            : 'dom_after_reconciliation',
+        input_state,
+      };
     },
   };
   if (operation === 'get_page_snapshot') return snapshot();
+  if (operation === 'find_elements') return findElements();
   if (operation === 'get_interactive_elements') return interactiveElements();
   if (operation === 'query_all') return queryAll();
   if (operation === 'clear_overlays') {

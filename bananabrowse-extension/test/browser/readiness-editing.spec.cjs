@@ -73,13 +73,16 @@ for (const [name, engine] of [
           selector,
           text,
         });
-      expect(await run('#editor', 'Updated rich text')).toEqual({
+      expect(await run('#editor', 'Updated rich text')).toMatchObject({
         typed: true,
         input_mode: 'dom_editing',
         verification: 'dom_after_reconciliation',
       });
       expect(await page.evaluate(() => editorState)).toBe('Updated rich text');
-      expect(await run('#rollback', 'Must not claim success')).toEqual({ error: 'INPUT_NOT_APPLIED' });
+      expect(await run('#rollback', 'Must not claim success')).toMatchObject({
+        error: 'INPUT_NOT_APPLIED',
+        input_state: { value_present: true, value_matches: false, value_changed: false },
+      });
       expect(await run('#cancel', 'Must not overwrite')).toEqual({ error: 'INPUT_REJECTED' });
       await expect(page.locator('#cancel')).toHaveValue('Original');
     } finally {

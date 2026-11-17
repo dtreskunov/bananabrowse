@@ -1,6 +1,6 @@
 # BananaBrowse architecture
 
-Status: implemented in BananaBrowse 1.0.0-beta.4 (wire v6, DB schema 6),
+Status: implemented in BananaBrowse 1.0.0-beta.5 (wire v6, DB schema 6),
 2026-11-10; the design dates from DomAgent 6.0, 2026-10-14. Clean break from v5: no DB migration, browsers
 re-register and agents re-pair.
 
@@ -246,7 +246,15 @@ notifications have no buttons, so all decisions happen in the window.
 | `request_handoff({tab_id, session_token, instructions, timeout_seconds?})` | Notification + flashing group + Done/Cancel; blocks only that tab |
 | `list_artifacts()` | Caller's unexpired artifacts (metadata only) |
 | `read_artifact({artifact_id, offset?, max_bytes?})` | Byte range (default 16 KiB, max 48 KiB); UTF-8 text never split mid-character, binary as base64; `next_offset`/`eof` |
-| 16 page operations | `tab_id`, `session_token` and a 40–500 character `description` shown in the feed; existing operations plus read-only `query_all` |
+| Page operations | `tab_id`, `session_token` and a brief nonblank `description` (up to 500 characters) shown in the feed; includes read-only `query_all` and `find_elements` |
+| `fill_form({tab_id, session_token, fields, observe?, description})` | Service composition of up to 20 sequential authorized `type_text` calls and an optional final snapshot; validates all fields first, stops on error, never retries/rolls back/submits |
+
+Discovery returns document-bound refs for legacy controls as well as native
+ones. Inspection and ambiguous actions expose up to five explicit candidates;
+only snapshots replace existing refs. Input state and verification are
+value-free; known formatting uses an explicit expected value rather than a
+normalization guess. New capabilities require numeric extension 0.9.0.5. See
+[the form-tool contract](../bananabrowse-mcp/README.md#discovery-and-form-tools).
 
 `query_all` is a capability-advertised structured read, not script evaluation.
 It selects rendered rows and single-valued text/allowlisted-attribute fields,

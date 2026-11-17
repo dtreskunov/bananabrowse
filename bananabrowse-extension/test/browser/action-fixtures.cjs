@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 
 const actionHtml = `
 <label for="edit">Account nickname</label><input id="edit">
+<div id="legacy-confirm" onclick="this.dataset.clicked='yes'">Legacy Confirm</div>
 <input id="private" type="password" value="fixture-password-secret">
 <textarea id="private-text">fixture-textarea-secret</textarea>
 <div contenteditable="true">fixture-editable-secret</div>
@@ -158,6 +159,27 @@ async function exerciseActions(call) {
   assert.equal(geometry.elements.find((element) => element.id === 'offscreen').in_viewport, false);
   assert.equal(geometry.elements.find((element) => element.id === 'disabled').disabled, true);
   const target = { ref: edit.ref, document: snapshot.document };
+  const second = await result('find_elements', { selector: '.duplicate', text: 'Second', role: 'button' });
+  assert.equal(second.matched_count, 1);
+  assert.equal(second.elements[0].name, 'Second');
+  const legacy = await result('find_elements', { text: 'Legacy Confirm' });
+  assert.equal(legacy.matched_count, 1);
+  await result('click', { ref: legacy.elements[0].ref, document: legacy.document });
+  assert.equal(
+    (await result('evaluate_script', { script: 'document.querySelector("#legacy-confirm").dataset.clicked' })).value,
+    'yes',
+  );
+  const filled = await result('fill_form', {
+    fields: [
+      { ...target, text: 'Batch nickname' },
+      { selector: '#keyboard', text: 'Batch keyboard' },
+    ],
+    observe: false,
+  });
+  assert.equal(filled.completed_count, 2);
+  const fieldState = await result('get_text', { selector: '#edit' });
+  assert.equal(fieldState.empty_reason, 'VALUE_REDACTED');
+  assert.equal(fieldState.value_present, true);
   await result('type_text', { ...target, text: 'Updated nickname' });
   assert.equal(
     (await result('evaluate_script', { script: 'document.querySelector("#edit").value' })).value,

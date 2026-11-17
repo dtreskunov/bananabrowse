@@ -49,9 +49,11 @@ export interface Tool {
 
 const NOTES: Record<string, string> = {
   get_page_snapshot:
-    'Preferred first read. Compact DOM summary: 4000 text characters, 50 elements (interactive first; links include href) and 16 KiB by default. Narrow with selector; check explicit truncation. Field values are redacted. Refs are valid only for the latest snapshot of the returned document: after navigation or a new snapshot, use the new refs.',
+    'Preferred first read. Compact DOM summary, including inferred clickable divs and associated labels: 4000 text characters, 50 elements and 16 KiB by default. Narrow with selector; check truncation. Field values are redacted, with presence/validation state. Refs last until a new snapshot or document; find_elements and inspect_element add refs without invalidating existing ones.',
+  find_elements:
+    'Find actionable targets by exact visible text, accessible form label, role or standard CSS. Works for nonsemantic divs too. Returns document-bound refs, names, visibility and safe form state; never values. Hidden matches require include_hidden:true. No focus, scrolling or mutation. Use this instead of guessing selectors; if still blocked, discover evaluate_script for focused read-only DOM inspection.',
   get_text:
-    'Read a focused selector/ref, not repeated body dumps. Default 4000 characters/16 KiB. timeout_ms:0 is an immediate probe; bounded positive waits return WAIT_TIMEOUT with last_error.',
+    'Read a focused selector/ref. Inputs return empty_reason:VALUE_REDACTED and safe presence/validation state, not their value. Default 4000 characters/16 KiB. timeout_ms:0 is immediate; positive waits return WAIT_TIMEOUT with last_error.',
   get_interactive_elements:
     'Prefer snapshots for actionable refs. Geometry is viewport-relative. Hidden inputs are excluded. Explicit truncation.',
   query_all:
@@ -59,10 +61,11 @@ const NOTES: Record<string, string> = {
   click:
     'Exactly one selector match or a snapshot ref/document. DOM input, not native mouse events. clicked:true confirms dispatch, not the intended application outcome: inspect the resulting page. Take a new snapshot before the next ref-based action. For links, navigating to the snapshot href is often more reliable.',
   inspect_element:
-    'Immediate read-only selector/readiness probe; no timeout_ms. Returns matches:0/state:missing, matches:1 with readiness details, or matches>1/state:ambiguous. Does not focus, scroll or mutate. Readiness is not proof an action will achieve its intended outcome. Hard output cap 4 KiB.',
+    'Immediate read-only selector/ref probe. Returns readiness, an actionable ref and safe form state; ambiguous selectors return up to five candidates with refs, including hidden matches. Hidden radios/checkboxes report an associated activation label ref. No focus, scrolling or mutation. Hard cap 4 KiB. Use find_elements for exact text/label lookup rather than repeated guesses.',
   get_screenshot:
     "Check this tab's capabilities from list_tabs first. Available on Chrome; Firefox requires tabs.captureTab, which some environments lack. CAPABILITY_UNAVAILABLE has no automatic screenshot fallback; use a DOM snapshot instead.",
-  type_text: 'Replace an editable value; dispatch DOM input/change, not native keystrokes.',
+  type_text:
+    'Replace an editable value; dispatch DOM input/change, not native keystrokes. Verifies exact equality after reconciliation and reports value_present/value_matches/value_changed/valid without values. For known site formatting supply expected_value explicitly. A mismatch remains uncertain: inspect, never blindly retry. Use fill_form to fill multiple fields sequentially without submitting.',
   set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
   navigate:
@@ -74,10 +77,9 @@ const NOTES: Record<string, string> = {
 };
 const description = {
   type: 'string',
-  minLength: 40,
+  minLength: 1,
   maxLength: 500,
-  description:
-    'What this action does and why, shown to the user in the BananaBrowse activity feed. 40–500 Unicode code points.',
+  description: 'Brief meaningful action description shown in the activity feed. 1–500 Unicode code points; no secrets.',
 };
 const humanWait = { type: 'integer', minimum: 1, maximum: HUMAN_WAIT_MS / 1000, default: 300 };
 const schema = (properties: Wire, required: string[] = Object.keys(properties)) => ({
@@ -205,6 +207,31 @@ export const tools: Tool[] = [
     ]),
   },
   {
+    name: 'fill_form',
+    description:
+      'Fill up to 20 text fields sequentially using current refs/documents or exact CSS selectors. Validates all arguments before starting; stops on the first failure without rollback or retry. Returns per-field value-free receipts and an optional final snapshot. Never clicks, presses keys, submits or confirms payments. On error inspect fill_progress; completed edits remain applied. Needs extension 0.9.0.5.',
+    inputSchema: schema(
+      {
+        ...tabTarget,
+        fields: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            properties: OPERATION_SCHEMAS.type_text.properties,
+            required: OPERATION_SCHEMAS.type_text.required,
+            anyOf: OPERATION_SCHEMAS.type_text.anyOf,
+            additionalProperties: false,
+          },
+        },
+        observe: { type: 'boolean', default: true, description: 'Return a fresh snapshot after all fields succeed.' },
+        description,
+      },
+      [...Object.keys(tabTarget), 'fields', 'description'],
+    ),
+  },
+  {
     name: 'list_artifacts',
     description:
       'Artifacts you created with evaluate_script or query_all return_as:"artifact" that have not expired (24 hours) or been evicted (quota 64 MiB / 100 per agent, oldest first).',
@@ -250,10 +277,12 @@ export const INSTRUCTIONS =
   'Sessions reattach automatically when the window reopens. A session ends when the user closes or ungroups its tab group. ' +
   "When finished, call end_session with only this task's session_id and session_token before your final response, including when abandoning a task after an error if the session is still available. Omit close_tabs to honor the user's session cleanup choice; do not assume completion closes every tab. Keep the session credentials across compaction until cleanup succeeds, and never retry an uncertain tab-closing outcome blindly. Never use unpair_browser for task cleanup: it revokes all this agent's sessions on that browser. " +
   'Use report_progress for status, request_handoff for logins/CAPTCHAs/human review; never ask for passwords. ' +
-  'Start with get_page_snapshot; inspect_element is a read-only selector/readiness probe without focus or scrolling. Action receipts confirm dispatch, not application success: verify the resulting page. ' +
+  'Start with get_page_snapshot; use find_elements for exact text/label/role lookup, including custom div controls. inspect_element returns refs and readiness without focus or scrolling. Hidden radios/checkboxes can be set_checked through their bound label. ' +
+  'If a snapshot shows text but no useful ref, or two selector probes do not resolve a target, stop guessing: use find_elements, then discover evaluate_script for focused read-only DOM inspection. Only use standard CSS, not Playwright text selectors. ' +
+  'Use fill_form for sequential field edits and a fresh snapshot. Field presence/validity is not proof of application acceptance. Action receipts confirm dispatch, not application success: verify the resulting page. Never batch submission or automatically retry an uncertain payment. ' +
   'For structured DOM data with known selectors, use query_all; use evaluate_script for data not available through DOM extraction. ' +
   'Check list_tabs capabilities before optional operations such as get_screenshot. max_output_bytes bounds serialized output; max_text_chars is only for text-extraction tools, not evaluate_script. ' +
-  'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a 40–500 character description shown to the user. ' +
+  'OUTCOME_UNKNOWN means a mutation may have happened: inspect before retrying. Page tools require a brief nonblank description (up to 500 characters), not prose padding. ' +
   'For bulk data use query_all or evaluate_script with return_as:"artifact" and download the artifact; never copy large results through the conversation.';
 
 const HINTS: Record<string, string> = {
@@ -270,14 +299,15 @@ const HINTS: Record<string, string> = {
   CAPABILITY_UNAVAILABLE:
     'Check the tab capabilities from list_tabs. Screenshots require Chrome or Firefox tabs.captureTab; use get_page_snapshot when screenshots are unavailable.',
   ELEMENT_NOT_FOUND:
-    'Check the selector with inspect_element or take a focused snapshot. If content is still loading, use a bounded readiness wait.',
+    'Use find_elements with exact text or label instead of guessing CSS. If content is still loading, use a bounded readiness wait. After two failed probes, discover evaluate_script for focused read-only DOM inspection.',
   ELEMENT_AMBIGUOUS:
-    'The selector matched multiple elements. Narrow it or use a current snapshot ref/document; do not guess which control to activate.',
+    'Inspect the returned candidates and visibility, then use an explicit ref/document; never select an arbitrary match. Use find_elements for exact text/label lookup or discover evaluate_script for focused read-only inspection.',
   ELEMENT_NOT_VISIBLE:
     'Use inspect_element to diagnose hidden content; reveal it through an appropriate visible control.',
   ELEMENT_OBSCURED: 'Use inspect_element to identify an obstruction before taking another action.',
   ELEMENT_DISABLED: 'Inspect the control and its prerequisites; do not repeatedly click a disabled element.',
-  INVALID_SELECTOR: 'Correct the CSS selector syntax; inspect_element can probe it without mutating the page.',
+  INVALID_SELECTOR:
+    'Only standard CSS is accepted, not Playwright :has-text/:text-is/text= selectors. Use find_elements with exact text or label.',
   WAIT_TIMEOUT:
     'Read last_error and readiness details. Inspect the current page before adjusting the selector or wait; do not blindly repeat a mutation.',
   RESULT_TOO_LARGE:
@@ -431,6 +461,7 @@ function validateUrls(args: Wire): ArgumentError[] {
 }
 
 export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub, signal?: AbortSignal): Promise<Wire> {
+  let fillProgress: Wire | undefined;
   try {
     requireValue(hub.agents.get(agent.id) === agent, 'NOT_AUTHORIZED', 401);
     const tool = tools.find((t) => t.name === name);
@@ -489,7 +520,38 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
     } else if (name === 'report_progress') result = hub.reportProgress(credentials, args.session_id, args.message);
     else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map((meta) => publicArtifact(hub, meta));
     else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
-    else if (name === 'request_handoff') {
+    else if (name === 'fill_form') {
+      const receipts: Wire[] = [];
+      fillProgress = { completed_count: 0, field_index: 0, phase: 'fill' };
+      for (const [index, field] of args.fields.entries()) {
+        fillProgress.field_index = index;
+        const receipt = await hub.operate(
+          credentials,
+          args.tab_id,
+          'type_text',
+          { ...field, expected_value: field.expected_value ?? field.text },
+          args.description,
+          0,
+          signal,
+        );
+        receipts.push(receipt as Wire);
+        fillProgress.completed_count = receipts.length;
+      }
+      result = { completed_count: receipts.length, fields: receipts };
+      if (args.observe !== false) {
+        fillProgress.phase = 'observe';
+        delete fillProgress.field_index;
+        result.snapshot = await hub.operate(
+          credentials,
+          args.tab_id,
+          'get_page_snapshot',
+          { max_output_bytes: 8192 },
+          args.description,
+          0,
+          signal,
+        );
+      }
+    } else if (name === 'request_handoff') {
       const { tab_id, session_token, timeout_seconds, ...handoff } = args;
       result = (await hub.operate(
         credentials,
@@ -549,6 +611,7 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
             ...dispatchDetails(error),
             ...details,
             ...(diagnostics ? { diagnostics } : {}),
+            ...(fillProgress ? { fill_progress: fillProgress } : {}),
             ...(advice ? { hint: advice } : {}),
           }),
         },

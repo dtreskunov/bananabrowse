@@ -28,6 +28,10 @@ export interface FieldSchema {
   minProperties?: number;
   maxProperties?: number;
   propertyNames?: { pattern: string };
+  items?: FieldSchema;
+  minItems?: number;
+  maxItems?: number;
+  anyOf?: readonly { required: readonly string[] }[];
 }
 export interface OperationSpec {
   properties: Record<string, FieldSchema>;
@@ -106,6 +110,7 @@ export const EXTENSION_FEATURES = Object.freeze({
   close_tabs: '0.9.0.1',
   query_all: '0.9.0.2',
   session_cleanup: '0.9.0.4',
+  form_tools: '0.9.0.5',
 });
 export function versionAtLeast(version: unknown, minimum: string): boolean {
   const parts = (value: unknown) =>
@@ -159,7 +164,7 @@ export const READINESS_ERRORS: readonly string[] = Object.freeze([
   'ELEMENT_OBSCURED',
   'OPTION_NOT_FOUND',
 ]);
-export const MIN_DESCRIPTION_LENGTH = 40;
+export const MIN_DESCRIPTION_LENGTH = 1;
 export function validDescription(value: unknown): value is string {
   return typeof value === 'string' && [...value].length <= 500 && [...value.trim()].length >= MIN_DESCRIPTION_LENGTH;
 }
@@ -222,6 +227,30 @@ export function errorDetails(error: unknown): Wire {
   if (!error || typeof error !== 'object') return {};
   const e = error as Wire,
     result: Wire = {};
+  if (['ELEMENT_AMBIGUOUS', 'INPUT_NOT_APPLIED', 'OUTCOME_UNKNOWN'].includes(e.code)) {
+    if (e.input_state && typeof e.input_state === 'object') {
+      result.input_state = Object.fromEntries(
+        ['value_present', 'value_matches', 'value_changed', 'valid'].flatMap((key) =>
+          typeof e.input_state[key] === 'boolean' ? [[key, e.input_state[key]]] : [],
+        ),
+      );
+    }
+    if (Array.isArray(e.candidates)) {
+      result.candidates = e.candidates.slice(0, 5).map((candidate: Wire) =>
+        Object.fromEntries(
+          ['ref', 'tag', 'id', 'role', 'name', 'visible', 'disabled'].flatMap((key) => {
+            const value = candidate?.[key];
+            if (typeof value === 'string') return [[key, value.slice(0, 80)]];
+            if (typeof value === 'boolean' || value === null) return [[key, value]];
+            return [];
+          }),
+        ),
+      );
+      if (typeof e.document === 'string' && DOCUMENT_NONCE.test(e.document)) result.document = e.document;
+      if (boundedInteger(e.matches, 20_000)) result.matches = e.matches;
+      result.candidates_truncated = e.candidates_truncated === true;
+    }
+  }
   if (
     e.code === 'BROWSER_OFFLINE' &&
     [
@@ -380,7 +409,19 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
     [],
     true,
   ),
-  type_text: operation({ ...targeted, text }, ['text'], true),
+  type_text: operation(
+    {
+      ...targeted,
+      text,
+      expected_value: {
+        ...text,
+        description:
+          'Optional exact value expected after known site formatting. Defaults to text. Never guesses normalization or returns the value.',
+      },
+    },
+    ['text'],
+    true,
+  ),
   get_text: operation({ ...targeted, ...readText, ...output }),
   evaluate_script: operation(
     {
@@ -418,6 +459,15 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
   get_screenshot: operation({}),
   get_interactive_elements: operation({ ...readElements, ...output }),
   get_page_snapshot: operation({ selector: target.selector, ...readText, ...readElements, ...output }),
+  find_elements: operation({
+    selector: target.selector,
+    text: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact rendered text or accessible name.' },
+    label: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact accessible name of a form control.' },
+    role: { type: 'string', minLength: 1, maxLength: 80 },
+    include_hidden: { type: 'boolean', default: false },
+    ...readElements,
+    ...output,
+  }),
   query_all: operation(
     {
       selector: { ...target.selector, description: 'CSS selector for rendered rows in the current document.' },
@@ -435,7 +485,7 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
             },
             attribute: {
               type: 'string',
-              enum: ['href', 'src', 'title', 'alt', 'datetime', 'aria-label'],
+              enum: ['href', 'src', 'title', 'alt', 'datetime', 'aria-label', 'id', 'class', 'type', 'name', 'role'],
               description:
                 'Omit for rendered text. href/src are resolved HTTP(S) URLs; form values and HTML are not exposed.',
             },
@@ -568,6 +618,24 @@ export function schemaArgumentErrors(spec: OperationSpec | undefined, args: unkn
   for (const [key, field] of Object.entries(spec.properties)) {
     if (!Object.hasOwn(args, key)) continue;
     const value = input[key];
+    if (field.type === 'array') {
+      if (!Array.isArray(value)) errors.push({ field: key, reason: 'expected_array' });
+      else if (value.length < (field.minItems ?? 0) || value.length > (field.maxItems ?? Infinity))
+        errors.push({
+          field: key,
+          reason: 'out_of_range',
+          limits: { minimum: field.minItems, maximum: field.maxItems },
+        });
+      else if (field.items)
+        value.forEach((item, index) => {
+          errors.push(
+            ...schemaArgumentErrors({ properties: { item: field.items! }, required: ['item'] }, { item }).map(
+              (error) => ({ ...error, field: `${key}[${index}]${error.field.slice(4)}` }),
+            ),
+          );
+        });
+      continue;
+    }
     if (field.type === 'integer') {
       if (!Number.isSafeInteger(value)) errors.push({ field: key, reason: 'expected_integer' });
       else if (value < field.minimum! || value > field.maximum!)
@@ -604,6 +672,7 @@ export function schemaArgumentErrors(spec: OperationSpec | undefined, args: unkn
           {
             properties: field.properties ?? (nested ? Object.fromEntries(keys.map((name) => [name, nested])) : {}),
             required: field.required ?? [],
+            anyOf: field.anyOf,
           },
           value,
         ).map((error) => ({ ...error, field: `${key}.${error.field}` })),

@@ -128,14 +128,14 @@ test('beta7 field errors distinguish type, required, bounds and target conflicts
 test('beta7 descriptions count Unicode points after trimming minimum and raw maximum', () => {
   const spec = { properties: { description: DESCRIPTION_SCHEMA }, required: ['description'] };
   for (const char of ['a', '界', '😀']) {
-    assert.deepEqual(schemaArgumentErrors(spec, { description: char.repeat(40) }), []);
+    assert.deepEqual(schemaArgumentErrors(spec, { description: char }), []);
     assert.deepEqual(schemaArgumentErrors(spec, { description: char.repeat(500) }), []);
-    assert.deepEqual(schemaArgumentErrors(spec, { description: ` ${char.repeat(39)} ` }), [
+    assert.deepEqual(schemaArgumentErrors(spec, { description: ' ' }), [
       {
         field: 'description',
         reason: 'too_short',
-        limits: { minimum: 40 },
-        actual_length: 39,
+        limits: { minimum: 1 },
+        actual_length: 0,
         unit: 'unicode_code_points',
         measured_after_trim: true,
       },

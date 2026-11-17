@@ -6,7 +6,7 @@ This document describes how to cut a versioned release of BananaBrowse and what 
 
 The fork publishes tested betas manually: compiled Chrome and Firefox ZIPs, a
 tracked-source service ZIP and `SHA256SUMS`. The service, packages, tags and
-asset filenames use one semver version (now `1.0.0-beta.4`). Browser manifests
+asset filenames use one semver version (now `1.0.0-beta.5`). Browser manifests
 only accept up to four integers, so they carry a numeric `version` that sorts
 below the final release. Chrome also carries the semver in `version_name`;
 Firefox rejects that key and shows the package version in the app window:
@@ -42,6 +42,12 @@ consent, one-hour idle group collapse, task-owned sessions and OAuth updates.
 It retains beta.3's validation/readiness fixes. Upgrade the service first,
 then the extension and agent tool definitions. Tokenless sessions must be
 replaced with fresh task-owned sessions; browser registrations/pairings remain.
+
+BananaBrowse 1.0.0-beta.5 (extension 0.9.0.5) adds actionable discovery and
+ambiguity candidates, value-free form verification, concise descriptions,
+sequential fill-and-observe and recovery guidance. Wire/schema stay at 6.
+Upgrade the service first, then extensions and agent tool definitions. Existing
+task-owned sessions survive; new form tools require the updated extension.
 
 Before tagging, run the unit/MCP tests, build both extensions, run the
 real-browser suite (Chrome and native Firefox) and `npm run check` (formatting, lint,

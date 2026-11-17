@@ -106,7 +106,7 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
   }
   let result: unknown = value;
   const hasText = ['get_text', 'get_page_snapshot'].includes(operation);
-  const hasElements = ['get_interactive_elements', 'get_page_snapshot'].includes(operation);
+  const hasElements = ['get_interactive_elements', 'get_page_snapshot', 'find_elements'].includes(operation);
   const textLimit = args.max_text_chars ?? DEFAULT_TEXT_CHARS;
   const elementLimit = args.max_elements ?? DEFAULT_ELEMENTS;
   if (
@@ -136,11 +136,13 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
       out.elements = input.elements.slice(0, elementLimit);
       out.truncated ||= out.elements.length < input.elements.length;
       out.elements_truncated = input.elements_truncated === true || out.elements.length < input.elements.length;
+      if (operation === 'find_elements') out.returned_count = out.elements.length;
     }
     // Trim only complete rows/text, never arbitrary JSON or mutation receipts.
     while (resultBytes(out) > limit && hasElements && out.elements.length) {
       out.elements.pop();
       out.elements_truncated = out.truncated = true;
+      if (operation === 'find_elements') out.returned_count = out.elements.length;
     }
     if (resultBytes(out) > limit && hasText && out.text.length) {
       const original = out.text;

@@ -1,6 +1,6 @@
 # BananaBrowse service (v6)
 
-Self-hosted MCP server and browser hub. Service **1.0.0-beta.4**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **1.0.0-beta.5**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -226,6 +226,73 @@ and multiple matches are ambiguous. It does not focus or scroll. A successful
 DOM action receipt is not proof of the application's intended outcome; inspect
 the resulting page. After `OUTCOME_UNKNOWN`, never blindly replay the mutation.
 
+## Discovery and form tools
+
+Beta.5 (numeric extension version 0.9.0.5) adds `find_elements` and `fill_form`.
+Upgrade the service first, then the extension and rediscover MCP definitions.
+New operations, explicit formatted-value verification and short page descriptions
+fail before dispatch on older extensions with `required_extension_version`.
+Descriptions remain required, but accept brief nonblank text (1–500 Unicode
+code points), such as "Find Confirm".
+
+Snapshots include associated labels and inferred clickable elements (onclick,
+tabindex or pointer cursor), not only semantic buttons. A focused snapshot
+includes its visible scope even if that element has no role.
+`find_elements` accepts standard CSS `selector`, exact rendered `text` or
+accessible name, exact form `label`, and/or `role`. Filters combine; hidden
+elements are excluded unless `include_hidden:true`. It returns `document`,
+`elements` with refs and safe state, `matched_count`, `returned_count` and
+explicit truncation. Defaults are 50 elements and 16 KiB, capped at 100 and
+64 KiB. Zero matches is an explicit empty list. No focus or scrolling occurs.
+
+`inspect_element` returns a ref for any unique element, and associated label
+activation refs for styled hidden radios/checkboxes. Ambiguity from inspection
+or actions returns up to five candidates with refs, names and visibility;
+hidden matches are not silently discarded or automatically chosen. Use
+`set_checked` for native radio/checkbox state, or an explicit visible label ref.
+Refs are bound to their actual elements and document, not reusable selectors.
+A new snapshot replaces refs; discovery and inspection add refs without
+invalidating existing ones.
+
+If two selector probes do not resolve a target, stop guessing. Try exact
+`find_elements` lookup, then discover `evaluate_script` for focused read-only
+inspection when necessary. Playwright `:has-text`, `:text-is`, and `text=`
+selectors are not CSS and are not accepted.
+
+Form reads expose `value_present`, HTML `valid`/validation flags and
+`value_redacted`, never values or validation messages. `get_text` on an input
+explicitly returns `empty_reason:"VALUE_REDACTED"`. `type_text` returns an
+`input_state` receipt with presence, exact match, changed state and validity.
+For known site formatting supply `expected_value` explicitly; BananaBrowse
+does not guess that an arbitrary changed value was accepted. A mismatch remains
+an uncertain mutation with safe state, not a success or an automatic retry.
+HTML validity and DOM equality do not prove application-level acceptance.
+
+`fill_form` takes 1–20 ordered `fields`, each using the `type_text` arguments,
+and optional `observe` (default true):
+
+```json
+{
+  "tab_id": "t12",
+  "session_token": "<this task's private token>",
+  "description": "Fill billing form",
+  "fields": [
+    { "selector": "#customer-name", "text": "Fixture Customer" },
+    { "selector": "#amount", "text": "12", "expected_value": "12.00" }
+  ]
+}
+```
+
+Every field is validated before any edits start, then existing authorized
+`type_text` operations run sequentially. The result contains `completed_count`,
+per-field receipts and, when requested, a fresh `snapshot` (8 KiB budget).
+There is no transaction, rollback, automatic retry, keypress or submit.
+Site input/change handlers may still have side effects. On failure,
+`fill_progress` reports completed count, failing zero-based `field_index`
+(or `phase:"observe"` after edits finish). Inspect before resuming; never
+resubmit the whole batch blindly. Final checkout/payment confirmation always
+remains a separate action.
+
 Check `list_tabs.capabilities` before optional operations. Chrome supports
 screenshots; Firefox requires `tabs.captureTab`, which may be unavailable.
 Use a DOM snapshot when screenshots are unsupported. `max_output_bytes` bounds
@@ -269,7 +336,9 @@ them. Field selectors are relative to each row, including its open shadow roots;
 `:scope` selects the row itself. Each field must match at most one rendered
 element. Omit `attribute` for rendered text, with editable values and hidden
 content redacted. Attributes are limited to `href`, `src`, `title`, `alt`,
-`datetime`, and `aria-label`; form values and HTML are not exposed. `href`/`src`
+`datetime`, `aria-label`, `id`, `class`, `type`, `name`, and `role`. Safe
+attributes remain available on form controls; their text/value and HTML are
+not exposed. `href`/`src`
 are resolved against the element's base URL and restricted to HTTP(S).
 
 Results contain `document`, `scope`, `rows`, `matched_count`, `returned_count`,

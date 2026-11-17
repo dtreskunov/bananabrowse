@@ -49,7 +49,7 @@ test('query_all uses normal authority, validation, capabilities and error projec
     call({ fields: { title: { selector: '.title', javascript: 'do not run' } } }),
     /INVALID_ARGUMENTS/,
   );
-  await assert.rejects(call({ description: 'too short' }), /INVALID_ARGUMENTS/);
+  await assert.rejects(call({ description: ' ' }), /INVALID_ARGUMENTS/);
   await assert.rejects(call({ tab_id: session.tabs[1].tab_id }), /CAPABILITY_UNAVAILABLE/);
   const foreign = await fixture.mcp('orion', OTHER_KEY);
   await assert.rejects(foreign.call('query_all', { tab_id, ...args }), /NOT_FOUND/);

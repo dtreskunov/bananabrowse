@@ -17,7 +17,7 @@ import { tools, INSTRUCTIONS } from '../mcp.js';
 
 const page = (key, extra = {}) => ({ key, title: `Page ${key}`, url: `https://example.test/${key}`, ...extra });
 
-test('public metadata and the 29-tool catalogue', async (t) => {
+test('public metadata and the 31-tool catalogue', async (t) => {
   const fixture = await start();
   t.after(() => fixture.close());
   const health = await (await fetch(`${fixture.base}/health`)).json();
@@ -26,7 +26,7 @@ test('public metadata and the 29-tool catalogue', async (t) => {
   assert.deepEqual([metadata.service, metadata.origin], ['bananabrowse', ORIGIN]);
   const agent = await fixture.mcp();
   const listed = await agent.client.listTools();
-  assert.equal(listed.tools.length, 29);
+  assert.equal(listed.tools.length, 31);
   assert.deepEqual(
     listed.tools.slice(0, 11).map((tool) => tool.name),
     [
@@ -43,7 +43,7 @@ test('public metadata and the 29-tool catalogue', async (t) => {
       'request_handoff',
     ],
   );
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 31);
 });
 
 test('agent authentication uses the path ID and a hashed bearer key', async (t) => {
@@ -79,8 +79,10 @@ test('agent guidance explains task ownership, retry-safe recovery, probes and ca
   assert.match(descriptions.request_session, /does not reuse another task's session/);
   assert.match(descriptions.list_sessions, /Never returns session_token or request_key/);
   assert.match(descriptions.list_browsers, /point-in-time observation/);
-  assert.match(descriptions.inspect_element, /matches:0.*matches:1.*matches>1/);
-  assert.match(descriptions.inspect_element, /Does not focus, scroll or mutate/);
+  assert.match(descriptions.inspect_element, /ambiguous selectors return up to five candidates with refs/);
+  assert.match(descriptions.inspect_element, /No focus, scrolling or mutation/);
+  assert.match(INSTRUCTIONS, /two selector probes.*stop guessing.*find_elements.*evaluate_script/);
+  assert.match(descriptions.fill_form, /Never clicks, presses keys, submits or confirms payments/);
   assert.match(descriptions.get_screenshot, /capabilities.*Firefox requires tabs.captureTab/);
   assert.match(descriptions.click, /confirms dispatch, not the intended application outcome/);
   assert.match(descriptions.evaluate_script, /return_as:"artifact"/);
@@ -451,7 +453,7 @@ test('page operations use the ready/execute handshake and stay caller-scoped', a
     [command.session_id, command.tab_id, command.description, command.agent_id],
     [session.session_id, tab, DESCRIPTION, 'atlas'],
   );
-  await assert.rejects(agent.call('get_text', { tab_id: tab, description: 'short' }), /INVALID_ARGUMENTS/);
+  await assert.rejects(agent.call('get_text', { tab_id: tab, description: ' ' }), /INVALID_ARGUMENTS/);
   await assert.rejects(
     agent.call('navigate', { tab_id: tab, url: 'https://control.test/', description: DESCRIPTION }),
     /HANDOFF_REQUIRED/,

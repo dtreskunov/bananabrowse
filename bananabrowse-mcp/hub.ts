@@ -1227,6 +1227,16 @@ export class Hub {
     const live = target.live;
     const probe = { live, target, operation };
     if (operation === 'query_all') requireExtension(live.conn, 'query_all');
+    if (
+      operation === 'find_elements' ||
+      (operation === 'query_all' &&
+        Object.values<{ attribute?: string }>(args.fields).some((field) =>
+          ['id', 'class', 'type', 'name', 'role'].includes(field.attribute ?? ''),
+        )) ||
+      args.expected_value !== undefined ||
+      (typeof description === 'string' && [...description.trim()].length < 40)
+    )
+      requireExtension(live.conn, 'form_tools');
     this.checkAuthority(probe);
     if (operation === 'navigate') {
       try {

@@ -184,4 +184,107 @@ for (const [name, engine] of [
       await browser.close();
     }
   });
+
+  test(`${name}: legacy controls, ambiguity candidates and scoped inspection expose usable refs`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <div id="confirm" onclick="this.dataset.clicked='yes'"><span>Confirm</span></div>
+        <button class="next" hidden>Hidden Next</button><div class="next" tabindex="0">Next</div>
+        <label id="card-label" for="card">Add Credit/Debit Card</label><input id="card" type="radio" style="opacity:0">
+        <label for="amount">Payment Amount</label><input id="amount" required>
+        <button id="native">Existing target</button>
+        <button aria-label="Next step">Next screen</button>
+      `);
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      const snapshot = await run('get_page_snapshot');
+      expect(snapshot.truncated).toBe(false);
+      expect(snapshot.elements.find((element) => element.name === 'Confirm').ref).toMatch(/^e\d+$/);
+      const existing = snapshot.elements.find((element) => element.name === 'Existing target');
+      const before = await page.evaluate(() => ({ focus: document.activeElement.tagName, x: scrollX, y: scrollY }));
+      const found = await run('find_elements', { text: 'Confirm' });
+      expect(found.matched_count).toBe(1);
+      expect(found.elements[0]).toMatchObject({ tag: 'div', name: 'Confirm', visible: true });
+      expect((await run('find_elements', { text: 'Next screen' })).elements[0].name).toBe('Next step');
+      expect((await run('find_elements', { text: 'Next step' })).matched_count).toBe(1);
+      const labelled = await run('find_elements', { label: 'Payment Amount' });
+      expect(labelled.elements[0]).toMatchObject({ value_present: false, valid: false });
+      expect((await run('find_elements', { text: 'No such control' })).elements).toEqual([]);
+      expect((await run('find_elements', { role: 'radio' })).elements).toEqual([]);
+      expect((await run('find_elements', { role: 'radio', include_hidden: true })).elements).toHaveLength(1);
+      const ambiguous = await run('inspect_element', { selector: '.next' });
+      expect(ambiguous).toMatchObject({ state: 'ambiguous', matches: 2, candidates_truncated: false });
+      expect(ambiguous.candidates.map((candidate) => candidate.visible)).toEqual([false, true]);
+      expect(await run('click', { selector: '.next' })).toMatchObject({
+        error: 'ELEMENT_AMBIGUOUS',
+        candidates: ambiguous.candidates,
+      });
+      const styled = await run('inspect_element', { selector: '#card' });
+      expect(styled.activation.ref).toMatch(/^e\d+$/);
+      expect(await page.evaluate(() => ({ focus: document.activeElement.tagName, x: scrollX, y: scrollY }))).toEqual(
+        before,
+      );
+      await run('click', { ref: styled.activation.ref, document: styled.document });
+      await expect(page.locator('#card')).toBeChecked();
+      await run('click', { ref: existing.ref, document: snapshot.document });
+      await run('click', { ref: found.elements[0].ref, document: found.document });
+      await expect(page.locator('#confirm')).toHaveAttribute('data-clicked', 'yes');
+      const scoped = await run('get_page_snapshot', { selector: '#confirm' });
+      expect(scoped.elements).toHaveLength(1);
+      expect(scoped.elements[0].name).toBe('Confirm');
+      expect(await run('click', { ref: found.elements[0].ref, document: found.document })).toMatchObject({
+        error: 'ELEMENT_STALE',
+      });
+      const inspected = await run('inspect_element', { selector: '#confirm' });
+      expect(await run('click', { ref: inspected.ref, document: inspected.document })).toMatchObject({ clicked: true });
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`${name}: form verification reports safe state, known formatting and rejection without values`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(
+        '<label for="amount">Amount</label><input id="amount" required><input id="secret" type="password">',
+      );
+      await page.locator('#amount').evaluate((element) => {
+        element.addEventListener('input', () => {
+          element.value = Number(element.value).toFixed(2);
+        });
+      });
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      const mismatch = await run('type_text', { selector: '#amount', text: '12' });
+      expect(mismatch).toMatchObject({
+        error: 'INPUT_NOT_APPLIED',
+        input_state: { value_present: true, value_changed: true, value_matches: false, valid: true },
+      });
+      const formatted = await run('type_text', { selector: '#amount', text: '14', expected_value: '14.00' });
+      expect(formatted).toMatchObject({
+        typed: true,
+        verification: 'expected_formatted_value',
+        input_state: { value_present: true, value_matches: true, valid: true },
+      });
+      await run('type_text', { selector: '#secret', text: 'fixture-payment-secret' });
+      const read = await run('get_text', { selector: '#secret' });
+      expect(read).toMatchObject({ text: '', empty_reason: 'VALUE_REDACTED', value_present: true });
+      const metadata = await run('query_all', {
+        selector: '#secret',
+        fields: {
+          id: { selector: ':scope', attribute: 'id' },
+          type: { selector: ':scope', attribute: 'type' },
+          value: { selector: ':scope' },
+        },
+      });
+      expect(metadata.rows).toEqual([{ id: 'secret', type: 'password', value: null }]);
+      for (const result of [mismatch, formatted, read, metadata, await run('get_page_snapshot')])
+        expect(JSON.stringify(result)).not.toContain('fixture-payment-secret');
+    } finally {
+      await browser.close();
+    }
+  });
 }

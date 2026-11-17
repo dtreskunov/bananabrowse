@@ -379,6 +379,9 @@ export class BrowserAdapter {
         ...(operation === 'inspect' ? { injection_reason: 'empty_result' } : {}),
       });
     }
+    const { next_ref, ...result } = response.result;
+    if (Number.isSafeInteger(next_ref)) this.refBases.set(tabId, next_ref);
+    response.result = result;
     if (response.result.error) {
       const { stale_reason, snapshot_document, current_document } = response.result;
       fail(response.result.error, {
@@ -390,11 +393,6 @@ export class BrowserAdapter {
         ...errorDetails({ ...response.result, code: response.result.error }),
       });
     }
-    if (operation === 'get_page_snapshot') {
-      const { next_ref, ...snapshot } = response.result;
-      if (Number.isSafeInteger(next_ref)) this.refBases.set(tabId, next_ref);
-      response.result = snapshot;
-    }
     if (operation === 'query_all') {
       response.result =
         args.return_as === 'artifact'
@@ -402,7 +400,9 @@ export class BrowserAdapter {
           : compactResult(operation, response.result, args);
     }
     return {
-      ...(['get_text', 'get_page_snapshot', 'get_interactive_elements', 'inspect_element'].includes(operation)
+      ...(['get_text', 'get_page_snapshot', 'find_elements', 'get_interactive_elements', 'inspect_element'].includes(
+        operation,
+      )
         ? (compactResult(operation, response.result, args) as Wire)
         : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}),
@@ -617,7 +617,7 @@ export class BrowserAdapter {
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
     let target: any;
-    if (!['inspect_element', 'query_all'].includes(operation) && (args.selector || args.ref)) {
+    if (!['inspect_element', 'query_all', 'find_elements'].includes(operation) && (args.selector || args.ref)) {
       target = await this.helper(grant.tabId, 'prepare_action', {
         ...args,
         action: operation,

@@ -200,3 +200,24 @@ schema 6 are unchanged, and existing browser registrations/pairings survive.
 - OAuth adds dynamic client registration, local consent and multiple paired
   browsers per identity. OAuth remains opt-in.
 - Beta.3's full-inventory validation and first-sync readiness fixes are retained.
+
+## BananaBrowse 1.0.0-beta.4 → beta.5
+
+Upgrade/rebuild the service first, replace the browser extension with numeric
+version 0.9.0.5, then rediscover MCP tools and instructions. Wire v6 and DB
+schema 6 are unchanged; registrations, pairings and task-owned sessions survive.
+
+- `find_elements` and inspection provide refs for arbitrary DOM controls,
+  exact text/label lookup and bounded ambiguity candidates. Snapshots also
+  include inferred clickable divs and associated labels. Discovery/inspection
+  preserve existing refs; a fresh snapshot still invalidates them.
+- `fill_form` validates and fills sequentially, stopping without retry or
+  rollback; submission remains separate. Errors report partial progress.
+- Reads and typing expose safe presence/validation state, never values.
+  `get_text` on editable content explicitly reports `VALUE_REDACTED`.
+  `type_text.expected_value` verifies known formatting without guessing.
+- Page descriptions may be concise nonblank text; old extensions require
+  an update before short descriptions or new features are dispatched.
+- `query_all` permits safe identifying attributes on controls while continuing
+  to redact values. Recovery hints recommend actionable discovery and focused
+  read-only script inspection instead of repeated selector guesses.

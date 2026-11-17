@@ -17,18 +17,11 @@ import { reattachCandidates, defaultBrowserName } from '../src/controller.js';
 
 const origin = 'https://control.example';
 
-test('descriptions enforce exactly forty trimmed characters and safe page errors exclude browser/source data', () => {
-  for (const description of [
-    'x',
-    'a'.repeat(39),
-    ' '.repeat(40),
-    ` ${'a'.repeat(39)} `,
-    'a'.repeat(501),
-    '😀'.repeat(39),
-  ]) {
+test('descriptions accept concise nonblank text and safe page errors exclude browser/source data', () => {
+  for (const description of ['', ' '.repeat(40), 'a'.repeat(501)]) {
     assert.equal(validDescription(description), false);
   }
-  for (const description of ['a'.repeat(40), 'a'.repeat(500), ` ${'a'.repeat(40)} `, '😀'.repeat(40)]) {
+  for (const description of ['Read amount', 'a', 'a'.repeat(500), ' Read amount ', '😀']) {
     assert.equal(validDescription(description), true);
   }
   assert.deepEqual(
@@ -64,7 +57,7 @@ test('manifests open the app window from the toolbar and keep site access option
     assert.equal(manifest.sidebar_action, undefined);
     assert.equal(manifest.host_permissions, undefined);
     assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
-    assert.equal(manifest.version, '0.9.0.4');
+    assert.equal(manifest.version, '0.9.0.5');
     // Firefox rejects version_name; its window shows the package version instead.
     assert.equal(manifest.version_name, browser === 'chrome' ? version : undefined);
   }

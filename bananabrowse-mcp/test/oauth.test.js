@@ -153,7 +153,7 @@ test('OAuth is opt-in; discovery challenges and API-key endpoints remain compati
   assert.equal(metadata.registration_endpoint, `${ORIGIN}/oauth/register`);
   assert.deepEqual(metadata.code_challenge_methods_supported, ['S256']);
   const legacy = await fixture.mcp();
-  assert.equal((await legacy.client.listTools()).tools.length, 29);
+  assert.equal((await legacy.client.listTools()).tools.length, 31);
   assert.equal((await mcpRequest(fixture, AGENT_KEY)).status, 401);
 });
 
@@ -584,5 +584,5 @@ test('SDK performs discovery, DCR, PKCE authorization, token exchange and MCP in
   assert(tokens.access_token);
   await client.close();
   await client.connect(new StreamableHTTPClientTransport(new URL(RESOURCE), options));
-  assert.equal((await client.listTools()).tools.length, 29);
+  assert.equal((await client.listTools()).tools.length, 31);
 });

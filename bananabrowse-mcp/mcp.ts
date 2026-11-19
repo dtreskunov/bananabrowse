@@ -13,6 +13,7 @@ import {
   SESSION_ID_SCHEMA,
   SESSION_TAB_LIMIT,
   schemaArgumentErrors,
+  operationArgumentErrors,
   waitErrorDetails,
   inspectionErrorDetails,
   errorDetails,
@@ -45,13 +46,31 @@ export interface Tool {
   name: string;
   description: string;
   inputSchema: Wire;
+  _meta?: { relatedTools?: string[] };
 }
+const RELATED: Record<string, string[]> = {
+  fill_form: ['inspect_form', 'select_option', 'set_checked'],
+  inspect_form: ['fill_form', 'find_elements', 'select_option', 'set_checked', 'click'],
+  type_text: ['select_option', 'set_checked', 'inspect_form'],
+  select_option: ['inspect_form', 'type_text', 'set_checked'],
+  set_checked: ['inspect_form', 'type_text', 'select_option'],
+  find_elements: ['inspect_form', 'click'],
+  get_page_snapshot: ['inspect_form', 'find_elements'],
+};
+const FILL_OPERATIONS: Record<string, string> = {
+  text: 'type_text',
+  select: 'select_option',
+  checkbox: 'set_checked',
+  radio: 'set_checked',
+};
 
 const NOTES: Record<string, string> = {
   get_page_snapshot:
-    'Preferred first read. Compact DOM summary, including inferred clickable divs and associated labels: 4000 text characters, 50 elements and 16 KiB by default. Narrow with selector; check truncation. Field values are redacted, with presence/validation state. Refs last until a new snapshot or document; find_elements and inspect_element add refs without invalidating existing ones.',
+    'Preferred first read. Compact DOM summary prioritizing form/main controls over navigation. 4000 text characters, 50 elements and 16 KiB by default. Narrow with selector; check truncation. Values are redacted. Native validity is not application acceptance; use inspect_form for constraints, application errors, options and combobox suggestions. Refs last until a new snapshot or document; discovery and inspection add refs.',
+  inspect_form:
+    'Read-only form inspection, optionally scoped by selector or ref/document. Reports required/type/format constraints, native_validity separately from aria_invalid and associated visible validation_messages, select options by index and linked combobox suggestions with clickable refs. Never returns field values or proves site acceptance. Use select_option with index for native selects, set_checked for checkbox/radio, type_text for text; click a suggestion ref to commit autocomplete choices. Adds refs without invalidating them. Needs extension 0.9.0.6.',
   find_elements:
-    'Find actionable targets by exact visible text, accessible form label, role or standard CSS. Works for nonsemantic divs too. Returns document-bound refs, names, visibility and safe form state; never values. Hidden matches require include_hidden:true. No focus, scrolling or mutation. Use this instead of guessing selectors; if still blocked, discover evaluate_script for focused read-only DOM inspection.',
+    'Find actionable targets by exact visible text, accessible form label, role or standard CSS. Works for nonsemantic divs too. Optional within:{ref,document} scopes to a container and open shadow roots (extension 0.9.0.6). Returns document-bound refs and safe state, never values. Hidden matches require include_hidden:true. Adds refs without invalidating existing ones. Use inspect_form to discover combobox suggestions, then click their refs.',
   get_text:
     'Read a focused selector/ref. Inputs return empty_reason:VALUE_REDACTED and safe presence/validation state, not their value. Default 4000 characters/16 KiB. timeout_ms:0 is immediate; positive waits return WAIT_TIMEOUT with last_error.',
   get_interactive_elements:
@@ -67,6 +86,8 @@ const NOTES: Record<string, string> = {
   type_text:
     'Replace an editable value; dispatch DOM input/change, not native keystrokes. Verifies exact equality after reconciliation and reports value_present/value_matches/value_changed/valid without values. For known site formatting supply expected_value explicitly. A mismatch remains uncertain: inspect, never blindly retry. Use fill_form to fill multiple fields sequentially without submitting.',
   set_checked: 'Set a native checkbox/radio through the input or its exact associated visible label.',
+  select_option:
+    'Select a native select option by value, or index from inspect_form (index needs extension 0.9.0.6). Not a text edit: use type_text for textboxes, set_checked for checkbox/radio, or inspect_form then click for custom combobox suggestions.',
   press_key: 'DOM keydown/keyup only. Browser default actions/shortcuts are not synthesized.',
   navigate:
     'Navigate the tab to ordinary HTTP(S), including from blank/browser-owned documents. Protected destinations are blocked. navigation_started is not proof of loaded content.',
@@ -208,8 +229,9 @@ export const tools: Tool[] = [
   },
   {
     name: 'fill_form',
+    _meta: { relatedTools: RELATED.fill_form },
     description:
-      'Fill up to 20 text fields sequentially using current refs/documents or exact CSS selectors. Validates all arguments before starting; stops on the first failure without rollback or retry. Returns per-field value-free receipts and an optional final snapshot. Never clicks, presses keys, submits or confirms payments. On error inspect fill_progress; completed edits remain applied. Needs extension 0.9.0.5.',
+      'Fill up to 20 fields sequentially. Legacy {selector,text} or {ref,document,text} remains supported (extension 0.9.0.5). Extension 0.9.0.6 adds kind:"text"|"select"|"checkbox"|"radio": text uses text/expected_value, select uses value or inspect_form option index, checkbox/radio uses checked (radio must be true). Reuses type_text/select_option/set_checked, including their normal control activation. Validates the entire argument batch before any mutation; stops at first failure without retry/rollback. fill_progress counts confirmed edits; the failing edit may have applied. Optional snapshot is observation, never site acceptance. Never submits or presses Enter. For autocomplete use inspect_form and click a linked suggestion separately.',
     inputSchema: schema(
       {
         ...tabTarget,
@@ -219,8 +241,13 @@ export const tools: Tool[] = [
           maxItems: 20,
           items: {
             type: 'object',
-            properties: OPERATION_SCHEMAS.type_text.properties,
-            required: OPERATION_SCHEMAS.type_text.required,
+            properties: {
+              ...OPERATION_SCHEMAS.type_text.properties,
+              ...OPERATION_SCHEMAS.select_option.properties,
+              ...OPERATION_SCHEMAS.set_checked.properties,
+              kind: { type: 'string', enum: ['text', 'select', 'checkbox', 'radio'] },
+            },
+            required: [],
             anyOf: OPERATION_SCHEMAS.type_text.anyOf,
             additionalProperties: false,
           },
@@ -256,6 +283,7 @@ export const tools: Tool[] = [
   },
   ...OPERATIONS.map((name) => ({
     name,
+    ...(RELATED[name] ? { _meta: { relatedTools: RELATED[name] } } : {}),
     description: `${name} in a session tab. ${NOTES[name] || ''}`.trim(),
     inputSchema: {
       ...schema({ ...tabTarget, ...OPERATION_SCHEMAS[name].properties, description }, [
@@ -479,6 +507,18 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
       ),
       ...(urls ? validateUrls(args) : []),
     ]);
+    if (name === 'fill_form') {
+      requireArguments(
+        args.fields.flatMap((field: Wire, index: number) => {
+          const { kind = 'text', ...edit } = field;
+          const operation = FILL_OPERATIONS[kind];
+          const errors = operationArgumentErrors(operation, edit);
+          if (kind === 'radio' && edit.checked === false)
+            errors.push({ field: 'checked', reason: 'radio_requires_true' });
+          return errors.map((error) => ({ ...error, field: `fields[${index}].${error.field}` }));
+        }),
+      );
+    }
     const credentials = { agentId: agent.id, sessionToken: args.session_token };
     let result: Wire | undefined;
     if (name === 'pair_browser')
@@ -521,20 +561,43 @@ export async function callTool(name: string, args: Wire, agent: Agent, hub: Hub,
     else if (name === 'list_artifacts') result = hub.artifacts.list(agent.id).map((meta) => publicArtifact(hub, meta));
     else if (name === 'read_artifact') result = readArtifact(hub, agent.id, args);
     else if (name === 'fill_form') {
+      hub.requireFeature(
+        credentials,
+        args.tab_id,
+        args.fields.some((field: Wire) => field.kind !== undefined || field.index !== undefined)
+          ? 'form_semantics'
+          : 'form_tools',
+      );
       const receipts: Wire[] = [];
       fillProgress = { completed_count: 0, field_index: 0, phase: 'fill' };
       for (const [index, field] of args.fields.entries()) {
         fillProgress.field_index = index;
+        const { kind = 'text', ...edit } = field;
+        const operation = FILL_OPERATIONS[kind];
         const receipt = await hub.operate(
           credentials,
           args.tab_id,
-          'type_text',
-          { ...field, expected_value: field.expected_value ?? field.text },
+          operation,
+          {
+            ...edit,
+            timeout_ms: 0,
+            ...(operation === 'type_text' ? { expected_value: edit.expected_value ?? edit.text } : {}),
+          },
           args.description,
           0,
           signal,
         );
-        receipts.push(receipt as Wire);
+        if (operation === 'select_option')
+          requireValue(
+            (receipt as Wire)?.selected === true ||
+              (edit.value !== undefined && (receipt as Wire)?.selected === edit.value),
+            'INVALID_RESULT',
+          );
+        receipts.push(
+          operation === 'select_option'
+            ? { selected: true, input_mode: (receipt as Wire).input_mode }
+            : (receipt as Wire),
+        );
         fillProgress.completed_count = receipts.length;
       }
       result = { completed_count: receipts.length, fields: receipts };

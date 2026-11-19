@@ -17,7 +17,7 @@ browser profile.
 
 ## Version
 
-**1.0.0-beta.5** (service and extension), browser wire **v6**, DB schema **6**.
+**1.0.0-beta.6** (service and extension), browser wire **v6**, DB schema **6**.
 BananaBrowse restarts versioning at 1.0.0; the last DomAgent release was
 6.1.0-beta.6. It accepts no DomAgent extension: install BananaBrowse,
 re-register browsers and re-pair agents. See [the upgrade notes](docs/V6-UPGRADE.md)
@@ -134,7 +134,7 @@ Tools include `pair_browser`, `list_browsers`, `unpair_browser`, `request_sessio
 `list_sessions`, `end_session`, `list_tabs`, `create_tab`, `close_tab`,
 `report_progress`, `request_handoff`, `list_artifacts`, `read_artifact`, `fill_form`,
 and page operations (`get_page_snapshot`, `get_text`,
-`get_interactive_elements`, `inspect_element`, `find_elements`, `query_all`, `click`, `type_text`,
+`get_interactive_elements`, `inspect_element`, `inspect_form`, `find_elements`, `query_all`, `click`, `type_text`,
 `select_option`, `set_checked`, `press_key`, `scroll`, `navigate`,
 `wait_for_page`, `evaluate_script`, `get_screenshot`, `clear_overlays`).
 
@@ -173,9 +173,13 @@ Use `find_elements` for exact text, form label, role or CSS lookup, including
 nonsemantic controls. Discovery and inspection return actionable refs; ambiguity
 returns bounded candidates rather than forcing selector guesses. A fresh snapshot
 invalidates earlier refs; discovery/inspection preserve them.
-`fill_form` fills up to 20 text fields sequentially, stops on the first failure
-without retry or rollback, and optionally returns a final snapshot. It never
-clicks or submits. Presence/validation state is returned without field values;
+`inspect_form` reports constraints, select options, linked autocomplete suggestions,
+and native HTML validity separately from application errors; neither proves site
+acceptance. `find_elements.within` scopes repeated labels to an inspected container.
+`fill_form` fills up to 20 text/select/checkbox/radio fields sequentially, stops on
+the first failure without retry or rollback, and optionally returns a final
+snapshot. It never submits or presses Enter; checks use ordinary control activation.
+Presence/validation state is returned without field values;
 known formatting can be checked with `type_text.expected_value`. See
 [form tools](bananabrowse-mcp/README.md#discovery-and-form-tools).
 Action receipts confirm dispatch, not application success: verify the resulting

@@ -400,9 +400,14 @@ export class BrowserAdapter {
           : compactResult(operation, response.result, args);
     }
     return {
-      ...(['get_text', 'get_page_snapshot', 'find_elements', 'get_interactive_elements', 'inspect_element'].includes(
-        operation,
-      )
+      ...([
+        'get_text',
+        'get_page_snapshot',
+        'find_elements',
+        'inspect_form',
+        'get_interactive_elements',
+        'inspect_element',
+      ].includes(operation)
         ? (compactResult(operation, response.result, args) as Wire)
         : response.result),
       ...(operation === 'inspect' && response.documentId ? { document_id: response.documentId } : {}),
@@ -617,7 +622,10 @@ export class BrowserAdapter {
     }
     const page = await this.waitForInspection(grant, args.timeout_ms ?? PAGE_WAIT_MS, check, operation === 'navigate');
     let target: any;
-    if (!['inspect_element', 'query_all', 'find_elements'].includes(operation) && (args.selector || args.ref)) {
+    if (
+      !['inspect_element', 'inspect_form', 'query_all', 'find_elements'].includes(operation) &&
+      (args.selector || args.ref)
+    ) {
       target = await this.helper(grant.tabId, 'prepare_action', {
         ...args,
         action: operation,

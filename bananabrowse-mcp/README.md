@@ -1,6 +1,6 @@
 # BananaBrowse service (v6)
 
-Self-hosted MCP server and browser hub. Service **1.0.0-beta.5**, wire **v6**,
+Self-hosted MCP server and browser hub. Service **1.0.0-beta.6**, wire **v6**,
 SQLite schema **6**. Node 22.13+ (built-in `node:sqlite`). See
 [architecture](../docs/ARCHITECTURE.md).
 
@@ -236,7 +236,10 @@ Descriptions remain required, but accept brief nonblank text (1–500 Unicode
 code points), such as "Find Confirm".
 
 Snapshots include associated labels and inferred clickable elements (onclick,
-tabindex or pointer cursor), not only semantic buttons. A focused snapshot
+tabindex or pointer cursor), not only semantic buttons. Inherited pointer-cursor
+descendants are not duplicated; distinct nested controls remain available.
+Form/main controls rank before page chrome, headings and repeated navigation.
+A focused snapshot
 includes its visible scope even if that element has no role.
 `find_elements` accepts standard CSS `selector`, exact rendered `text` or
 accessible name, exact form `label`, and/or `role`. Filters combine; hidden
@@ -244,6 +247,10 @@ elements are excluded unless `include_hidden:true`. It returns `document`,
 `elements` with refs and safe state, `matched_count`, `returned_count` and
 explicit truncation. Defaults are 50 elements and 16 KiB, capped at 100 and
 64 KiB. Zero matches is an explicit empty list. No focus or scrolling occurs.
+With extension 0.9.0.6, `within:{"ref":"e12","document":"<document from inspection>"}`
+limits matching to a previously inspected container and its open shadow roots.
+This disambiguates repeated Continue buttons or time slots without selecting an
+arbitrary visible/hidden match. Stale containers fail explicitly.
 
 `inspect_element` returns a ref for any unique element, and associated label
 activation refs for styled hidden radios/checkboxes. Ambiguity from inspection
@@ -260,7 +267,13 @@ inspection when necessary. Playwright `:has-text`, `:text-is`, and `text=`
 selectors are not CSS and are not accepted.
 
 Form reads expose `value_present`, HTML `valid`/validation flags and
-`value_redacted`, never values or validation messages. `get_text` on an input
+`value_redacted`, never field values. Native validity is separately named
+`native_validity`; `aria_invalid` and `application_validation` report application
+state (`invalid` or `not_reported`, never accepted). For example a phone field
+can have `native_validity.valid:true` and `aria_invalid:"true"` simultaneously.
+Associated, visible `validation_messages` are bounded and redact field values,
+including echoes in linked labels/helpers; native browser validation messages
+are not returned. `get_text` on an input
 explicitly returns `empty_reason:"VALUE_REDACTED"`. `type_text` returns an
 `input_state` receipt with presence, exact match, changed state and validity.
 For known site formatting supply `expected_value` explicitly; BananaBrowse
@@ -268,8 +281,24 @@ does not guess that an arbitrary changed value was accepted. A mismatch remains
 an uncertain mutation with safe state, not a success or an automatic retry.
 HTML validity and DOM equality do not prove application-level acceptance.
 
-`fill_form` takes 1–20 ordered `fields`, each using the `type_text` arguments,
-and optional `observe` (default true):
+`inspect_form` (extension 0.9.0.6) reads the document, or one `selector` or
+`ref`/`document` scope. It adds refs without invalidating existing ones.
+Its `elements` include required/type/format constraints, associated visible helper
+`descriptions`, native/application
+validation state, recommended operations, and native select `options` with
+`index`, `label` and `disabled` (not current values or selected state).
+Options are bounded to 20 per select; `options_truncated` is explicit.
+Linked visible listbox suggestions are bounded to 10 and include clickable refs:
+type the city/ZIP, inspect, then `click` the chosen suggestion ref with the returned
+`document`. DOM equality alone does not commit an autocomplete choice.
+Only top-level/open shadow DOM is inspected, never frames or closed roots.
+`application_acceptance:"unknown"` is intentional, including empty results.
+Defaults are 50 fields/16 KiB, capped at 100/64 KiB; check truncation and scope
+more narrowly when needed.
+
+`fill_form` takes 1–20 ordered `fields` and optional `observe` (default true).
+Existing text entries remain supported with extension 0.9.0.5. Extension 0.9.0.6
+adds explicit `kind:"text"|"select"|"checkbox"|"radio"`:
 
 ```json
 {
@@ -278,20 +307,39 @@ and optional `observe` (default true):
   "description": "Fill billing form",
   "fields": [
     { "selector": "#customer-name", "text": "Fixture Customer" },
-    { "selector": "#amount", "text": "12", "expected_value": "12.00" }
+    { "kind": "text", "selector": "#amount", "text": "12", "expected_value": "12.00" },
+    { "kind": "select", "selector": "#country", "index": 1 },
+    { "kind": "checkbox", "selector": "#terms", "checked": true },
+    { "kind": "radio", "selector": "#delivery", "checked": true }
   ]
 }
 ```
 
-Every field is validated before any edits start, then existing authorized
-`type_text` operations run sequentially. The result contains `completed_count`,
+Select edits use either `value` or the `index` from `inspect_form`; the standalone
+`select_option` also accepts `index` with extension 0.9.0.6. Radio edits require
+`checked:true`; clearing a radio requires choosing its alternative.
+Every field's arguments are validated before any edits start, then existing
+authorized `type_text`, `select_option`, or `set_checked` operations run
+sequentially with no readiness retry. Control/option readiness is checked when
+each edit runs, not reserved transactionally. The result contains `completed_count`,
 per-field receipts and, when requested, a fresh `snapshot` (8 KiB budget).
 There is no transaction, rollback, automatic retry, keypress or submit.
-Site input/change handlers may still have side effects. On failure,
+Checkbox/radio activation uses the ordinary checked operation, including its
+bound visible label. Site input/change handlers may still have side effects. On failure,
 `fill_progress` reports completed count, failing zero-based `field_index`
 (or `phase:"observe"` after edits finish). Inspect before resuming; never
-resubmit the whole batch blindly. Final checkout/payment confirmation always
+resubmit the whole batch blindly. A failing edit may have applied even when it
+is not counted as completed. Final checkout/payment confirmation always
 remains a separate action.
+
+New form capabilities use `EXTENSION_FEATURES.form_semantics:"0.9.0.6"`:
+upgrade the service first, then the extension and rediscover tools. New operations,
+scoping/index arguments and explicit mixed edit kinds fail before any batch
+mutation on older extensions; existing beta.5 text fill/discovery still work.
+Incompatible-control failures include advisory `recommended_tool` and
+`recommended_action`; related MCP tools also declare `_meta.relatedTools`
+(same-server tool names). Neither grants authority or automatically executes a
+companion operation.
 
 Check `list_tabs.capabilities` before optional operations. Chrome supports
 screenshots; Firefox requires `tabs.captureTab`, which may be unavailable.

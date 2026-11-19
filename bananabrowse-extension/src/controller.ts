@@ -140,6 +140,7 @@ const READ_OPERATIONS = [
   'get_page_snapshot',
   'get_interactive_elements',
   'inspect_element',
+  'inspect_form',
   'get_screenshot',
   'query_all',
 ];

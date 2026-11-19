@@ -111,6 +111,7 @@ export const EXTENSION_FEATURES = Object.freeze({
   query_all: '0.9.0.2',
   session_cleanup: '0.9.0.4',
   form_tools: '0.9.0.5',
+  form_semantics: '0.9.0.6',
 });
 export function versionAtLeast(version: unknown, minimum: string): boolean {
   const parts = (value: unknown) =>
@@ -227,6 +228,18 @@ export function errorDetails(error: unknown): Wire {
   if (!error || typeof error !== 'object') return {};
   const e = error as Wire,
     result: Wire = {};
+  if (
+    ['ELEMENT_NOT_EDITABLE', 'HANDOFF_REQUIRED'].includes(e.code) &&
+    ['type_text', 'select_option', 'set_checked', 'find_elements', 'request_handoff'].includes(e.recommended_tool)
+  ) {
+    result.recommended_tool = e.recommended_tool;
+    if (
+      ['replace_text', 'select_option', 'set_checked', 'inspect_suggestions', 'manual_input'].includes(
+        e.recommended_action,
+      )
+    )
+      result.recommended_action = e.recommended_action;
+  }
   if (['ELEMENT_AMBIGUOUS', 'INPUT_NOT_APPLIED', 'OUTCOME_UNKNOWN'].includes(e.code)) {
     if (e.input_state && typeof e.input_state === 'object') {
       result.input_state = Object.fromEntries(
@@ -459,8 +472,16 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
   get_screenshot: operation({}),
   get_interactive_elements: operation({ ...readElements, ...output }),
   get_page_snapshot: operation({ selector: target.selector, ...readText, ...readElements, ...output }),
+  inspect_form: operation({ ...target, ...readElements, ...output }),
   find_elements: operation({
     selector: target.selector,
+    within: {
+      type: 'object',
+      properties: { ref: target.ref, document: target.document },
+      required: ['ref', 'document'],
+      additionalProperties: false,
+      description: 'Limit discovery to this container ref and its open shadow descendants. Does not invalidate refs.',
+    },
     text: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact rendered text or accessible name.' },
     label: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact accessible name of a form control.' },
     role: { type: 'string', minLength: 1, maxLength: 80 },
@@ -507,7 +528,20 @@ export const OPERATION_SCHEMAS: Readonly<Record<string, OperationSpec>> = Object
     },
     ['selector', 'fields'],
   ),
-  select_option: operation({ ...targeted, value: text }, ['value'], true),
+  select_option: operation(
+    {
+      ...targeted,
+      value: text,
+      index: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 19_999,
+        description: 'Option index from inspect_form; alternative to value. Requires extension 0.9.0.6.',
+      },
+    },
+    [],
+    true,
+  ),
   set_checked: operation({ ...targeted, checked: { type: 'boolean' } }, ['checked'], true),
   press_key: operation(
     {
@@ -729,7 +763,13 @@ export function schemaArgumentErrors(spec: OperationSpec | undefined, args: unkn
   return errors;
 }
 export function operationArgumentErrors(name: string, args: unknown): ArgumentError[] {
-  return schemaArgumentErrors(name === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[name], args);
+  const errors = schemaArgumentErrors(name === 'request_handoff' ? HANDOFF_SCHEMA : OPERATION_SCHEMAS[name], args);
+  if (name === 'select_option' && args && typeof args === 'object') {
+    const input = args as Wire;
+    if ((input.index === undefined) === (input.value === undefined))
+      errors.push({ field: 'value', reason: 'required_exactly_one_value_or_index' });
+  }
+  return errors;
 }
 export function validOperationArgs(name: string, args: unknown): boolean {
   return operationArgumentErrors(name, args).length === 0;

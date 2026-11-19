@@ -1,4 +1,5 @@
 const path = require('node:path');
+const { mkdirSync } = require('node:fs');
 const { createRequire } = require('node:module');
 const localRequire = createRequire(path.join(__dirname, '../../../bananabrowse-mcp/package.json'));
 const { test, expect, chromium, firefox } = localRequire('@playwright/test');
@@ -11,7 +12,8 @@ const runHelper = (page, helper, operation, args = {}) =>
   });
 async function launchBrowser(engine) {
   const previous = process.env.TMPDIR;
-  process.env.TMPDIR = '/tmp';
+  process.env.TMPDIR = path.resolve(__dirname, '../../test-results/browser-runtime');
+  mkdirSync(process.env.TMPDIR, { recursive: true });
   try {
     return await engine.launch({ headless: true });
   } finally {
@@ -24,6 +26,189 @@ for (const [name, engine] of [
   ['chrome', chromium],
   ['firefox', firefox],
 ]) {
+  test(`${name}: exact discovery matches original names and text while outbound field data stays redacted`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <input type="checkbox" value="on">
+        <label for="phone">Phone<input value="nested-input-secret"></label>
+        <input id="phone" type="tel" value="fixture-private-value" aria-invalid="true" aria-describedby="error">
+        <p id="error">Rejected fixture-private-value <span contenteditable>editable-secret</span></p>
+        <div id="legacy" onclick="this.dataset.clicked='yes'" aria-label="Continue action">
+          <span>Legacy Confirm</span><input value="legacy-input-secret"><span contenteditable>legacy-editable-secret</span>
+        </div>
+        <label for="echo">Account fixture-private-value</label><input id="echo" value="fixture-private-value">
+      `);
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      const phone = await run('find_elements', { label: 'Phone' });
+      expect(phone.matched_count).toBe(1);
+      expect(phone.elements[0]).toMatchObject({ id: 'phone', tag: 'input' });
+      expect(phone.elements[0].name).toContain('[redacted]');
+      const legacy = await run('find_elements', { text: 'Legacy Confirm' });
+      expect(legacy.matched_count).toBe(1);
+      expect(legacy.elements[0].id).toBe('legacy');
+      const named = await run('find_elements', { text: 'Continue action' });
+      expect(named.elements[0].ref).toBe(legacy.elements[0].ref);
+      const echo = await run('find_elements', { label: 'Account fixture-private-value' });
+      expect(echo.matched_count).toBe(1);
+      expect(echo.elements[0].id).toBe('echo');
+      expect((await run('find_elements', { text: 'editable-secret' })).matched_count).toBe(0);
+      expect((await run('find_elements', { text: 'legacy-input-secret' })).matched_count).toBe(0);
+      const inspected = await run('inspect_form');
+      const snapshot = await run('get_page_snapshot');
+      const output = JSON.stringify({ phone, legacy, named, echo, inspected, snapshot });
+      for (const secret of [
+        'fixture-private-value',
+        'nested-input-secret',
+        'editable-secret',
+        'legacy-input-secret',
+        'legacy-editable-secret',
+      ])
+        expect(output).not.toContain(secret);
+      const currentLegacy = await run('find_elements', { text: 'Legacy Confirm' });
+      await run('click', { ref: currentLegacy.elements[0].ref, document: currentLegacy.document });
+      await expect(page.locator('#legacy')).toHaveAttribute('data-clicked', 'yes');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`${name}: form inspection distinguishes application errors, redacts linked content and exposes constraints and options`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <form id="form">
+          <label for="phone">Phone <span>5551234567</span><input value="label-secret"></label>
+          <input id="phone" type="tel" required pattern="[0-9]{10}" minlength="10" maxlength="10"
+            value="5551234567" aria-invalid="true" aria-describedby="phone-help" aria-errormessage="phone-error">
+          <p id="phone-help">Use ten digits for 5551234567 <input value="helper-secret"></p>
+          <p id="phone-error">Phone 5551234567 is not accepted <span contenteditable>editable-secret</span></p>
+          <label for="country">Country</label><select id="country" required>
+            <option value="">Choose country</option><option value="private-option-token">Canada</option>
+          </select>
+        </form>
+      `);
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      const before = await page.evaluate(() => ({ focus: document.activeElement.tagName, x: scrollX, y: scrollY }));
+      const result = await run('inspect_form', { selector: '#form' });
+      const phone = result.elements.find((field) => field.tag === 'input' && field.type === 'tel');
+      expect(phone).toMatchObject({
+        required: true,
+        constraints: { pattern: '[0-9]{10}', minlength: '10', maxlength: '10' },
+        native_validity: { valid: true, issues: [] },
+        aria_invalid: 'true',
+        application_validation: 'invalid',
+      });
+      expect(phone.validation_messages.join(' ')).toContain('is not accepted');
+      expect(result.application_acceptance).toBe('unknown');
+      const country = result.elements.find((field) => field.tag === 'select');
+      expect(country.options[1]).toEqual({ index: 1, label: 'Canada', disabled: false });
+      expect(country.recommended_tool).toBe('select_option');
+      for (const secret of ['5551234567', 'label-secret', 'helper-secret', 'editable-secret', 'private-option-token'])
+        expect(JSON.stringify(result)).not.toContain(secret);
+      expect(await page.evaluate(() => ({ focus: document.activeElement.tagName, x: scrollX, y: scrollY }))).toEqual(
+        before,
+      );
+      const snapshot = await run('get_page_snapshot');
+      expect(snapshot.elements.find((field) => field.name.startsWith('Phone'))).toMatchObject({
+        valid: true,
+        aria_invalid: 'true',
+        application_validation: 'invalid',
+      });
+      expect(await run('type_text', { selector: '#country', text: 'wrong operation' })).toMatchObject({
+        error: 'ELEMENT_NOT_EDITABLE',
+        recommended_tool: 'select_option',
+        recommended_action: 'select_option',
+      });
+      expect(await run('select_option', { selector: '#country', index: 1 })).toMatchObject({ selected: true });
+      await expect(page.locator('#country')).toHaveValue('private-option-token');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`${name}: ranked snapshots deduplicate inherited pointers and scoped discovery crosses only open roots`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <header>${Array.from({ length: 10 }, (_, index) => `<a href="#nav${index}" style="cursor:pointer"><span><span>Navigation ${index}</span></span></a>`).join('')}</header>
+        <main><form><label for="name">Name</label><input id="name"></form>
+          <section id="first"><button>Continue</button><button>10:00</button></section>
+          <section id="second"><button>Continue</button><div id="shadow"></div></section>
+          <div id="custom" style="cursor:pointer" onclick="this.dataset.clicked='yes'"><span>Custom action</span><button>Nested action</button></div>
+          <label for="check">Enable option</label><input id="check" type="checkbox" style="opacity:0">
+        </main>
+      `);
+      await page.locator('#shadow').evaluate((element) => {
+        element.attachShadow({ mode: 'open' }).innerHTML = '<button>10:00</button>';
+      });
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      const snapshot = await run('get_page_snapshot', { max_elements: 100 });
+      expect(snapshot.elements[0]).toMatchObject({ tag: 'input', name: 'Name' });
+      expect(snapshot.elements.filter((row) => row.name.startsWith('Navigation'))).toHaveLength(10);
+      expect(snapshot.elements.some((row) => row.tag === 'span')).toBe(false);
+      expect(snapshot.elements.some((row) => row.tag === 'div' && row.name.includes('Custom action'))).toBe(true);
+      expect(snapshot.elements.some((row) => row.tag === 'button' && row.name === 'Nested action')).toBe(true);
+      expect(snapshot.elements.some((row) => row.tag === 'label' && row.name === 'Enable option')).toBe(true);
+      const container = await run('inspect_element', { selector: '#second' });
+      const within = { ref: container.ref, document: container.document };
+      expect((await run('find_elements', { text: 'Continue' })).matched_count).toBe(2);
+      const found = await run('find_elements', { text: 'Continue', within });
+      expect(found.matched_count).toBe(1);
+      expect((await run('find_elements', { text: '10:00', within })).matched_count).toBe(1);
+      expect(
+        await run('find_elements', { text: 'Continue', within: { ...within, document: 'old-document' } }),
+      ).toMatchObject({ error: 'TARGET_STALE' });
+      await run('click', { ref: found.elements[0].ref, document: found.document });
+      await run('get_page_snapshot', { max_elements: 2 });
+      expect(await run('find_elements', { text: 'Continue', within })).toMatchObject({ error: 'ELEMENT_STALE' });
+    } finally {
+      await browser.close();
+    }
+  });
+
+  test(`${name}: native mixed edits and linked autocomplete suggestions use existing authorized operations`, async () => {
+    const { pageHelper } = await loadPageHelper();
+    const browser = await launchBrowser(engine);
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <form onsubmit="globalThis.submitted=true; return false">
+          <label for="city">City</label><input id="city" role="combobox" aria-controls="suggestions" aria-expanded="true" autocomplete="address-level2">
+          <div role="listbox" id="suggestions"><div role="option" onclick="document.querySelector('#city').value='Toronto'; this.parentElement.hidden=true; globalThis.suggestionChosen=true">Toronto, ON</div></div>
+          <select id="select"><option value="">Choose</option><option value="ca">Canada</option></select>
+          <label for="checkbox">Terms</label><input id="checkbox" type="checkbox">
+          <label for="radio">Delivery</label><input id="radio" type="radio">
+          <button type="submit">Continue</button>
+        </form>
+      `);
+      const run = (operation, args = {}) => runHelper(page, pageHelper, operation, args);
+      expect(await run('type_text', { selector: '#city', text: 'Tor' })).toMatchObject({ typed: true });
+      expect(await run('select_option', { selector: '#select', index: 1 })).toMatchObject({ selected: true });
+      expect(await run('set_checked', { selector: '#checkbox', checked: true })).toMatchObject({ checked: true });
+      expect(await run('set_checked', { selector: '#radio', checked: true })).toMatchObject({ checked: true });
+      const inspected = await run('inspect_form');
+      const city = inspected.elements.find((field) => field.name === 'City');
+      expect(city.suggestions).toHaveLength(1);
+      expect(city.suggestions[0].ref).toMatch(/^e\d+$/);
+      expect(city.suggestion_action).toBe('click');
+      await run('click', { ref: city.suggestions[0].ref, document: inspected.document });
+      await expect(page.locator('#city')).toHaveValue('Toronto');
+      await expect(page.locator('#checkbox')).toBeChecked();
+      await expect(page.locator('#radio')).toBeChecked();
+      expect(await page.evaluate(() => globalThis.suggestionChosen)).toBe(true);
+      expect(await page.evaluate(() => globalThis.submitted)).toBeUndefined();
+    } finally {
+      await browser.close();
+    }
+  });
+
   test(`${name}: styled hidden checkboxes use bound visible labels, never unrelated overlays or replacements`, async () => {
     const { pageHelper } = await loadPageHelper();
     const browser = await launchBrowser(engine);

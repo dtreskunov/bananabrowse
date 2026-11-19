@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { start, paired, DESCRIPTION, OTHER_KEY } from './helpers.js';
-import { resultBytes } from '../../shared/results.js';
+import { compactResult, resultBytes } from '../../shared/results.js';
+
+test('snapshot budgets retain ranked form controls before repetitive page text', () => {
+  const result = compactResult(
+    'get_page_snapshot',
+    {
+      text: 'Repeated navigation '.repeat(200),
+      elements: [{ ref: 'e1', role: 'textbox', name: 'Phone', value_redacted: true }],
+    },
+    { max_output_bytes: 1024 },
+  );
+  assert.equal(result.elements[0].name, 'Phone');
+  assert.equal(result.text_truncated, true);
+  assert.equal(result.elements_truncated, false);
+  assert(resultBytes(result) <= 1024);
+});
 
 async function setup(t, extensionVersion = '0.9.0.5') {
   const fixture = await start();
@@ -157,4 +172,127 @@ test('new discovery, formatted verification, short descriptions and batch fill r
     );
   }
   assert.equal(commands, 0);
+});
+
+test('mixed fill validates every edit first, dispatches existing operations once and reports recovery advice', async (t) => {
+  const { extension, agent, tab_id } = await setup(t, '0.9.0.6');
+  const calls = [];
+  extension.serve((command) => {
+    calls.push({ operation: command.operation, args: command.args });
+    if (command.args.selector === '#wrong')
+      return {
+        error: {
+          code: 'ELEMENT_NOT_EDITABLE',
+          recommended_tool: 'select_option',
+          recommended_action: 'select_option',
+          value: 'private',
+        },
+      };
+    if (command.operation === 'select_option')
+      return { selected: command.args.index !== undefined ? true : command.args.value, input_mode: 'dom' };
+    if (command.operation === 'set_checked') return { checked: true, input_mode: 'dom' };
+    return { typed: true, input_state: { value_matches: true } };
+  });
+  const fields = [
+    { selector: '#name', text: 'private-name' },
+    { kind: 'select', selector: '#country', index: 1 },
+    { kind: 'checkbox', selector: '#terms', checked: true },
+    { kind: 'radio', selector: '#delivery', checked: true },
+  ];
+  for (const invalid of [
+    { kind: 'select', selector: '#country' },
+    { kind: 'select', selector: '#country', index: 1, value: 'private' },
+    { kind: 'checkbox', selector: '#terms', text: 'private' },
+    { kind: 'radio', selector: '#delivery', checked: false },
+    { kind: 'text', selector: '#name', text: 'private', checked: true },
+  ]) {
+    await assert.rejects(
+      agent.call('fill_form', { tab_id, fields: [fields[0], invalid], description: 'Fill requested fields' }),
+      (error) => error.code === 'INVALID_ARGUMENTS' && !JSON.stringify(error.details).includes('private'),
+    );
+  }
+  assert.equal(calls.length, 0);
+  const result = await agent.call('fill_form', {
+    tab_id,
+    fields,
+    observe: false,
+    description: 'Fill requested fields',
+  });
+  assert.equal(result.completed_count, 4);
+  assert.deepEqual(
+    calls.map((call) => call.operation),
+    ['type_text', 'select_option', 'set_checked', 'set_checked'],
+  );
+  assert(calls.every((call) => call.args.timeout_ms === 0 && call.args.kind === undefined));
+  assert(!JSON.stringify(result).includes('private'));
+  const selected = await agent.call('fill_form', {
+    tab_id,
+    fields: [{ kind: 'select', selector: '#country', value: 'private-option-token' }],
+    observe: false,
+    description: 'Select requested country',
+  });
+  assert.deepEqual(selected.fields, [{ selected: true, input_mode: 'dom' }]);
+  calls.length = 0;
+  await assert.rejects(
+    agent.call('fill_form', {
+      tab_id,
+      fields: [fields[0], { selector: '#wrong', text: 'private' }, fields[2]],
+      description: 'Fill requested fields',
+    }),
+    (error) => {
+      assert.equal(error.code, 'ELEMENT_NOT_EDITABLE');
+      assert.deepEqual(error.details.fill_progress, { completed_count: 1, field_index: 1, phase: 'fill' });
+      assert.equal(error.details.recommended_tool, 'select_option');
+      assert.equal(error.details.recommended_action, 'select_option');
+      assert(!JSON.stringify(error.details).includes('private'));
+      return true;
+    },
+  );
+  assert.equal(calls.length, 2);
+  const { tools } = await agent.client.listTools();
+  assert.deepEqual(tools.find((tool) => tool.name === 'fill_form')._meta.relatedTools, [
+    'inspect_form',
+    'select_option',
+    'set_checked',
+  ]);
+  assert(tools.find((tool) => tool.name === 'type_text')._meta.relatedTools.includes('inspect_form'));
+});
+
+test('form semantics gates new operations and arguments before dispatch but preserves beta5 text fill', async (t) => {
+  const { extension, agent, tab_id } = await setup(t);
+  const calls = [];
+  extension.serve((command) => {
+    calls.push(command);
+    return { typed: true };
+  });
+  for (const [name, args] of [
+    ['inspect_form', {}],
+    ['find_elements', { text: 'Continue', within: { ref: 'e1', document: 'fixture-document' } }],
+    ['select_option', { selector: '#country', index: 1 }],
+    [
+      'fill_form',
+      {
+        fields: [
+          { selector: '#name', text: 'first' },
+          { kind: 'select', selector: '#country', value: 'x' },
+        ],
+      },
+    ],
+  ]) {
+    await assert.rejects(
+      agent.call(name, { tab_id, ...args, description: DESCRIPTION }),
+      (error) =>
+        error.code === 'CAPABILITY_UNAVAILABLE' &&
+        error.details.required_extension_version === '0.9.0.6' &&
+        error.details.dispatch_status === 'not_dispatched',
+    );
+  }
+  assert.equal(calls.length, 0);
+  await agent.call('fill_form', {
+    tab_id,
+    fields: [{ selector: '#name', text: 'legacy' }],
+    observe: false,
+    description: DESCRIPTION,
+  });
+  assert.equal(calls.length, 1);
 });

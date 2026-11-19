@@ -221,3 +221,25 @@ schema 6 are unchanged; registrations, pairings and task-owned sessions survive.
 - `query_all` permits safe identifying attributes on controls while continuing
   to redact values. Recovery hints recommend actionable discovery and focused
   read-only script inspection instead of repeated selector guesses.
+
+## BananaBrowse 1.0.0-beta.5 → beta.6
+
+Upgrade/rebuild the service first, replace the browser extension with numeric
+version 0.9.0.6, then rediscover MCP definitions. Wire v6 and DB schema 6 remain
+unchanged; browser registrations, pairings and task-owned sessions survive.
+
+- `inspect_form` exposes required fields, constraints, options and linked
+  autocomplete suggestions without returning entered values. Native HTML
+  validity is distinguished from application-level `aria-invalid` and associated
+  visible validation messages.
+- Typed `fill_form` edits use the existing text, select and checked-state
+  operations. Argument validation finishes before any edit starts; failures
+  preserve explicit partial progress. There is no automatic submit, retry or
+  rollback.
+- `find_elements.within` scopes repeated labels to the intended form or card.
+  Snapshots deduplicate inherited pointer-cursor noise and prioritize form/main
+  content.
+- Tool definitions advertise direct same-server companions through
+  `_meta.relatedTools`. Clients that do not use that metadata remain compatible.
+- New operations and arguments require the updated extension and fail before
+  dispatch on older versions with an explicit update requirement.

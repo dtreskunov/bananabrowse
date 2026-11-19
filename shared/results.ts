@@ -106,7 +106,9 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
   }
   let result: unknown = value;
   const hasText = ['get_text', 'get_page_snapshot'].includes(operation);
-  const hasElements = ['get_interactive_elements', 'get_page_snapshot', 'find_elements'].includes(operation);
+  const hasElements = ['get_interactive_elements', 'get_page_snapshot', 'find_elements', 'inspect_form'].includes(
+    operation,
+  );
   const textLimit = args.max_text_chars ?? DEFAULT_TEXT_CHARS;
   const elementLimit = args.max_elements ?? DEFAULT_ELEMENTS;
   if (
@@ -136,19 +138,14 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
       out.elements = input.elements.slice(0, elementLimit);
       out.truncated ||= out.elements.length < input.elements.length;
       out.elements_truncated = input.elements_truncated === true || out.elements.length < input.elements.length;
-      if (operation === 'find_elements') out.returned_count = out.elements.length;
+      if (['find_elements', 'inspect_form'].includes(operation)) out.returned_count = out.elements.length;
     }
-    // Trim only complete rows/text, never arbitrary JSON or mutation receipts.
-    while (resultBytes(out) > limit && hasElements && out.elements.length) {
-      out.elements.pop();
-      out.elements_truncated = out.truncated = true;
-      if (operation === 'find_elements') out.returned_count = out.elements.length;
-    }
-    if (resultBytes(out) > limit && hasText && out.text.length) {
+    const trimText = () => {
       const original = out.text;
+      out.text = '';
+      out.text_truncated = out.truncated = true;
       let low = 0,
         high = original.length;
-      out.text_truncated = out.truncated = true;
       while (low < high) {
         const middle = Math.ceil((low + high) / 2);
         out.text = prefix(original, middle);
@@ -156,7 +153,16 @@ export function compactResult(operation: string, value: unknown, args: Wire = {}
         else high = middle - 1;
       }
       out.text = prefix(original, low);
+    };
+    // Keep ranked controls before the often repetitive page text.
+    if (operation === 'get_page_snapshot' && resultBytes(out) > limit && out.text.length) trimText();
+    // Trim only complete rows/text, never arbitrary JSON or mutation receipts.
+    while (resultBytes(out) > limit && hasElements && out.elements.length) {
+      out.elements.pop();
+      out.elements_truncated = out.truncated = true;
+      if (['find_elements', 'inspect_form'].includes(operation)) out.returned_count = out.elements.length;
     }
+    if (resultBytes(out) > limit && hasText && out.text.length) trimText();
   }
   const bytes = resultBytes(result);
   if (bytes > limit) failure('RESULT_TOO_LARGE', { actual_bytes: bytes, limit_bytes: limit });

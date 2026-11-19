@@ -9,6 +9,7 @@ const actionHtml = `
 <input id="readonly" readonly value="fixture-readonly-secret">
 <button id="disabled" disabled>Disabled action</button>
 <button class="duplicate">First</button><button class="duplicate">Second</button>
+<button type="button" id="outside-continue">Continue</button>
 <label><input id="check" type="checkbox">Enable feature</label>
 <label id="styled-label" for="styled-check" style="display:inline-block;position:relative;width:160px;height:44px">
   Open styled navigation<input id="styled-check" type="checkbox"
@@ -33,11 +34,14 @@ const actionHtml = `
 <input id="offscreen" aria-label="Off-screen control" style="position:absolute;top:2200px;left:5px;width:3px">
 <form action="/submitted" method="post" id="echo-form">
   <label>Customer<input name="custname" type="text"></label>
-  <label>Phone<input name="custtel" type="tel"></label>
+  <label>Phone<input name="custtel" type="tel" value="fixture-phone-secret"
+    aria-invalid="true" aria-describedby="phone-error"></label>
+  <span id="phone-error">Phone fixture-phone-secret is not accepted.</span>
   <label>Email<input name="custemail" type="email"></label>
   <label>Search<input name="search" type="search"></label>
   <label><input name="size" value="large" type="radio">Large</label>
   <label><input name="topping" value="bacon" type="checkbox">Bacon</label>
+  <button type="button" id="form-continue">Continue</button>
   <button id="submit-fixture" type="submit">Submit fixture</button>
 </form>
 <script>
@@ -132,6 +136,7 @@ async function exerciseActions(call) {
     'fixture-textarea-secret',
     'fixture-editable-secret',
     'fixture-readonly-secret',
+    'fixture-phone-secret',
     'fixture-hidden-secret',
     'Stop sharing',
     'Unshared iframe control',
@@ -169,14 +174,64 @@ async function exerciseActions(call) {
     (await result('evaluate_script', { script: 'document.querySelector("#legacy-confirm").dataset.clicked' })).value,
     'yes',
   );
+  const form = await result('inspect_form', { selector: 'body' });
+  assert.equal(form.document, snapshot.document);
+  assert.equal(form.application_acceptance, 'unknown');
+  const field = (name) => {
+    const matches = form.elements.filter((element) => element.name === name);
+    assert.equal(matches.length, 1, `Unique inspected field: ${name}`);
+    return matches[0];
+  };
+  const phone = field('Phone');
+  assert.deepEqual(phone.native_validity, { valid: true, issues: [] });
+  assert.equal(phone.aria_invalid, 'true');
+  assert.equal(phone.application_validation, 'invalid');
+  assert(phone.validation_messages.some((message) => message.includes('is not accepted')));
+  assert.equal(JSON.stringify(form).includes('fixture-phone-secret'), false);
+  const colour = field('Colour');
+  const blue = colour.options.find((option) => option.label === 'Blue');
+  assert.equal(blue.index, 1);
+  assert.equal(blue.disabled, false);
+  const container = await result('inspect_element', { selector: '#echo-form' });
+  assert.equal((await result('find_elements', { text: 'Continue', role: 'button' })).matched_count, 2);
+  const scoped = await result('find_elements', {
+    text: 'Continue',
+    role: 'button',
+    within: { ref: container.ref, document: container.document },
+  });
+  assert.equal(scoped.matched_count, 1);
+  assert.equal(scoped.elements[0].id, 'form-continue');
+  const fieldTarget = (name) => ({ ref: field(name).ref, document: form.document });
   const filled = await result('fill_form', {
     fields: [
-      { ...target, text: 'Batch nickname' },
-      { selector: '#keyboard', text: 'Batch keyboard' },
+      { ...fieldTarget('Account nickname'), kind: 'text', text: 'Batch nickname' },
+      { ...fieldTarget('Keyboard target'), text: 'Batch keyboard' },
+      { ...fieldTarget('Colour'), kind: 'select', index: blue.index },
+      { ...fieldTarget('Enable feature'), kind: 'checkbox', checked: true },
+      { ...fieldTarget('Large'), kind: 'radio', checked: true },
     ],
     observe: false,
   });
-  assert.equal(filled.completed_count, 2);
+  assert.equal(filled.completed_count, 5);
+  assert.equal(filled.snapshot, undefined);
+  assert.equal(filled.fields[0].typed, true);
+  assert.deepEqual(filled.fields[2], { selected: true, input_mode: 'dom' });
+  assert.equal(filled.fields[3].checked, true);
+  assert.equal(filled.fields[4].checked, true);
+  assert.deepEqual(
+    (
+      await result('evaluate_script', {
+        script: `({
+      nickname: document.querySelector('#edit').value,
+      selected: document.querySelector('#select').selectedIndex,
+      checked: document.querySelector('#check').checked,
+      radio: document.querySelector('input[name="size"]').checked,
+      url: location.href
+    })`,
+      })
+    ).value,
+    { nickname: 'Batch nickname', selected: blue.index, checked: true, radio: true, url: snapshot.url },
+  );
   const fieldState = await result('get_text', { selector: '#edit' });
   assert.equal(fieldState.empty_reason, 'VALUE_REDACTED');
   assert.equal(fieldState.value_present, true);

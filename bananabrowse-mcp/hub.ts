@@ -1199,6 +1199,10 @@ export class Hub {
     }
     throw new Fault('NOT_FOUND', 404);
   }
+  requireFeature(credentials: SessionCredentials, tabId: unknown, feature: keyof typeof EXTENSION_FEATURES): void {
+    const target = this.findTarget(credentials, tabId);
+    requireExtension(target.live.conn, feature);
+  }
   async operate(
     credentials: SessionCredentials,
     tabId: unknown,
@@ -1226,6 +1230,12 @@ export class Hub {
     const target = this.findTarget(credentials, tabId);
     const live = target.live;
     const probe = { live, target, operation };
+    if (
+      operation === 'inspect_form' ||
+      args.within !== undefined ||
+      (operation === 'select_option' && args.index !== undefined)
+    )
+      requireExtension(live.conn, 'form_semantics');
     if (operation === 'query_all') requireExtension(live.conn, 'query_all');
     if (
       operation === 'find_elements' ||
